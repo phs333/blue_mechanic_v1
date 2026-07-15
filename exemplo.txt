@@ -1,0 +1,404 @@
+#include <Wire.h>
+#include <Preferences.h>
+
+// =================================================================
+// --- MAPEAMENTO DE PINOS: LADO ESQUERDO (FORÇA E TÉRMICA) ---
+// =================================================================
+#define DIR_X    4
+#define STEP_X   5
+#define DIR_Y    6
+#define STEP_Y   7
+#define DIR_Z    15
+#define STEP_Z   16
+#define EN_PIN   17  // Enable COMPARTILHADO para os 3 drivers
+#define TEMP_PIN 18  // Sensor DS18B20 (1-Wire)
+#define FAN_PIN  1   // MOSFET da Ventoinha 12V
+
+// =================================================================
+// --- MAPEAMENTO DE PINOS: LADO DIREITO (SENSORES E LÓGICA) ---
+// =================================================================
+#define SDA_0    21 // Encoder X
+#define SCL_0    20 // Encoder X
+#define SDA_1    42 // Encoder Y 
+#define SCL_1    41 // Encoder Y
+
+#define SWITCH_Z 19 // Fim de Curso Eixo Z (NF conectado ao GND)
+
+#define LASER_1_PIN 12
+#define LASER_2_PIN 14
+
+#define CAN_TX_PIN  48
+#define CAN_RX_PIN  47
+
+// --- CONFIGURAÇÃO PWM DOS LASERS (LEDC Nativo ESP32) ---
+const int pwmFreq = 5000;       // 5kHz para evitar flicker
+const int pwmResolution = 12;    // 13 bits = Escala interna de 0 a 8191
+const int pwmCanalLaser1 = 0;    
+const int pwmCanalLaser2 = 1;    
+
+// --- DIREÇÕES FÍSICAS DO ATUADOR Z ---
+#define Z_DIR_UP   LOW   
+#define Z_DIR_DOWN HIGH  
+
+// --- CONFIGURAÇÕES FÍSICAS E MATEMÁTICAS ---
+const float PASSOS_POR_VOLTA_MOTOR = 3200.0;  
+
+const float REDUCAO_X = 1.0;  // Eixo X Direct Drive (1:1)
+const float REDUCAO_Y = 1.0;  // Eixo Y Direct Drive (1:1)
+
+const float LIMITE_GRAUS_XY = 90.0; 
+const int PASSOS_ALIVIO_EXTRA_Z = 400; 
+
+const bool INVERTER_X = false; 
+const bool INVERTER_Y = false;  
+
+Preferences memoria;
+float home_X = 0.0;
+float home_Y = 0.0;
+
+int32_t max_passos_Z = 0;   
+int32_t atual_Z = 0;        
+int delay_movimento = 400; 
+
+// --- NOVA LÓGICA DE ALARME E EMERGÊNCIA ---
+bool alarme_z_ativo = true; // Define se o sensor Z deve ser vigiado (ALARM ON/OFF)
+bool z_bloqueado = false;   // Bloqueio de segurança isolado APENAS para o eixo Z
+bool em_homing_z = false; 
+
+// Protótipos
+float lerEncoderX();
+float lerEncoderY();
+float calcularDesvioMotor(char eixo);
+void ajustarEixoParaHome(char eixo, float alvo);
+bool switchZPressionado(); 
+
+void setup() {
+  // 1. A PRIMEIRA COISA A SE FAZER: Forçar os drivers a começarem DESLIGADOS
+  pinMode(EN_PIN, OUTPUT);
+  digitalWrite(EN_PIN, HIGH); 
+  
+  Serial.begin(115200);
+  
+  // 2. Espera a fonte 12V "pegar no tranco" e os capacitores de 100uF estabilizarem
+  delay(1500); 
+  
+  Wire.begin(SDA_0, SCL_0, 400000);
+  Wire.setTimeOut(20); 
+  Wire1.begin(SDA_1, SCL_1, 400000);
+  Wire1.setTimeOut(20);
+
+  pinMode(STEP_X, OUTPUT);  pinMode(DIR_X, OUTPUT);
+  pinMode(STEP_Y, OUTPUT);  pinMode(DIR_Y, OUTPUT);
+  pinMode(STEP_Z, OUTPUT);  pinMode(DIR_Z, OUTPUT);
+  pinMode(SWITCH_Z, INPUT_PULLUP);
+  pinMode(FAN_PIN, OUTPUT);
+
+  // Inicialização Nativa dos Lasers em 13 bits
+  ledcAttachChannel(LASER_1_PIN, pwmFreq, pwmResolution, pwmCanalLaser1);
+  ledcAttachChannel(LASER_2_PIN, pwmFreq, pwmResolution, pwmCanalLaser2);
+  ledcWrite(LASER_1_PIN, 0); 
+  ledcWrite(LASER_2_PIN, 0); 
+  
+  digitalWrite(FAN_PIN, LOW); // Garante ventoinha desligada no boot
+  
+  Serial.println("\n======================================");
+  Serial.println("SISTEMA ENERGIZADO: Iniciando Checagens...");
+  Serial.println("======================================");
+
+  // 3. Agora sim, com os 12V já presentes e limpos, energizamos as bobinas
+  digitalWrite(EN_PIN, LOW);  
+  delay(500); // Dá tempo para a bomba de carga interna do TMC2209 ligar
+
+  memoria.begin("cinetica", true);
+  home_X = memoria.getFloat("homeX", 0.0);
+  home_Y = memoria.getFloat("homeY", 0.0);
+  max_passos_Z = memoria.getInt("maxZ", 20000); 
+  memoria.end();
+
+  // --- NOVA ROTINA DE RESGATE DO Z (TIMEOUT CURTO) ---
+  if (switchZPressionado()) {
+    Serial.println("AVISO: Atuador Z caido sobre o switch (Gravidade).");
+    Serial.println("Elevando eixo Z com torque maximo para liberar o botao...");
+    digitalWrite(DIR_Z, Z_DIR_UP); 
+    
+    long timeoutSeguranca = 0;
+    // Timeout REDUZIDO! 4000 passos = ~8 segundos. Se não saiu do switch, aborta!
+    long limite_timeout = 4000; 
+
+    while (switchZPressionado() && timeoutSeguranca < limite_timeout) {
+      digitalWrite(STEP_Z, HIGH); delayMicroseconds(1000); 
+      digitalWrite(STEP_Z, LOW);  delayMicroseconds(1000);
+      timeoutSeguranca++;
+    }
+
+    if (timeoutSeguranca >= limite_timeout) {
+       Serial.println("ERRO CRITICO: Resgate falhou! Motor Z solto ou sem energia.");
+       Serial.println("Isolando falha: Eixo Z bloqueado, X e Y liberados.");
+       z_bloqueado = true; // Isola o problema no Z
+    } else {
+       // Sucesso! Sobe mais um pouco para aliviar a pressão do switch
+       for(int i = 0; i < PASSOS_ALIVIO_EXTRA_Z; i++) {
+         digitalWrite(STEP_Z, HIGH); delayMicroseconds(800); 
+         digitalWrite(STEP_Z, LOW);  delayMicroseconds(800);
+       }
+       atual_Z = 0;
+       Serial.println("Z recuado com sucesso.");
+    }
+  }
+
+  Serial.println("\nExecutando Auto-Ajuste X e Y...");
+  ajustarEixoParaHome('X', home_X);
+  ajustarEixoParaHome('Y', home_Y);
+
+  Serial.println("\n=== SISTEMA PRONTO PARA COMANDOS ===");
+}
+
+void loop() {
+  // Vigilância Contínua do Switch Z (Apenas se o Alarme estiver ON)
+  if (alarme_z_ativo && switchZPressionado() && !em_homing_z && !z_bloqueado) {
+    z_bloqueado = true; // Trava APENAS o eixo Z
+    Serial.println("\n[!] ALARME: Fim de curso Z acionado inesperadamente!");
+    Serial.println("[!] Movimentos no eixo Z suspensos. X, Y e Lasers operantes.");
+  }
+
+  if (Serial.available() > 0) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+    
+    // --- COMANDOS DO SISTEMA DE ALARME ---
+    if (comando == "ALARM OFF") {
+      alarme_z_ativo = false;
+      z_bloqueado = false; // Libera o Z do estado de falha
+      Serial.println("ALARME Z DESATIVADO. Fim de curso ignorado.");
+    }
+    else if (comando == "ALARM ON") {
+      alarme_z_ativo = true;
+      Serial.println("ALARME Z ATIVADO. Fim de curso em vigia.");
+    }
+    
+    // Comandos de Status e Home
+    else if (comando == "STATUS") {
+      float desvioFinalX = calcularDesvioMotor('X') / REDUCAO_X;
+      float desvioFinalY = calcularDesvioMotor('Y') / REDUCAO_Y;
+      Serial.print("Eixo X: "); Serial.print(lerEncoderX(), 2); Serial.println("°");
+      Serial.print("Eixo Y: "); Serial.print(lerEncoderY(), 2); Serial.println("°");
+      Serial.print("Eixo Z: "); Serial.print(atual_Z); Serial.println(" passos.");
+      Serial.print("Alarme Z: "); Serial.println(alarme_z_ativo ? "ON" : "OFF");
+      Serial.print("Estado Z: "); Serial.println(z_bloqueado ? "BLOQUEADO" : "LIVRE");
+    }
+    else if (comando == "DESLIGAR") { digitalWrite(EN_PIN, HIGH); } // Solta todos os motores
+    else if (comando == "LIGAR") { digitalWrite(EN_PIN, LOW); }    // Trava todos os motores
+    
+    else if (comando == "SETHOME X") {
+      home_X = lerEncoderX();
+      memoria.begin("cinetica", false); memoria.putFloat("homeX", home_X); memoria.end();
+      Serial.println("Home X gravado.");
+    }
+    else if (comando == "SETHOME Y") {
+      home_Y = lerEncoderY();
+      memoria.begin("cinetica", false); memoria.putFloat("homeY", home_Y); memoria.end();
+      Serial.println("Home Y gravado.");
+    }
+    
+    // --- CONTROLES DOS LASERS E VENTOINHA ---
+    else if (comando == "LASER 1 ON") { ledcWrite(LASER_1_PIN, 8191); }
+    else if (comando == "LASER 1 OFF") { ledcWrite(LASER_1_PIN, 0); }
+    else if (comando == "LASER 2 ON") { ledcWrite(LASER_2_PIN, 8191); }
+    else if (comando == "LASER 2 OFF") { ledcWrite(LASER_2_PIN, 0); }
+    else if (comando.startsWith("LASER 1 ")) {
+      int pwm = constrain(comando.substring(8).toInt(), 0, 255);
+      ledcWrite(LASER_1_PIN, map(pwm, 0, 255, 0, 8191));
+    }
+    else if (comando.startsWith("LASER 2 ")) {
+      int pwm = constrain(comando.substring(8).toInt(), 0, 255);
+      ledcWrite(LASER_2_PIN, map(pwm, 0, 255, 0, 8191));
+    }
+    else if (comando == "FAN 1") { digitalWrite(FAN_PIN, HIGH); }
+    else if (comando == "FAN 0") { digitalWrite(FAN_PIN, LOW); }
+
+    // --- CONTROLE DE VELOCIDADE ---
+    else if (comando.startsWith("VELOCIDADE ")) {
+      int vel = comando.substring(11).toInt();
+      if (vel == 1) delay_movimento = 2000;
+      else if (vel == 2) delay_movimento = 800;
+      else if (vel == 3) delay_movimento = 400;
+      else if (vel == 4) delay_movimento = 150;
+      else if (vel == 5) delay_movimento = 50;
+      Serial.println("Velocidade atualizada.");
+    }
+
+    // --- COMANDOS DE HOMING ---
+    else if (comando == "HOME Z") {
+      Serial.println("Buscando switch Z...");
+      z_bloqueado = false; // Um HOME forçado sempre limpa o erro
+      em_homing_z = true;
+      digitalWrite(DIR_Z, Z_DIR_DOWN); 
+      while (!switchZPressionado()) { 
+        digitalWrite(STEP_Z, HIGH); delayMicroseconds(400); digitalWrite(STEP_Z, LOW); delayMicroseconds(400);
+      }
+      digitalWrite(DIR_Z, Z_DIR_UP); 
+      while (switchZPressionado()) { 
+        digitalWrite(STEP_Z, HIGH); delayMicroseconds(800); digitalWrite(STEP_Z, LOW); delayMicroseconds(800);
+      }
+      for(int i = 0; i < PASSOS_ALIVIO_EXTRA_Z; i++) {
+        digitalWrite(STEP_Z, HIGH); delayMicroseconds(800); digitalWrite(STEP_Z, LOW); delayMicroseconds(800);
+      }
+      atual_Z = 0; em_homing_z = false;
+      Serial.println("Home Z finalizado.");
+    }
+
+    else if (comando == "SETLENGTH Z") {
+      if (switchZPressionado()) { Serial.println("ERRO: Atuador batido."); } 
+      else {
+        z_bloqueado = false;
+        em_homing_z = true;
+        digitalWrite(DIR_Z, Z_DIR_DOWN); 
+        int32_t descida = 0, recuo = 0;
+        while (!switchZPressionado()) {
+          digitalWrite(STEP_Z, HIGH); delayMicroseconds(400); digitalWrite(STEP_Z, LOW); delayMicroseconds(400);
+          descida++;
+        }
+        digitalWrite(DIR_Z, Z_DIR_UP); 
+        while (switchZPressionado()) {
+          digitalWrite(STEP_Z, HIGH); delayMicroseconds(800); digitalWrite(STEP_Z, LOW); delayMicroseconds(800);
+          recuo++;
+        }
+        for(int i = 0; i < PASSOS_ALIVIO_EXTRA_Z; i++) {
+          digitalWrite(STEP_Z, HIGH); delayMicroseconds(800); digitalWrite(STEP_Z, LOW); delayMicroseconds(800);
+          recuo++;
+        }
+        max_passos_Z = descida - recuo;
+        atual_Z = 0; em_homing_z = false;
+        memoria.begin("cinetica", false); memoria.putInt("maxZ", max_passos_Z); memoria.end();
+        Serial.println("Mapeamento Z finalizado.");
+      }
+    }
+    
+    else if (comando == "HOME X") { ajustarEixoParaHome('X', home_X); }
+    else if (comando == "HOME Y") { ajustarEixoParaHome('Y', home_Y); }
+    
+    // --- MOVIMENTAÇÃO DOS EIXOS ---
+    else if (comando.startsWith("MOVE ")) {
+      char eixo = comando.charAt(5);
+      int passos = comando.substring(7).toInt();
+      
+      if (eixo == 'X' || eixo == 'Y') {
+        int pino_step = (eixo == 'X') ? STEP_X : STEP_Y;
+        int pino_dir = (eixo == 'X') ? DIR_X : DIR_Y;
+        bool inverter = (eixo == 'X') ? INVERTER_X : INVERTER_Y;
+        float reducao = (eixo == 'X') ? REDUCAO_X : REDUCAO_Y;
+        
+        bool giraPositivo = (passos > 0);
+        if (inverter) giraPositivo = !giraPositivo;
+        
+        float grausPorPasso = 360.0 / PASSOS_POR_VOLTA_MOTOR;
+        float movimentoDesejado = (giraPositivo ? 1 : -1) * abs(passos) * grausPorPasso;
+        
+        float desvioAtual = calcularDesvioMotor(eixo);
+        float desvioAlvo = desvioAtual + movimentoDesejado;
+        float limite = LIMITE_GRAUS_XY * reducao; 
+        
+        if (desvioAlvo > limite) desvioAlvo = limite;
+        else if (desvioAlvo < -limite) desvioAlvo = -limite;
+        
+        float grausPermitidos = desvioAlvo - desvioAtual;
+        if (abs(grausPermitidos) < grausPorPasso) return;
+
+        int passosExecutar = abs(grausPermitidos) / grausPorPasso;
+        digitalWrite(pino_dir, (grausPermitidos > 0) ^ inverter ? HIGH : LOW);
+        
+        for (int i = 0; i < passosExecutar; i++) {
+          digitalWrite(pino_step, HIGH); delayMicroseconds(delay_movimento);
+          digitalWrite(pino_step, LOW);  delayMicroseconds(delay_movimento);
+        }
+      } 
+      else if (eixo == 'Z') {
+        if (z_bloqueado) {
+          Serial.println("AVISO: Eixo Z esta bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
+          return; // Aborta o movimento apenas do Z
+        }
+
+        bool direcaoZ = passos > 0 ? Z_DIR_UP : Z_DIR_DOWN; 
+        digitalWrite(DIR_Z, direcaoZ);
+        passos = abs(passos);
+        
+        for (int i = 0; i < passos; i++) {
+          if (direcaoZ == Z_DIR_DOWN) { 
+            if (atual_Z <= 0) break; 
+            atual_Z--; 
+          } else { 
+            if (atual_Z >= max_passos_Z) break; 
+            atual_Z++; 
+          }
+          digitalWrite(STEP_Z, HIGH); delayMicroseconds(delay_movimento);
+          digitalWrite(STEP_Z, LOW);  delayMicroseconds(delay_movimento);
+        }
+      }
+    }
+  }
+}
+
+bool switchZPressionado() {
+  if (digitalRead(SWITCH_Z) == HIGH) {
+    delay(5); // Debounce físico básico
+    if (digitalRead(SWITCH_Z) == HIGH) return true; 
+  }
+  return false;
+}
+
+float calcularDesvioMotor(char eixo) {
+  float atual = (eixo == 'X') ? lerEncoderX() : lerEncoderY();
+  float home = (eixo == 'X') ? home_X : home_Y;
+  float erro = atual - home;
+  while (erro > 180.0) erro -= 360.0;
+  while (erro < -180.0) erro += 360.0;
+  return erro;
+}
+
+void ajustarEixoParaHome(char eixo, float alvo) {
+  int pino_step = (eixo == 'X') ? STEP_X : STEP_Y;
+  int pino_dir = (eixo == 'X') ? DIR_X : DIR_Y;
+  bool inverter = (eixo == 'X') ? INVERTER_X : INVERTER_Y;
+  
+  for (int tentativa = 1; tentativa <= 3; tentativa++) {
+    float atual = (eixo == 'X') ? lerEncoderX() : lerEncoderY();
+    float erro = alvo - atual;
+    while (erro > 180.0) erro -= 360.0;
+    while (erro < -180.0) erro += 360.0;
+
+    if (abs(erro) <= 0.3) break; 
+
+    int passosParaDar = abs(erro) / (360.0 / PASSOS_POR_VOLTA_MOTOR);
+    if (passosParaDar == 0) break; 
+
+    digitalWrite(pino_dir, (erro > 0) ^ inverter ? HIGH : LOW);
+
+    for (int i = 0; i < passosParaDar; i++) {
+      digitalWrite(pino_step, HIGH); delayMicroseconds(800); 
+      digitalWrite(pino_step, LOW);  delayMicroseconds(800);
+    }
+    delay(150); 
+  }
+}
+
+float lerEncoderX() {
+  Wire.beginTransmission(0x36); Wire.write(0x0E);
+  if (Wire.endTransmission() != 0) return 0.0;
+  Wire.requestFrom(0x36, 2);
+  if (Wire.available() == 2) {
+    uint16_t raw = Wire.read() << 8; raw |= Wire.read();
+    return (raw * 360.0) / 4096.0; 
+  }
+  return 0.0;
+}
+
+float lerEncoderY() {
+  Wire1.beginTransmission(0x36); Wire1.write(0x0E);
+  if (Wire1.endTransmission() != 0) return 0.0;
+  Wire1.requestFrom(0x36, 2);
+  if (Wire1.available() == 2) {
+    uint16_t raw = Wire1.read() << 8; raw |= Wire1.read();
+    return (raw * 360.0) / 4096.0;
+  }
+  return 0.0;
+}

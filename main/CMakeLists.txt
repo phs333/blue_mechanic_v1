@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "storage.c"
+        "hardware.c"
+        "motion.c"
+        "commands.c"
+        "tmc2209.c"
+        "can_bus.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_driver_i2c
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_twai
+        esp_driver_uart
+        esp_driver_rmt
+        esp_rom
+)

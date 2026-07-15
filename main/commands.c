@@ -26,7 +26,7 @@ void commands_print_help(void)
     puts("ALARM ON / ALARM OFF");
     puts("SETHOME X / SETHOME Y");
     puts("HOME X / HOME Y / HOME Z");
-    puts("SETLENGTH Z");
+    puts("SETLENGTH Z <passos>");
     puts("MOVE X <passos>");
     puts("MOVE Y <passos>");
     puts("MOVE Z <passos>");
@@ -186,14 +186,18 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strcmp(cmd, "SETLENGTH Z") == 0) {
-        esp_err_t err = motion_post_map_z(ctx, 0, 0);
+    long steps_z = 0;
+    if (sscanf(cmd, "SETLENGTH Z %ld", &steps_z) == 1) {
+        if (steps_z <= 0 || steps_z > 100000) {
+            puts("Valor invalido para limite Z (deve ser entre 1 e 100000).");
+            return;
+        }
+        ctx->settings.max_passos_z = (int32_t)steps_z;
+        esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
-            printf("Mapeamento Z finalizado. Curso util: %ld passos.\n", (long)ctx->settings.max_passos_z);
-        } else if (err == ESP_ERR_INVALID_STATE) {
-            puts("ERRO: atuador ja esta pressionando o fim de curso.");
+            printf("Limite Z definido manualmente para %ld passos.\n", steps_z);
         } else {
-            printf("ERRO no SETLENGTH Z: %s\n", esp_err_to_name(err));
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
         }
         return;
     }

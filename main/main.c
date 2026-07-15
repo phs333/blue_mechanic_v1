@@ -91,7 +91,6 @@ void app_main(void) {
 
   ESP_ERROR_CHECK(motion_init(&g_app));
 
-  (void)motion_post_recover_z(&g_app);
   if (tmc2209_init(&g_app) != ESP_OK) {
     ESP_LOGW(APP_TAG,
              "TMC UART nao entrou totalmente. STEP/DIR continua habilitado.");

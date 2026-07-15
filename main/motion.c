@@ -6,7 +6,6 @@
 
 #include "driver/gpio.h"
 #include "esp_check.h"
-#include "esp_task_wdt.h"
 #include "hardware.h"
 #include "storage.h"
 #include "can_bus.h"
@@ -69,34 +68,6 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
     return ESP_OK;
 }
 
-static esp_err_t do_motion_recover_z_if_needed(app_context_t *ctx)
-{
-    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
-
-    if (!hardware_is_z_switch_pressed()) {
-        return ESP_OK;
-    }
-
-    gpio_set_level(DIR_Z, Z_DIR_UP);
-
-    int32_t steps = 0;
-    while (hardware_is_z_switch_pressed() && steps < Z_RESCUE_TIMEOUT_STEPS) {
-        hardware_step_pulse(STEP_Z, 1000);
-        ++steps;
-    }
-
-    if (steps >= Z_RESCUE_TIMEOUT_STEPS && hardware_is_z_switch_pressed()) {
-        ctx->state.z_bloqueado = true;
-        return ESP_ERR_TIMEOUT;
-    }
-
-    for (int32_t i = 0; i < PASSOS_ALIVIO_EXTRA_Z; ++i) {
-        hardware_step_pulse(STEP_Z, 800);
-    }
-
-    ctx->state.atual_z = 0;
-    return ESP_OK;
-}
 
 static esp_err_t do_motion_home_z(app_context_t *ctx)
 {
@@ -147,65 +118,7 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     return ESP_OK;
 }
 
-static esp_err_t do_motion_map_z_length(app_context_t *ctx)
-{
-    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
-    if (hardware_is_z_switch_pressed()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    ctx->state.z_bloqueado = false;
-    ctx->state.em_homing_z = true;
-
-    gpio_set_level(DIR_Z, Z_DIR_DOWN);
-    int32_t descida = 0;
-    while (!hardware_is_z_switch_pressed() && descida < Z_LENGTH_SEARCH_LIMIT_STEPS) {
-        hardware_step_pulse(STEP_Z, 400);
-        ++descida;
-    }
-
-    if (descida >= Z_LENGTH_SEARCH_LIMIT_STEPS && !hardware_is_z_switch_pressed()) {
-        ctx->state.em_homing_z = false;
-        ctx->state.z_bloqueado = true;
-        xSemaphoreGive(ctx->motion_mutex);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    gpio_set_level(DIR_Z, Z_DIR_UP);
-    int32_t recuo = 0;
-    while (hardware_is_z_switch_pressed() && recuo < Z_HOME_RELEASE_LIMIT_STEPS) {
-        hardware_step_pulse(STEP_Z, 800);
-        ++recuo;
-    }
-
-    if (recuo >= Z_HOME_RELEASE_LIMIT_STEPS && hardware_is_z_switch_pressed()) {
-        ctx->state.em_homing_z = false;
-        ctx->state.z_bloqueado = true;
-        xSemaphoreGive(ctx->motion_mutex);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    for (int32_t i = 0; i < PASSOS_ALIVIO_EXTRA_Z; ++i) {
-        hardware_step_pulse(STEP_Z, 800);
-        ++recuo;
-    }
-
-    ctx->settings.max_passos_z = descida - recuo;
-    if (ctx->settings.max_passos_z < 0) {
-        ctx->settings.max_passos_z = 0;
-    }
-
-    ctx->state.atual_z = 0;
-    ctx->state.em_homing_z = false;
-    xSemaphoreGive(ctx->motion_mutex);
-
-    return storage_save_settings(&ctx->settings);
-}
 
 static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requested_steps)
 {
@@ -365,12 +278,6 @@ static void motion_task(void *arg)
                     err = do_motion_adjust_axis_to_home(ctx, cmd.axis);
                 }
                 break;
-            case MOTION_CMD_RECOVER_Z:
-                err = do_motion_recover_z_if_needed(ctx);
-                break;
-            case MOTION_CMD_MAP_Z_LENGTH:
-                err = do_motion_map_z_length(ctx);
-                break;
             }
 
             if (ctx->state.can_online && cmd.opcode != 0) {
@@ -425,26 +332,4 @@ esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id
     return enqueue_motion_cmd(ctx, &cmd);
 }
 
-esp_err_t motion_post_map_z(app_context_t *ctx, uint8_t sender_id, uint8_t opcode)
-{
-    motion_cmd_t cmd = {
-        .type = MOTION_CMD_MAP_Z_LENGTH,
-        .axis = 'Z',
-        .steps = 0,
-        .sender_node_id = sender_id,
-        .opcode = opcode
-    };
-    return enqueue_motion_cmd(ctx, &cmd);
-}
 
-esp_err_t motion_post_recover_z(app_context_t *ctx)
-{
-    motion_cmd_t cmd = {
-        .type = MOTION_CMD_RECOVER_Z,
-        .axis = 'Z',
-        .steps = 0,
-        .sender_node_id = 0,
-        .opcode = 0
-    };
-    return enqueue_motion_cmd(ctx, &cmd);
-}

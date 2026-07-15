@@ -151,9 +151,7 @@ typedef struct {
 
 typedef enum {
     MOTION_CMD_MOVE_REL,
-    MOTION_CMD_HOME,
-    MOTION_CMD_RECOVER_Z,
-    MOTION_CMD_MAP_Z_LENGTH
+    MOTION_CMD_HOME
 } motion_cmd_type_t;
 
 typedef struct {

@@ -7,6 +7,9 @@
 #include "driver/uart.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_rom_gpio.h"
+#include "soc/gpio_sig_map.h"
+#include "storage.h"
 
 
 #define TMC_UART_PORT UART_NUM_1
@@ -21,6 +24,7 @@
 #define TMC_REG_IOIN 0x06U
 #define TMC_REG_IHOLD_IRUN 0x10U
 #define TMC_REG_TPOWERDOWN 0x11U
+#define TMC_REG_CHOPCONF 0x6CU
 
 static bool s_uart_installed;
 
@@ -208,7 +212,23 @@ static esp_err_t tmc_uart_init(const persisted_settings_t *settings)
     ESP_RETURN_ON_ERROR(uart_driver_install(TMC_UART_PORT, TMC_UART_RX_BUF_SIZE, 0, 0, NULL, 0), APP_TAG, "Falha ao instalar UART TMC");
     s_uart_installed = true;
     ESP_RETURN_ON_ERROR(uart_param_config(TMC_UART_PORT, &uart_cfg), APP_TAG, "Falha ao configurar UART TMC");
-    ESP_RETURN_ON_ERROR(uart_set_pin(TMC_UART_PORT, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), APP_TAG, "Falha ao configurar pinos UART TMC");
+
+    if (tx_pin == rx_pin) {
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << tx_pin),
+            .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&io_conf), APP_TAG, "Falha ao configurar GPIO Open-Drain para UART");
+
+        esp_rom_gpio_connect_out_signal(tx_pin, U1TXD_OUT_IDX, false, false);
+        esp_rom_gpio_connect_in_signal(tx_pin, U1RXD_IN_IDX, false);
+    } else {
+        ESP_RETURN_ON_ERROR(uart_set_pin(TMC_UART_PORT, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), APP_TAG, "Falha ao configurar pinos UART TMC");
+    }
+
     ESP_RETURN_ON_ERROR(uart_flush_input(TMC_UART_PORT), APP_TAG, "Falha ao limpar RX UART TMC");
     return ESP_OK;
 }
@@ -270,6 +290,11 @@ static esp_err_t tmc_read_register_raw(uint8_t slave_addr, uint8_t reg_addr, uin
     ESP_RETURN_ON_FALSE(uart_write_bytes(TMC_UART_PORT, request, sizeof(request)) == (int)sizeof(request), ESP_FAIL, APP_TAG, "Falha ao enviar read UART");
     ESP_RETURN_ON_ERROR(uart_wait_tx_done(TMC_UART_PORT, pdMS_TO_TICKS(20)), APP_TAG, "Timeout TX UART TMC");
 
+    if (TMC_UART_TX_PIN == TMC_UART_RX_PIN) {
+        uint8_t dummy[4];
+        (void)uart_read_bytes(TMC_UART_PORT, dummy, sizeof(request), pdMS_TO_TICKS(10));
+    }
+
     int len = uart_read_bytes(TMC_UART_PORT, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(TMC_UART_REPLY_TIMEOUT_MS));
     ESP_RETURN_ON_FALSE(len >= 8, ESP_ERR_TIMEOUT, APP_TAG, "Sem resposta UART TMC");
 
@@ -294,10 +319,28 @@ static esp_err_t tmc_read_register_raw(uint8_t slave_addr, uint8_t reg_addr, uin
     return ESP_ERR_INVALID_CRC;
 }
 
+static int microsteps_to_mres(uint16_t microsteps)
+{
+    switch (microsteps) {
+    case 256: return 0;
+    case 128: return 1;
+    case 64:  return 2;
+    case 32:  return 3;
+    case 16:  return 4;
+    case 8:   return 5;
+    case 4:   return 6;
+    case 2:   return 7;
+    case 1:   return 8;
+    default:  return 4; // fallback 16
+    }
+}
+
 static esp_err_t tmc_apply_axis_defaults(app_context_t *ctx, size_t axis_index)
 {
     uint32_t verify_value = 0;
     uint32_t gconf = (1U << 6) | (1U << 7);
+    int mres = microsteps_to_mres(ctx->settings.tmc_microsteps[axis_index]);
+    uint32_t chopconf = 0x10000053U | ((uint32_t)mres << 24); // 16 micropassos (mres=4) com interpolacao para 256 (intpol=1)
     uint32_t ihold_irun =
         ((uint32_t)(ctx->settings.tmc_ihold_delay[axis_index] & 0x0FU) << 16) |
         ((uint32_t)(ctx->settings.tmc_irun[axis_index] & 0x1FU) << 8) |
@@ -311,6 +354,10 @@ static esp_err_t tmc_apply_axis_defaults(app_context_t *ctx, size_t axis_index)
         tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_GCONF, gconf),
         APP_TAG,
         "Falha ao gravar GCONF");
+    ESP_RETURN_ON_ERROR(
+        tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_CHOPCONF, chopconf),
+        APP_TAG,
+        "Falha ao gravar CHOPCONF");
     ESP_RETURN_ON_ERROR(
         tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_IHOLD_IRUN, ihold_irun),
         APP_TAG,
@@ -341,4 +388,39 @@ uint16_t tmc2209_cs_to_ma(uint8_t cs)
         cs = 31;
     }
     return (uint16_t)(((float)cs + 1.0f) * 59.846f);
+}
+
+esp_err_t tmc2209_set_spreadcycle(app_context_t *ctx, char axis, bool enabled)
+{
+    uint32_t gconf = 0;
+    ESP_RETURN_ON_ERROR(tmc2209_read_register(ctx, axis, TMC_REG_GCONF, &gconf), APP_TAG, "Erro ao ler GCONF");
+    if (enabled) {
+        gconf |= (1U << 2);
+    } else {
+        gconf &= ~(1U << 2);
+    }
+    ESP_RETURN_ON_ERROR(tmc2209_write_register(ctx, axis, TMC_REG_GCONF, gconf), APP_TAG, "Erro ao gravar GCONF");
+    return ESP_OK;
+}
+
+esp_err_t tmc2209_set_microsteps(app_context_t *ctx, char axis, uint16_t microsteps)
+{
+    size_t axis_index = 0;
+    if (!axis_to_index(axis, &axis_index)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    int mres = microsteps_to_mres(microsteps);
+    if (mres < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint32_t chopconf = 0;
+    ESP_RETURN_ON_ERROR(tmc2209_read_register(ctx, axis, TMC_REG_CHOPCONF, &chopconf), APP_TAG, "Erro ao ler CHOPCONF");
+    chopconf &= ~(0x0FU << 24);
+    chopconf |= ((uint32_t)mres << 24);
+    ESP_RETURN_ON_ERROR(tmc2209_write_register(ctx, axis, TMC_REG_CHOPCONF, chopconf), APP_TAG, "Erro ao gravar CHOPCONF");
+
+    ctx->settings.tmc_microsteps[axis_index] = microsteps;
+    (void)storage_save_settings(&ctx->settings);
+    return ESP_OK;
 }

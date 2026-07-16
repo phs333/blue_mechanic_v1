@@ -38,7 +38,7 @@
 #define CAN_RX_PIN GPIO_NUM_47
 
 #define TMC_UART_TX_PIN GPIO_NUM_8
-#define TMC_UART_RX_PIN GPIO_NUM_9
+#define TMC_UART_RX_PIN GPIO_NUM_8
 
 // =================================================================
 // --- CONFIGURACAO ---
@@ -125,6 +125,7 @@ typedef struct {
     uint8_t tmc_ihold[AXIS_COUNT];
     uint8_t tmc_irun[AXIS_COUNT];
     uint8_t tmc_ihold_delay[AXIS_COUNT];
+    uint16_t tmc_microsteps[AXIS_COUNT];
 } persisted_settings_t;
 
 typedef struct {
@@ -185,7 +186,8 @@ typedef struct {
         .tmc_slave_addr = {0, 1, 2},        \
         .tmc_ihold = {8, 8, 8},             \
         .tmc_irun = {20, 20, 20},           \
-        .tmc_ihold_delay = {6, 6, 6}        \
+        .tmc_ihold_delay = {6, 6, 6},       \
+        .tmc_microsteps = {16, 16, 16}      \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \

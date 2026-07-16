@@ -10,10 +10,29 @@
 #include "storage.h"
 #include "can_bus.h"
 
+static float get_deg_per_step(app_context_t *ctx, char axis);
 static float normalize_angle_deg(float angle);
 static esp_err_t compute_axis_deviation(app_context_t *ctx, char axis, float *deviation_deg);
 static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps);
 static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps);
+
+static float get_deg_per_step(app_context_t *ctx, char axis)
+{
+    size_t axis_index = 0;
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (axis_upper == 'X') {
+        axis_index = AXIS_X_ID;
+    } else if (axis_upper == 'Y') {
+        axis_index = AXIS_Y_ID;
+    } else {
+        return 1.8f / 16.0f;
+    }
+    uint16_t msteps = ctx->settings.tmc_microsteps[axis_index];
+    if (msteps == 0) {
+        msteps = 16;
+    }
+    return 360.0f / (200.0f * (float)msteps);
+}
 
 
 static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
@@ -54,7 +73,8 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
             break;
         }
 
-        int32_t steps_to_move = (int32_t)floorf(fabsf(error_deg) / GRAUS_POR_PASSO_XY);
+        float deg_per_step = get_deg_per_step(ctx, axis_upper);
+        int32_t steps_to_move = (int32_t)floorf(fabsf(error_deg) / deg_per_step);
         if (steps_to_move <= 0) {
             break;
         }
@@ -190,7 +210,8 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
         positive_motion = !positive_motion;
     }
 
-    float requested_move_deg = (positive_motion ? 1.0f : -1.0f) * fabsf((float)requested_steps) * GRAUS_POR_PASSO_XY;
+    float deg_per_step = get_deg_per_step(ctx, axis);
+    float requested_move_deg = (positive_motion ? 1.0f : -1.0f) * fabsf((float)requested_steps) * deg_per_step;
     float target_deviation_deg = current_deviation_deg + requested_move_deg;
     float limit_deg = LIMITE_GRAUS_XY * reduction;
 
@@ -201,11 +222,11 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     float permitted_move_deg = target_deviation_deg - current_deviation_deg;
-    if (fabsf(permitted_move_deg) < GRAUS_POR_PASSO_XY) {
+    if (fabsf(permitted_move_deg) < deg_per_step) {
         return ESP_OK;
     }
 
-    int32_t steps_to_execute = (int32_t)floorf(fabsf(permitted_move_deg) / GRAUS_POR_PASSO_XY);
+    int32_t steps_to_execute = (int32_t)floorf(fabsf(permitted_move_deg) / deg_per_step);
     if (steps_to_execute <= 0) {
         return ESP_OK;
     }

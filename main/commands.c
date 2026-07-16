@@ -40,6 +40,8 @@ void commands_print_help(void)
 
     puts("DRIVER UART ADDR X|Y|Z <0..3>");
     puts("DRIVER UART CURRENT X|Y|Z <ihold_mA> <irun_mA> <delay>");
+    puts("DRIVER UART SPREADCYCLE X|Y|Z ON|OFF");
+    puts("DRIVER UART MICROSTEPS X|Y|Z <1..256>");
     puts("DRIVER REG READ X|Y|Z <reg>");
     puts("DRIVER REG WRITE X|Y|Z <reg> <valor>");
     puts("DRIVER APPLY");
@@ -390,6 +392,40 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             printf("Corrente TMC do eixo %c salva.\n", driver_axis);
         } else {
             printf("ERRO ao salvar corrente TMC: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    char mode_token[24];
+    if (sscanf(cmd, "DRIVER UART SPREADCYCLE %c %23s", &driver_axis, mode_token) == 2) {
+        driver_axis = (char)toupper((unsigned char)driver_axis);
+        to_upper_ascii(mode_token);
+        bool enable = false;
+        if (strcmp(mode_token, "ON") == 0) {
+            enable = true;
+        } else if (strcmp(mode_token, "OFF") == 0) {
+            enable = false;
+        } else {
+            puts("Modo invalido. Use ON ou OFF.");
+            return;
+        }
+        esp_err_t err = tmc2209_set_spreadcycle(ctx, driver_axis, enable);
+        if (err == ESP_OK) {
+            printf("Eixo %c SPREADCYCLE definido para %s\n", driver_axis, mode_token);
+        } else {
+            printf("ERRO ao configurar SPREADCYCLE: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    unsigned microsteps_val = 0;
+    if (sscanf(cmd, "DRIVER UART MICROSTEPS %c %u", &driver_axis, &microsteps_val) == 2) {
+        driver_axis = (char)toupper((unsigned char)driver_axis);
+        esp_err_t err = tmc2209_set_microsteps(ctx, driver_axis, (uint16_t)microsteps_val);
+        if (err == ESP_OK) {
+            printf("Eixo %c MICROSTEPS definido para %u\n", driver_axis, microsteps_val);
+        } else {
+            printf("ERRO ao configurar MICROSTEPS: %s\n", esp_err_to_name(err));
         }
         return;
     }

@@ -11,3 +11,5 @@ esp_err_t tmc2209_write_register(app_context_t *ctx, char axis, uint8_t reg_addr
 void tmc2209_print_status(const app_context_t *ctx);
 uint8_t tmc2209_ma_to_cs(uint16_t ma);
 uint16_t tmc2209_cs_to_ma(uint8_t cs);
+esp_err_t tmc2209_set_spreadcycle(app_context_t *ctx, char axis, bool enabled);
+esp_err_t tmc2209_set_microsteps(app_context_t *ctx, char axis, uint16_t microsteps);

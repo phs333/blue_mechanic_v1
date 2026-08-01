@@ -26,7 +26,7 @@
 #define TMC_REG_TPOWERDOWN 0x11U
 #define TMC_REG_CHOPCONF 0x6CU
 
-static bool s_uart_installed;
+static volatile bool s_uart_installed;
 
 static bool axis_to_index(char axis, size_t *axis_index);
 static const char *axis_name_from_index(size_t axis_index);
@@ -188,13 +188,16 @@ static void reset_axis_online_flags(app_context_t *ctx)
 static void tmc_uart_deinit(void)
 {
     if (s_uart_installed) {
-        (void)uart_driver_delete(TMC_UART_PORT);
-        s_uart_installed = false;
+        esp_err_t del_err = uart_driver_delete(TMC_UART_PORT);
+        if (del_err == ESP_OK || del_err == ESP_ERR_INVALID_STATE) {
+            s_uart_installed = false;
+        }
     }
 }
 
 static esp_err_t tmc_uart_init(const persisted_settings_t *settings)
 {
+    esp_err_t ret = ESP_OK;
     gpio_num_t tx_pin = TMC_UART_TX_PIN;
     gpio_num_t rx_pin = TMC_UART_RX_PIN;
 
@@ -209,9 +212,8 @@ static esp_err_t tmc_uart_init(const persisted_settings_t *settings)
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    ESP_RETURN_ON_ERROR(uart_driver_install(TMC_UART_PORT, TMC_UART_RX_BUF_SIZE, 0, 0, NULL, 0), APP_TAG, "Falha ao instalar UART TMC");
-    s_uart_installed = true;
-    ESP_RETURN_ON_ERROR(uart_param_config(TMC_UART_PORT, &uart_cfg), APP_TAG, "Falha ao configurar UART TMC");
+    ESP_GOTO_ON_ERROR(uart_driver_install(TMC_UART_PORT, TMC_UART_RX_BUF_SIZE, 0, 0, NULL, 0), err, APP_TAG, "Falha ao instalar UART TMC");
+    ESP_GOTO_ON_ERROR(uart_param_config(TMC_UART_PORT, &uart_cfg), err, APP_TAG, "Falha ao configurar UART TMC");
 
     if (tx_pin == rx_pin) {
         gpio_config_t io_conf = {
@@ -221,16 +223,21 @@ static esp_err_t tmc_uart_init(const persisted_settings_t *settings)
             .pull_down_en = GPIO_PULLDOWN_DISABLE,
             .intr_type = GPIO_INTR_DISABLE,
         };
-        ESP_RETURN_ON_ERROR(gpio_config(&io_conf), APP_TAG, "Falha ao configurar GPIO Open-Drain para UART");
+        ESP_GOTO_ON_ERROR(gpio_config(&io_conf), err, APP_TAG, "Falha ao configurar GPIO Open-Drain para UART");
 
         esp_rom_gpio_connect_out_signal(tx_pin, U1TXD_OUT_IDX, false, false);
         esp_rom_gpio_connect_in_signal(tx_pin, U1RXD_IN_IDX, false);
     } else {
-        ESP_RETURN_ON_ERROR(uart_set_pin(TMC_UART_PORT, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), APP_TAG, "Falha ao configurar pinos UART TMC");
+        ESP_GOTO_ON_ERROR(uart_set_pin(TMC_UART_PORT, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), err, APP_TAG, "Falha ao configurar pinos UART TMC");
     }
 
-    ESP_RETURN_ON_ERROR(uart_flush_input(TMC_UART_PORT), APP_TAG, "Falha ao limpar RX UART TMC");
+    ESP_GOTO_ON_ERROR(uart_flush_input(TMC_UART_PORT), err, APP_TAG, "Falha ao limpar RX UART TMC");
+    s_uart_installed = true;
     return ESP_OK;
+
+err:
+    (void)uart_driver_delete(TMC_UART_PORT);
+    return ret;
 }
 
 static uint8_t tmc_crc8(const uint8_t *data, size_t len)

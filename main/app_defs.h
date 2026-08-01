@@ -148,6 +148,7 @@ typedef struct {
     volatile uint32_t can_rx_count;
     volatile uint32_t can_tx_count;
     volatile uint32_t can_last_error_flags;
+    volatile uint32_t last_cmd_seq;
 } runtime_state_t;
 
 typedef enum {

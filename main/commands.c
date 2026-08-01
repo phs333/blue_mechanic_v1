@@ -1,6 +1,7 @@
 #include "commands.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -512,6 +513,16 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     uint32_t bitrate = 0;
     if (sscanf(cmd, "CAN BITRATE %" SCNu32, &bitrate) == 1) {
+        switch (bitrate) {
+        case 125000U:
+        case 250000U:
+        case 500000U:
+        case 1000000U:
+            break;
+        default:
+            puts("Bitrate invalido. Use 125000, 250000, 500000 ou 1000000.");
+            return;
+        }
         ctx->settings.can_bitrate = bitrate;
         esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
@@ -571,7 +582,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         }
 
         if (err == ESP_OK) {
-            printf("MOVE %c concluido.\n", axis);
+            printf("MOVE %c enfileirado.\n", axis);
         } else {
             printf("ERRO no MOVE %c: %s\n", axis, esp_err_to_name(err));
         }

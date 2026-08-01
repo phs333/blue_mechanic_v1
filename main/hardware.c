@@ -21,6 +21,7 @@ static const gpio_num_t k_laser_pins[2] = {LASER_1_PIN, LASER_2_PIN};
 static const ledc_channel_t k_laser_channels[2] = {LEDC_CHANNEL_0, LEDC_CHANNEL_1};
 static i2c_master_bus_handle_t k_encoder_buses[2];
 static i2c_master_dev_handle_t k_encoder_devices[2];
+static SemaphoreHandle_t s_i2c_mutex = NULL;
 
 static esp_err_t init_gpio_matrix(void);
 static esp_err_t init_i2c_buses(void);
@@ -117,6 +118,11 @@ esp_err_t hardware_init(app_context_t *ctx)
     ESP_RETURN_ON_ERROR(init_i2c_buses(), APP_TAG, "Falha ao iniciar I2C");
     ESP_RETURN_ON_ERROR(init_led_pwm(ctx), APP_TAG, "Falha ao iniciar PWM");
 
+    s_i2c_mutex = xSemaphoreCreateMutex();
+    if (s_i2c_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     hardware_set_driver_enable(ctx, true);
     vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -125,18 +131,10 @@ esp_err_t hardware_init(app_context_t *ctx)
 
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us)
 {
-    static uint32_t s_accumulated_delay_us = 0;
-
     gpio_set_level(step_pin, 1);
     esp_rom_delay_us(delay_us);
     gpio_set_level(step_pin, 0);
     esp_rom_delay_us(delay_us);
-
-    s_accumulated_delay_us += (delay_us * 2);
-    if (s_accumulated_delay_us >= 200000U) {
-        vTaskDelay(1);
-        s_accumulated_delay_us = 0;
-    }
 }
 
 esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
@@ -280,6 +278,9 @@ esp_err_t hardware_read_temperature_c(float *temp_c)
 
     int16_t raw = (int16_t)(((uint16_t)scratchpad[1] << 8) | scratchpad[0]);
     *temp_c = (float)raw / 16.0f;
+    if (*temp_c < -55.0f || *temp_c > 125.0f) {
+        return ESP_ERR_INVALID_CRC;
+    }
     return ESP_OK;
 }
 
@@ -405,17 +406,62 @@ static esp_err_t init_led_pwm(app_context_t *ctx)
 
 static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
 {
-    uint8_t reg = ENCODER_REG_ANGLE;
-    uint8_t raw_data[2] = {0};
     ESP_RETURN_ON_FALSE(encoder_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Encoder invalido");
 
-    ESP_RETURN_ON_ERROR(
-        i2c_master_transmit_receive(k_encoder_devices[encoder_index], &reg, sizeof(reg), raw_data, sizeof(raw_data), ENCODER_I2C_TIMEOUT_MS),
-        APP_TAG,
-        "Falha na leitura do encoder");
+    if (s_i2c_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(ENCODER_I2C_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    uint8_t reg = ENCODER_REG_ANGLE;
+    uint8_t raw_data[2] = {0};
+    esp_err_t err = i2c_master_transmit_receive(k_encoder_devices[encoder_index], &reg, sizeof(reg), raw_data, sizeof(raw_data), ENCODER_I2C_TIMEOUT_MS);
+
+    xSemaphoreGive(s_i2c_mutex);
+
+    if (err != ESP_OK) {
+        return err;
+    }
 
     uint16_t raw = ((uint16_t)raw_data[0] << 8) | raw_data[1];
     raw &= 0x0FFF;
     *angle_deg = ((float)raw * 360.0f) / 4096.0f;
     return ESP_OK;
+}
+
+void hardware_deinit(void)
+{
+    if (s_i2c_mutex != NULL) {
+        vSemaphoreDelete(s_i2c_mutex);
+        s_i2c_mutex = NULL;
+    }
+
+    for (size_t i = 0; i < 2; ++i) {
+        if (k_encoder_devices[i] != NULL) {
+            i2c_master_bus_rm_device(k_encoder_devices[i]);
+            k_encoder_devices[i] = NULL;
+        }
+        if (k_encoder_buses[i] != NULL) {
+            i2c_del_master_bus(k_encoder_buses[i]);
+            k_encoder_buses[i] = NULL;
+        }
+    }
+
+    if (s_rmt_copy_encoder != NULL) {
+        rmt_del_encoder(s_rmt_copy_encoder);
+        s_rmt_copy_encoder = NULL;
+    }
+    if (s_rmt_y_chan != NULL) {
+        rmt_disable(s_rmt_y_chan);
+        rmt_del_channel(s_rmt_y_chan);
+        s_rmt_y_chan = NULL;
+    }
+    if (s_rmt_x_chan != NULL) {
+        rmt_disable(s_rmt_x_chan);
+        rmt_del_channel(s_rmt_x_chan);
+        s_rmt_x_chan = NULL;
+    }
 }

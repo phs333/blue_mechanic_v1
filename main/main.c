@@ -83,6 +83,12 @@ void app_main(void) {
     return;
   }
 
+  g_app.state_mutex = xSemaphoreCreateMutex();
+  if (g_app.state_mutex == NULL) {
+    ESP_LOGE(APP_TAG, "Falha ao criar mutex de estado");
+    return;
+  }
+
   ESP_ERROR_CHECK(storage_init());
   ESP_ERROR_CHECK(storage_load_settings(&g_app.settings));
   ESP_ERROR_CHECK(hardware_init(&g_app));

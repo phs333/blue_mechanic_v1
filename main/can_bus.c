@@ -19,7 +19,7 @@ typedef struct {
     uint8_t data[TWAI_FRAME_MAX_LEN];
 } can_rx_slot_t;
 
-static app_context_t *s_ctx;
+static volatile app_context_t *s_ctx;
 static twai_node_handle_t s_node;
 static TaskHandle_t s_can_task_handle;
 static SemaphoreHandle_t s_rx_free_sem;
@@ -33,7 +33,7 @@ static void prepare_rx_pool_once(void);
 static void can_task(void *arg);
 static esp_err_t can_node_start(app_context_t *ctx);
 static void can_node_stop(app_context_t *ctx);
-static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len);
+static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len, bool can_online);
 esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0, uint8_t arg1);
 static uint8_t speed_level_from_delay(uint32_t delay_us);
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame);
@@ -60,18 +60,28 @@ esp_err_t can_bus_apply_settings(app_context_t *ctx)
     ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
     can_node_stop(ctx);
-    ctx->state.can_rx_count = 0;
-    ctx->state.can_tx_count = 0;
-    ctx->state.can_last_error_flags = 0;
+
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ctx->state.can_rx_count = 0;
+        ctx->state.can_tx_count = 0;
+        ctx->state.can_last_error_flags = 0;
+        xSemaphoreGive(ctx->state_mutex);
+    }
 
     if (!ctx->settings.can_enabled) {
-        ctx->state.can_online = false;
+        if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ctx->state.can_online = false;
+            xSemaphoreGive(ctx->state_mutex);
+        }
         ESP_LOGI(APP_TAG, "CAN/TWAI desativado por configuracao.");
         return ESP_OK;
     }
 
     if (!validate_can_settings(&ctx->settings)) {
-        ctx->state.can_online = false;
+        if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ctx->state.can_online = false;
+            xSemaphoreGive(ctx->state_mutex);
+        }
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -81,7 +91,34 @@ esp_err_t can_bus_apply_settings(app_context_t *ctx)
 esp_err_t can_bus_send_status(app_context_t *ctx)
 {
     uint8_t payload[8];
-    int temp = (int)ctx->state.last_temp_c;
+    int temp = 0;
+    bool drivers_enabled = false;
+    bool z_bloqueado = false;
+    bool alarme_z_ativo = false;
+    bool temp_valid = false;
+    bool tmc_uart_ready = false;
+    bool can_online = false;
+    uint8_t laser_level[2] = {0, 0};
+    bool fan_output_on = false;
+    fan_mode_t fan_mode = FAN_MODE_MANUAL_OFF;
+    uint32_t move_delay_us = 400;
+
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        temp = (int)ctx->state.last_temp_c;
+        drivers_enabled = ctx->state.drivers_enabled;
+        z_bloqueado = ctx->state.z_bloqueado;
+        alarme_z_ativo = ctx->state.alarme_z_ativo;
+        temp_valid = ctx->state.temp_valid;
+        tmc_uart_ready = ctx->state.tmc_uart_ready;
+        can_online = ctx->state.can_online;
+        laser_level[0] = ctx->state.laser_level[0];
+        laser_level[1] = ctx->state.laser_level[1];
+        fan_output_on = ctx->state.fan_output_on;
+        fan_mode = ctx->state.fan_mode;
+        move_delay_us = ctx->state.move_delay_us;
+        xSemaphoreGive(ctx->state_mutex);
+    }
+
     if (temp > 127) {
         temp = 127;
     } else if (temp < -128) {
@@ -91,19 +128,19 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     payload[0] = CAN_EVT_STATUS;
     payload[1] = ctx->settings.node_id;
     payload[2] =
-        (ctx->state.drivers_enabled ? 0x01U : 0x00U) |
-        (ctx->state.z_bloqueado ? 0x02U : 0x00U) |
-        (ctx->state.alarme_z_ativo ? 0x04U : 0x00U) |
-        (ctx->state.temp_valid ? 0x08U : 0x00U) |
-        (ctx->state.tmc_uart_ready ? 0x10U : 0x00U) |
-        (ctx->state.can_online ? 0x20U : 0x00U);
-    payload[3] = ctx->state.laser_level[0];
-    payload[4] = ctx->state.laser_level[1];
-    payload[5] = (uint8_t)((ctx->state.fan_output_on ? 0x01U : 0x00U) | ((uint8_t)ctx->state.fan_mode << 1));
+        (drivers_enabled ? 0x01U : 0x00U) |
+        (z_bloqueado ? 0x02U : 0x00U) |
+        (alarme_z_ativo ? 0x04U : 0x00U) |
+        (temp_valid ? 0x08U : 0x00U) |
+        (tmc_uart_ready ? 0x10U : 0x00U) |
+        (can_online ? 0x20U : 0x00U);
+    payload[3] = laser_level[0];
+    payload[4] = laser_level[1];
+    payload[5] = (uint8_t)((fan_output_on ? 0x01U : 0x00U) | ((uint8_t)fan_mode << 1));
     payload[6] = (uint8_t)(int8_t)temp;
-    payload[7] = speed_level_from_delay(ctx->state.move_delay_us);
+    payload[7] = speed_level_from_delay(move_delay_us);
 
-    return can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload));
+    return can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
 }
 
 void can_bus_print_status(const app_context_t *ctx)
@@ -182,7 +219,13 @@ static void can_task(void *arg)
             xSemaphoreGive(s_rx_free_sem);
         }
 
-        if (ctx->state.can_online && (xTaskGetTickCount() - last_heartbeat) >= pdMS_TO_TICKS(CAN_HEARTBEAT_PERIOD_MS)) {
+        bool can_online = false;
+        if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            can_online = ctx->state.can_online;
+            xSemaphoreGive(ctx->state_mutex);
+        }
+
+        if (can_online && (xTaskGetTickCount() - last_heartbeat) >= pdMS_TO_TICKS(CAN_HEARTBEAT_PERIOD_MS)) {
             (void)can_send_event(ctx, CAN_EVT_HEARTBEAT, ctx->settings.node_id, 0);
             last_heartbeat = xTaskGetTickCount();
         }
@@ -215,8 +258,8 @@ static esp_err_t can_node_start(app_context_t *ctx)
     };
 
     twai_mask_filter_config_t cmd_filter = {
-        .id = 0,
-        .mask = 0,
+        .id = ctx->settings.can_command_base_id + ctx->settings.node_id,
+        .mask = 0x7FF,
         .is_ext = false,
     };
 
@@ -225,7 +268,10 @@ static esp_err_t can_node_start(app_context_t *ctx)
     ESP_GOTO_ON_ERROR(twai_node_register_event_callbacks(s_node, &callbacks, ctx), err, APP_TAG, "Falha ao registrar callbacks TWAI");
     ESP_GOTO_ON_ERROR(twai_node_enable(s_node), err, APP_TAG, "Falha ao habilitar TWAI");
 
-    ctx->state.can_online = true;
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ctx->state.can_online = true;
+        xSemaphoreGive(ctx->state_mutex);
+    }
     ESP_LOGI(APP_TAG, "CAN/TWAI ativo: node=%u cmd=0x%03X status=0x%03X event=0x%03X bitrate=%" PRIu32,
              (unsigned)ctx->settings.node_id,
              ctx->settings.can_command_base_id + ctx->settings.node_id,
@@ -247,30 +293,42 @@ static void can_node_stop(app_context_t *ctx)
         s_node = NULL;
     }
     if (ctx != NULL) {
-        ctx->state.can_online = false;
+        if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ctx->state.can_online = false;
+            xSemaphoreGive(ctx->state_mutex);
+        }
     }
 }
 
-static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len)
+static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len, bool can_online)
 {
+    ESP_RETURN_ON_FALSE(ctx != NULL && payload != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "arg invalido");
+    ESP_RETURN_ON_FALSE(s_node != NULL && can_online, ESP_ERR_INVALID_STATE, APP_TAG, "CAN offline");
+    ESP_RETURN_ON_FALSE(payload_len <= TWAI_FRAME_MAX_LEN, ESP_ERR_INVALID_SIZE, APP_TAG, "Payload CAN grande demais");
+
     twai_frame_t frame = {
         .header.id = frame_id,
         .buffer = (uint8_t *)payload,
         .buffer_len = payload_len,
     };
 
-    ESP_RETURN_ON_FALSE(ctx != NULL && payload != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "arg invalido");
-    ESP_RETURN_ON_FALSE(s_node != NULL && ctx->state.can_online, ESP_ERR_INVALID_STATE, APP_TAG, "CAN offline");
-    ESP_RETURN_ON_FALSE(payload_len <= TWAI_FRAME_MAX_LEN, ESP_ERR_INVALID_SIZE, APP_TAG, "Payload CAN grande demais");
-
     ESP_RETURN_ON_ERROR(twai_node_transmit(s_node, &frame, CAN_TX_TIMEOUT_MS), APP_TAG, "Falha ao enfileirar TX TWAI");
     ESP_RETURN_ON_ERROR(twai_node_transmit_wait_all_done(s_node, CAN_TX_TIMEOUT_MS), APP_TAG, "Timeout TX TWAI");
-    ctx->state.can_tx_count++;
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        ctx->state.can_tx_count++;
+        xSemaphoreGive(ctx->state_mutex);
+    }
     return ESP_OK;
 }
 
 esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0, uint8_t arg1)
 {
+    bool can_online = false;
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        can_online = ctx->state.can_online;
+        xSemaphoreGive(ctx->state_mutex);
+    }
+
     uint8_t payload[8] = {
         (uint8_t)event_id,
         ctx->settings.node_id,
@@ -281,7 +339,7 @@ esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0,
         0,
         0,
     };
-    return can_send_payload(ctx, (uint16_t)(ctx->settings.can_event_base_id + ctx->settings.node_id), payload, sizeof(payload));
+    return can_send_payload(ctx, (uint16_t)(ctx->settings.can_event_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
 }
 
 static uint8_t speed_level_from_delay(uint32_t delay_us)
@@ -301,42 +359,110 @@ static uint8_t speed_level_from_delay(uint32_t delay_us)
     return 5;
 }
 
+static bool check_cmd_seq(app_context_t *ctx, uint8_t opcode, const uint8_t *buf, size_t len)
+{
+    size_t expected_len = 0;
+    switch (opcode) {
+    case CAN_OP_PING:
+        expected_len = 3;
+        break;
+    case CAN_OP_STATUS_REQUEST:
+        expected_len = 1;
+        break;
+    case CAN_OP_ENABLE:
+        expected_len = 2;
+        break;
+    case CAN_OP_SPEED:
+        expected_len = 2;
+        break;
+    case CAN_OP_MOVE:
+        expected_len = 6;
+        break;
+    case CAN_OP_HOME:
+        expected_len = 2;
+        break;
+    case CAN_OP_LASER:
+        expected_len = 3;
+        break;
+    case CAN_OP_FAN:
+        expected_len = 2;
+        break;
+    default:
+        return true;
+    }
+
+    if (len > expected_len) {
+        uint32_t seq = buf[expected_len];
+        if (seq <= ctx->state.last_cmd_seq) {
+            ESP_LOGW(APP_TAG, "CAN comando duplicado ignorado: opcode=0x%02X seq=%" PRIu32, opcode, seq);
+            return false;
+        }
+        ctx->state.last_cmd_seq = seq;
+    }
+    return true;
+}
+
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 {
     uint16_t rx_id = frame->header.id;
     uint16_t own_cmd_id = (uint16_t)(ctx->settings.can_command_base_id + ctx->settings.node_id);
-    uint16_t broadcast_cmd_id = ctx->settings.can_command_base_id;
     size_t len = frame->header.dlc;
     const uint8_t *buf = frame->buffer;
 
-    if (rx_id != own_cmd_id && rx_id != broadcast_cmd_id) {
+    if (rx_id != own_cmd_id) {
+        return;
+    }
+
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         return;
     }
 
     ctx->state.can_rx_count++;
     if (len == 0U) {
+        xSemaphoreGive(ctx->state_mutex);
         return;
     }
 
     esp_err_t err = ESP_OK;
     switch (buf[0]) {
     case CAN_OP_PING:
-        (void)can_send_event(ctx, CAN_EVT_PONG, buf[1], buf[2]);
+        if (len >= 3U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_PONG, buf[1], buf[2]);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+        }
         break;
 
     case CAN_OP_STATUS_REQUEST:
+        xSemaphoreGive(ctx->state_mutex);
         (void)can_bus_send_status(ctx);
         break;
 
     case CAN_OP_ENABLE:
         if (len >= 2U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             hardware_set_driver_enable(ctx, buf[1] != 0U);
+            xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, CAN_EVT_ACK, CAN_OP_ENABLE, 0);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     case CAN_OP_SPEED:
         if (len >= 2U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             switch (buf[1]) {
             case 1:
                 ctx->state.move_delay_us = 2000;
@@ -362,24 +488,39 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 err = ESP_ERR_INVALID_ARG;
                 break;
             }
+            xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_SPEED, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     case CAN_OP_MOVE:
         if (len >= 6U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             int32_t steps = (int32_t)((uint32_t)buf[2] |
                                       ((uint32_t)buf[3] << 8) |
                                       ((uint32_t)buf[4] << 16) |
                                       ((uint32_t)buf[5] << 24));
+            xSemaphoreGive(ctx->state_mutex);
             err = motion_post_move_axis(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_MOVE, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     case CAN_OP_HOME:
         if (len >= 2U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             char axis = (char)buf[1];
+            xSemaphoreGive(ctx->state_mutex);
             if (axis == 'X' || axis == 'x' || axis == 'Y' || axis == 'y') {
                 err = motion_post_home_axis(ctx, axis, ctx->settings.node_id, CAN_OP_HOME);
             } else if (axis == 'Z' || axis == 'z') {
@@ -388,18 +529,31 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 err = ESP_ERR_INVALID_ARG;
             }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_HOME, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     case CAN_OP_LASER:
         if (len >= 3U && buf[1] >= 1U && buf[1] <= 2U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             err = hardware_set_laser_level(ctx, (size_t)(buf[1] - 1U), buf[2]);
+            xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     case CAN_OP_FAN:
         if (len >= 2U) {
+            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
+                xSemaphoreGive(ctx->state_mutex);
+                return;
+            }
             switch (buf[1]) {
             case 0:
                 ctx->state.fan_mode = FAN_MODE_MANUAL_OFF;
@@ -419,11 +573,16 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 err = ESP_ERR_INVALID_ARG;
                 break;
             }
+            xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_FAN, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
         }
         break;
 
     default:
+        xSemaphoreGive(ctx->state_mutex);
+        ESP_LOGW(APP_TAG, "CAN opcode desconhecido: 0x%02X", buf[0]);
         (void)can_send_event(ctx, CAN_EVT_ERROR, buf[0], (uint8_t)ESP_ERR_NOT_SUPPORTED);
         break;
     }

@@ -105,6 +105,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     while (!hardware_is_z_switch_pressed() && search_steps < Z_HOME_SEARCH_LIMIT_STEPS) {
         hardware_step_pulse(STEP_Z, 400);
         ++search_steps;
+        if ((search_steps & 0xFFFU) == 0U) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     if (search_steps >= Z_HOME_SEARCH_LIMIT_STEPS && !hardware_is_z_switch_pressed()) {
@@ -119,6 +122,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     while (hardware_is_z_switch_pressed() && release_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
         hardware_step_pulse(STEP_Z, 800);
         ++release_steps;
+        if ((release_steps & 0xFFFU) == 0U) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     if (release_steps >= Z_HOME_RELEASE_LIMIT_STEPS && hardware_is_z_switch_pressed()) {
@@ -236,10 +242,10 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     gpio_set_level(dir_pin, ((permitted_move_deg > 0.0f) ^ invert) ? 1 : 0);
-    hardware_step_pulse_rmt(axis, steps_to_execute, ctx->state.move_delay_us);
+    esp_err_t rmt_err = hardware_step_pulse_rmt(axis, steps_to_execute, ctx->state.move_delay_us);
 
     xSemaphoreGive(ctx->motion_mutex);
-    return ESP_OK;
+    return rmt_err;
 }
 
 static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps)
@@ -274,6 +280,9 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
             ctx->state.atual_z++;
         }
         hardware_step_pulse(STEP_Z, ctx->state.move_delay_us);
+        if ((i & 0xFFFU) == 0U) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     xSemaphoreGive(ctx->motion_mutex);
@@ -301,7 +310,13 @@ static void motion_task(void *arg)
                 break;
             }
 
-            if (ctx->state.can_online && cmd.opcode != 0) {
+            bool can_online = false;
+            if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                can_online = ctx->state.can_online;
+                xSemaphoreGive(ctx->state_mutex);
+            }
+
+            if (can_online && cmd.opcode != 0) {
                 (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, cmd.opcode, (uint8_t)err);
             }
         }
@@ -314,7 +329,12 @@ esp_err_t motion_init(app_context_t *ctx)
     if (ctx->motion_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    xTaskCreatePinnedToCore(motion_task, "motion_task", 4096, ctx, 8, NULL, 1);
+    BaseType_t created = xTaskCreatePinnedToCore(motion_task, "motion_task", 4096, ctx, 8, NULL, 1);
+    if (created != pdPASS) {
+        vQueueDelete(ctx->motion_queue);
+        ctx->motion_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 

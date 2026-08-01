@@ -214,20 +214,14 @@ static esp_err_t can_node_start(app_context_t *ctx)
         .on_state_change = can_on_state_change,
     };
 
-    twai_mask_filter_config_t own_filter = {
-        .id = ctx->settings.can_command_base_id + ctx->settings.node_id,
-        .mask = TWAI_STD_ID_MASK,
-        .is_ext = false,
-    };
-    twai_mask_filter_config_t broadcast_filter = {
-        .id = ctx->settings.can_command_base_id,
-        .mask = TWAI_STD_ID_MASK,
+    twai_mask_filter_config_t cmd_filter = {
+        .id = 0,
+        .mask = 0,
         .is_ext = false,
     };
 
     ESP_RETURN_ON_ERROR(twai_new_node_onchip(&node_config, &s_node), APP_TAG, "Falha ao criar node TWAI");
-    ESP_GOTO_ON_ERROR(twai_node_config_mask_filter(s_node, 0, &own_filter), err, APP_TAG, "Falha no filtro own");
-    ESP_GOTO_ON_ERROR(twai_node_config_mask_filter(s_node, 1, &broadcast_filter), err, APP_TAG, "Falha no filtro broadcast");
+    ESP_GOTO_ON_ERROR(twai_node_config_mask_filter(s_node, 0, &cmd_filter), err, APP_TAG, "Falha no filtro de comando");
     ESP_GOTO_ON_ERROR(twai_node_register_event_callbacks(s_node, &callbacks, ctx), err, APP_TAG, "Falha ao registrar callbacks TWAI");
     ESP_GOTO_ON_ERROR(twai_node_enable(s_node), err, APP_TAG, "Falha ao habilitar TWAI");
 
@@ -309,8 +303,15 @@ static uint8_t speed_level_from_delay(uint32_t delay_us)
 
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 {
+    uint16_t rx_id = frame->header.id;
+    uint16_t own_cmd_id = (uint16_t)(ctx->settings.can_command_base_id + ctx->settings.node_id);
+    uint16_t broadcast_cmd_id = ctx->settings.can_command_base_id;
     size_t len = frame->header.dlc;
     const uint8_t *buf = frame->buffer;
+
+    if (rx_id != own_cmd_id && rx_id != broadcast_cmd_id) {
+        return;
+    }
 
     ctx->state.can_rx_count++;
     if (len == 0U) {

@@ -205,7 +205,11 @@ esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint8
 
     uint32_t duty = (LASER_PWM_MAX_DUTY * level) / 255U;
     ESP_RETURN_ON_ERROR(
-        ledc_set_duty_and_update(LEDC_LOW_SPEED_MODE, k_laser_channels[laser_index], duty, 0),
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, k_laser_channels[laser_index], duty),
+        APP_TAG,
+        "Falha ao ajustar duty do laser");
+    ESP_RETURN_ON_ERROR(
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, k_laser_channels[laser_index]),
         APP_TAG,
         "Falha ao atualizar PWM do laser");
 

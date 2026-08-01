@@ -13,5 +13,7 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\Pablo\\blue_mechanic_v1\\build"
-  ]
+  ],
+  "idf.flashType": "UART",
+  "idf.portWin": "COM11"
 }

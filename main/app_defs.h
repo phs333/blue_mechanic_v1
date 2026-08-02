@@ -22,7 +22,7 @@
 #define STEP_Z GPIO_NUM_16
 #define EN_PIN GPIO_NUM_17
 #define TEMP_PIN GPIO_NUM_18
-#define FAN_PIN GPIO_NUM_1
+#define FAN_PIN GPIO_NUM_14
 
 #define SDA_0 GPIO_NUM_21
 #define SCL_0 GPIO_NUM_20
@@ -31,8 +31,8 @@
 
 #define SWITCH_Z GPIO_NUM_19
 
-#define LASER_1_PIN GPIO_NUM_12
-#define LASER_2_PIN GPIO_NUM_14
+#define LASER_1_PIN GPIO_NUM_1
+#define LASER_2_PIN GPIO_NUM_2
 
 #define CAN_TX_PIN GPIO_NUM_48
 #define CAN_RX_PIN GPIO_NUM_47
@@ -168,6 +168,7 @@ typedef struct {
     persisted_settings_t settings;
     runtime_state_t state;
     SemaphoreHandle_t motion_mutex;
+    SemaphoreHandle_t state_mutex;
     QueueHandle_t motion_queue;
 } app_context_t;
 

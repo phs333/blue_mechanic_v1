@@ -101,7 +101,6 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     uint8_t laser_level[2] = {0, 0};
     bool fan_output_on = false;
     fan_mode_t fan_mode = FAN_MODE_MANUAL_OFF;
-    uint32_t move_delay_us = 400;
 
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         temp = (int)ctx->state.last_temp_c;
@@ -115,7 +114,6 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
         laser_level[1] = ctx->state.laser_level[1];
         fan_output_on = ctx->state.fan_output_on;
         fan_mode = ctx->state.fan_mode;
-        move_delay_us = ctx->state.move_delay_us;
         xSemaphoreGive(ctx->state_mutex);
     }
 
@@ -138,7 +136,7 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     payload[4] = laser_level[1];
     payload[5] = (uint8_t)((fan_output_on ? 0x01U : 0x00U) | ((uint8_t)fan_mode << 1));
     payload[6] = (uint8_t)(int8_t)temp;
-    payload[7] = speed_level_from_delay(move_delay_us);
+    payload[7] = speed_level_from_delay(ctx->state.speed_delay_us[AXIS_X_ID]);
 
     return can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
 }
@@ -463,30 +461,36 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 xSemaphoreGive(ctx->state_mutex);
                 return;
             }
+            uint32_t delay_us = 0;
             switch (buf[1]) {
             case 1:
-                ctx->state.move_delay_us = 2000;
+                delay_us = 2000;
                 err = ESP_OK;
                 break;
             case 2:
-                ctx->state.move_delay_us = 800;
+                delay_us = 800;
                 err = ESP_OK;
                 break;
             case 3:
-                ctx->state.move_delay_us = 400;
+                delay_us = 400;
                 err = ESP_OK;
                 break;
             case 4:
-                ctx->state.move_delay_us = 150;
+                delay_us = 150;
                 err = ESP_OK;
                 break;
             case 5:
-                ctx->state.move_delay_us = 50;
+                delay_us = 50;
                 err = ESP_OK;
                 break;
             default:
                 err = ESP_ERR_INVALID_ARG;
                 break;
+            }
+            if (err == ESP_OK) {
+                for (size_t i = 0; i < AXIS_COUNT; ++i) {
+                    ctx->state.speed_delay_us[i] = delay_us;
+                }
             }
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_SPEED, (uint8_t)err);

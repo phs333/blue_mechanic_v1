@@ -21,15 +21,33 @@ static app_context_t g_app = {
 static void console_task(void *arg) {
   app_context_t *ctx = (app_context_t *)arg;
   char line[96];
+  char buf[96];
+  size_t buf_len = 0;
 
   commands_print_help();
   puts("\n=== SISTEMA PRONTO PARA COMANDOS ===");
 
   while (true) {
-    if (fgets(line, sizeof(line), stdin) != NULL) {
-      commands_handle_line(ctx, line);
-    } else {
+    int c = fgetc(stdin);
+    if (c == EOF) {
       vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+
+    if (c == '\n') {
+      if (buf_len > 0) {
+        buf[buf_len] = '\0';
+        snprintf(line, sizeof(line), "%s", buf);
+        ESP_LOGI(APP_TAG, "RX line=[%s]", line);
+        commands_handle_line(ctx, line);
+        buf_len = 0;
+      }
+    } else if (c == '\r') {
+      // ignore CR
+    } else {
+      if (buf_len < sizeof(buf) - 1) {
+        buf[buf_len++] = (char)c;
+      }
     }
   }
 }

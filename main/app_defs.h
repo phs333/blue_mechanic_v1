@@ -61,6 +61,9 @@
 #define LIMITE_GRAUS_XY 90.0f
 #define PASSOS_ALIVIO_EXTRA_Z 400
 
+#define Z_BELT_PITCH_MM 2.0f
+#define Z_BELT_PULLEY_TEETH 16U
+
 #define INVERTER_X false
 #define INVERTER_Y false
 
@@ -69,7 +72,7 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 3U
+#define SETTINGS_VERSION 4U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
@@ -126,7 +129,9 @@ typedef struct {
     uint8_t tmc_irun[AXIS_COUNT];
     uint8_t tmc_ihold_delay[AXIS_COUNT];
     uint16_t tmc_microsteps[AXIS_COUNT];
-    uint16_t steps_per_rev;
+    uint16_t steps_per_rev[AXIS_COUNT];
+    uint32_t speed_delay_us[AXIS_COUNT];
+    float accel[AXIS_COUNT];
 } persisted_settings_t;
 
 typedef struct {
@@ -137,7 +142,7 @@ typedef struct {
     volatile bool fan_output_on;
     volatile fan_mode_t fan_mode;
     volatile uint8_t laser_level[2];
-    volatile uint32_t move_delay_us;
+    volatile uint32_t speed_delay_us[AXIS_COUNT];
     volatile int32_t atual_z;
     volatile float last_temp_c;
     volatile bool temp_valid;
@@ -150,6 +155,7 @@ typedef struct {
     volatile uint32_t can_tx_count;
     volatile uint32_t can_last_error_flags;
     volatile uint32_t last_cmd_seq;
+    volatile bool inverter[AXIS_COUNT];
 } runtime_state_t;
 
 typedef enum {
@@ -192,7 +198,9 @@ typedef struct {
         .tmc_irun = {20, 20, 20},           \
         .tmc_ihold_delay = {6, 6, 6},       \
         .tmc_microsteps = {16, 16, 16},      \
-        .steps_per_rev = 200                  \
+        .steps_per_rev = {200, 200, 200},    \
+        .speed_delay_us = {400, 400, 400},   \
+        .accel = {900.0f, 900.0f, 500.0f}     \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \
@@ -204,7 +212,7 @@ typedef struct {
         .fan_output_on = false,           \
         .fan_mode = FAN_MODE_MANUAL_OFF,  \
         .laser_level = {0, 0},            \
-        .move_delay_us = 400,             \
+        .speed_delay_us = {400, 400, 400}, \
         .atual_z = 0,                     \
         .last_temp_c = 0.0f,              \
         .temp_valid = false,              \
@@ -215,5 +223,6 @@ typedef struct {
         .can_online = false,              \
         .can_rx_count = 0,                \
         .can_tx_count = 0,                \
-        .can_last_error_flags = 0         \
+        .can_last_error_flags = 0,        \
+        .inverter = {false, false, false} \
     }

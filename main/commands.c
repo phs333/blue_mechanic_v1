@@ -8,6 +8,7 @@
 
 #include "can_bus.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "hardware.h"
 #include "motion.h"
 #include "storage.h"
@@ -23,32 +24,28 @@ void commands_print_help(void)
     puts("\nComandos disponiveis:");
     puts("STATUS");
     puts("HELP");
-    puts("LIGAR / DESLIGAR");
+    puts("DRIVER ENABLED ON / OFF");
     puts("ALARM ON / ALARM OFF");
-    puts("SETHOME X / SETHOME Y");
-    puts("HOME X / HOME Y / HOME Z");
-    puts("SETLENGTH Z <passos>");
-    puts("STEPS <passos_por_rev>");
-    puts("MOVE X <passos>");
-    puts("MOVE Y <passos>");
-    puts("MOVE Z <passos>");
-    puts("MOVE_F X <passos>");
-    puts("MOVE_F Y <passos>");
-    puts("MOVE_F Z <passos>");
-    puts("LASER 1 ON|OFF|0..255");
-    puts("LASER 2 ON|OFF|0..255");
-    puts("FAN 0 / FAN 1 / FAN AUTO");
-    puts("VELOCIDADE 1..5");
+    puts("SET_HOME X / Y");
+    puts("HOME X / Y / Z");
+    puts("SET_LENGTH Z <steps>");
+    puts("STEPS X|Y|Z <steps_per_rev>");
+    puts("SPEED X|Y <deg/s> | Z <mm/s>");
+    puts("ACCEL X|Y <deg/s^2> | Z <mm/s^2>");
+    puts("MOVE X|Y|Z <steps>");
+    puts("MOVE_F X|Y|Z <steps>");
+    puts("LASER 1|2 ON|OFF|0..255");
+    puts("FAN 0|1|AUTO");
     puts("TEMP");
     puts("DRIVER STATUS");
+    puts("DRIVER INVERT X|Y|Z ON|OFF");
     puts("DRIVER MODE STEPDIR|UART");
-
     puts("DRIVER UART ADDR X|Y|Z <0..3>");
     puts("DRIVER UART CURRENT X|Y|Z <ihold_mA> <irun_mA> <delay>");
     puts("DRIVER UART SPREADCYCLE X|Y|Z ON|OFF");
     puts("DRIVER UART MICROSTEPS X|Y|Z <1..256>");
     puts("DRIVER REG READ X|Y|Z <reg>");
-    puts("DRIVER REG WRITE X|Y|Z <reg> <valor>");
+    puts("DRIVER REG WRITE X|Y|Z <reg> <value>");
     puts("DRIVER APPLY");
     puts("CAN STATUS");
     puts("CAN ON / CAN OFF / CAN APPLY");
@@ -136,15 +133,40 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strcmp(cmd, "LIGAR") == 0) {
+    if (strcmp(cmd, "DRIVER ENABLED ON") == 0) {
         hardware_set_driver_enable(ctx, true);
         puts("Drivers energizados.");
         return;
     }
 
-    if (strcmp(cmd, "DESLIGAR") == 0) {
+    if (strcmp(cmd, "DRIVER ENABLED OFF") == 0) {
         hardware_set_driver_enable(ctx, false);
         puts("Drivers desligados.");
+        return;
+    }
+
+    if (strncmp(cmd, "DRIVER INVERT ", 14) == 0) {
+        char axis = cmd[14];
+        char state_str[8] = {0};
+        if (sscanf(cmd + 14, "%c %7s", &axis, state_str) != 2) {
+            puts("Uso: DRIVER INVERT X|Y|Z ON|OFF");
+            return;
+        }
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
+            return;
+        }
+        bool enable = (strcmp(state_str, "ON") == 0);
+        ctx->state.inverter[axis_index] = enable;
+        printf("Inversao %c %s.\n", axis, enable ? "ATIVADA" : "DESATIVADA");
         return;
     }
 
@@ -209,22 +231,6 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    long steps_per_rev = 0;
-    if (sscanf(cmd, "STEPS %ld", &steps_per_rev) == 1) {
-        if (steps_per_rev <= 0 || steps_per_rev > 10000) {
-            puts("Valor invalido para passos por rev (deve ser entre 1 e 10000).");
-            return;
-        }
-        ctx->settings.steps_per_rev = (uint16_t)steps_per_rev;
-        esp_err_t err = persist_settings(ctx);
-        if (err == ESP_OK) {
-            printf("Passos por revolucao definidos para %lu.\n", (unsigned long)steps_per_rev);
-        } else {
-            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
-        }
-        return;
-    }
-
     if (strcmp(cmd, "TEMP") == 0) {
         if (ctx->state.temp_valid) {
             printf("Temperatura atual: %.2f C\n", ctx->state.last_temp_c);
@@ -256,34 +262,110 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         }
     }
 
-    int speed_level = 0;
-    if (sscanf(cmd, "VELOCIDADE %d", &speed_level) == 1) {
-        switch (speed_level) {
-        case 1:
-            ctx->state.move_delay_us = 2000;
-            break;
-        case 2:
-            ctx->state.move_delay_us = 800;
-            break;
-        case 3:
-            ctx->state.move_delay_us = 400;
-            break;
-        case 4:
-            ctx->state.move_delay_us = 150;
-            break;
-        case 5:
-            ctx->state.move_delay_us = 50;
-            break;
-        default:
-            puts("Velocidade invalida. Use 1..5.");
+    char axis = '\0';
+    long steps_per_rev = 0;
+    if (sscanf(cmd, "STEPS %c %ld", &axis, &steps_per_rev) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
             return;
         }
-        printf("Velocidade atualizada para nivel %d.\n", speed_level);
+        if (steps_per_rev <= 0 || steps_per_rev > 10000) {
+            puts("Valor invalido para passos por rev (deve ser entre 1 e 10000).");
+            return;
+        }
+        ctx->settings.steps_per_rev[axis_index] = (uint16_t)steps_per_rev;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            printf("Passos por rev do eixo %c definidos para %lu.\n", axis, (unsigned long)steps_per_rev);
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    float speed_val = 0.0f;
+    if (sscanf(cmd, "SPEED %c %f", &axis, &speed_val) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
+            return;
+        }
+        if (axis == 'Z') {
+            if (speed_val < 0.01f || speed_val > 100.0f) {
+                puts("Velocidade Z invalida. Use mm/s entre 0.01 e 100.");
+                return;
+            }
+        } else {
+            if (speed_val < 0.1f || speed_val > 1000.0f) {
+                puts("Velocidade XY invalida. Use deg/s entre 0.1 e 1000.");
+                return;
+            }
+        }
+        uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed_val);
+        ctx->settings.speed_delay_us[axis_index] = delay_us;
+        ctx->state.speed_delay_us[axis_index] = delay_us;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            if (axis == 'Z') {
+                printf("Velocidade Z definida para %.2f mm/s (%lu us).\n", speed_val, (unsigned long)delay_us);
+            } else {
+                printf("Velocidade %c definida para %.2f deg/s (%lu us).\n", axis, speed_val, (unsigned long)delay_us);
+            }
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    float accel_val = 0.0f;
+    if (sscanf(cmd, "ACCEL %c %f", &axis, &accel_val) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
+            return;
+        }
+        if (accel_val < 0.1f || accel_val > 5000.0f) {
+            puts("Aceleracao invalida. Use 0.1 a 5000.");
+            return;
+        }
+        ctx->settings.accel[axis_index] = accel_val;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            if (axis == 'Z') {
+                printf("Aceleracao Z definida para %.2f mm/s^2.\n", accel_val);
+            } else {
+                printf("Aceleracao %c definida para %.2f deg/s^2.\n", axis, accel_val);
+            }
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
         return;
     }
 
     int laser_number = 0;
-    char laser_value[16];
+    char laser_value[16] = {0};
     if (sscanf(cmd, "LASER %d %15s", &laser_number, laser_value) == 2) {
         if (laser_number < 1 || laser_number > 2) {
             puts("Laser invalido. Use 1 ou 2.");
@@ -591,7 +673,6 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    char axis = '\0';
     long steps = 0;
     if (sscanf(cmd, "MOVE %c %ld", &axis, &steps) == 2) {
         axis = (char)toupper((unsigned char)axis);
@@ -611,6 +692,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     if (sscanf(cmd, "MOVE_F %c %ld", &axis, &steps) == 2) {
         axis = (char)toupper((unsigned char)axis);
+        ESP_LOGI(APP_TAG, "PARSER MOVE_F axis=%c raw_steps=%ld", axis, steps);
         esp_err_t err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
         if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
             puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");

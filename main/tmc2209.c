@@ -192,6 +192,18 @@ static void tmc_uart_deinit(void)
         if (del_err == ESP_OK || del_err == ESP_ERR_INVALID_STATE) {
             s_uart_installed = false;
         }
+
+        if (TMC_UART_TX_PIN == TMC_UART_RX_PIN) {
+            gpio_config_t io_conf = {
+                .pin_bit_mask = (1ULL << TMC_UART_TX_PIN),
+                .mode = GPIO_MODE_OUTPUT,
+                .pull_up_en = GPIO_PULLUP_DISABLE,
+                .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                .intr_type = GPIO_INTR_DISABLE,
+            };
+            gpio_config(&io_conf);
+            gpio_set_level(TMC_UART_TX_PIN, 0);
+        }
     }
 }
 

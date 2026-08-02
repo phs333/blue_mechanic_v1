@@ -25,13 +25,65 @@ static float get_deg_per_step(app_context_t *ctx, char axis)
     } else if (axis_upper == 'Y') {
         axis_index = AXIS_Y_ID;
     } else {
-        return 360.0f / (float)ctx->settings.steps_per_rev;
+        axis_index = AXIS_Z_ID;
     }
     uint16_t msteps = ctx->settings.tmc_microsteps[axis_index];
     if (msteps == 0) {
         msteps = 16;
     }
-    return 360.0f / ((float)ctx->settings.steps_per_rev * (float)msteps);
+    float spr = (float)ctx->settings.steps_per_rev[axis_index];
+    if (spr < 1.0f) {
+        spr = 200.0f;
+    }
+    return 360.0f / (spr * (float)msteps);
+}
+
+static size_t axis_to_index(char axis)
+{
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (axis_upper == 'X') {
+        return AXIS_X_ID;
+    }
+    if (axis_upper == 'Y') {
+        return AXIS_Y_ID;
+    }
+    return AXIS_Z_ID;
+}
+
+uint32_t motion_speed_to_delay_us(app_context_t *ctx, char axis, float speed)
+{
+    if (speed <= 0.0f) {
+        return 32767U;
+    }
+
+    size_t axis_index = axis_to_index(axis);
+    uint16_t msteps = ctx->settings.tmc_microsteps[axis_index];
+    if (msteps == 0) {
+        msteps = 16;
+    }
+    float spr = (float)ctx->settings.steps_per_rev[axis_index];
+    if (spr < 1.0f) {
+        spr = 200.0f;
+    }
+
+    char axis_upper = (char)toupper((unsigned char)axis);
+    float delay_us;
+    if (axis_upper == 'X' || axis_upper == 'Y') {
+        float deg_per_step = 360.0f / (spr * (float)msteps);
+        delay_us = (1000000.0f * deg_per_step) / (2.0f * speed);
+    } else {
+        float mm_per_step = (float)(Z_BELT_PULLEY_TEETH * Z_BELT_PITCH_MM) / (spr * (float)msteps);
+        delay_us = (1000000.0f * mm_per_step) / (2.0f * speed);
+    }
+
+    if (delay_us < 10.0f) {
+        delay_us = 10.0f;
+    }
+    if (delay_us > 32767.0f) {
+        delay_us = 32767.0f;
+    }
+
+    return (uint32_t)delay_us;
 }
 
 
@@ -46,11 +98,11 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
 
     if (axis_upper == 'X') {
         dir_pin = DIR_X;
-        invert = INVERTER_X;
+        invert = ctx->state.inverter[AXIS_X_ID];
         target_deg = ctx->settings.home_x_deg;
     } else if (axis_upper == 'Y') {
         dir_pin = DIR_Y;
-        invert = INVERTER_Y;
+        invert = ctx->state.inverter[AXIS_Y_ID];
         target_deg = ctx->settings.home_y_deg;
     } else {
         return ESP_ERR_INVALID_ARG;
@@ -159,10 +211,10 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
 
         if (axis_upper == 'X') {
             dir_pin = DIR_X;
-            invert = INVERTER_X;
+            invert = ctx->state.inverter[AXIS_X_ID];
         } else {
             dir_pin = DIR_Y;
-            invert = INVERTER_Y;
+            invert = ctx->state.inverter[AXIS_Y_ID];
         }
 
         bool positive_motion = requested_steps > 0;
@@ -176,7 +228,12 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
         }
 
         gpio_set_level(dir_pin, positive_motion ? 1 : 0);
-        esp_err_t rmt_err = hardware_step_pulse_rmt(axis_upper, (uint32_t)labs(requested_steps), ctx->state.move_delay_us);
+        esp_rom_delay_us(2);
+        ESP_LOGI(APP_TAG, "MOVE_F %c steps=%d dir_pin=%d invert=%d",
+                 axis_upper, (int)requested_steps,
+                 (int)(positive_motion ? 1 : 0), (int)invert);
+        size_t axis_idx = (axis_upper == 'X') ? AXIS_X_ID : AXIS_Y_ID;
+        esp_err_t rmt_err = hardware_step_pulse_rmt(axis_upper, (uint32_t)labs(requested_steps), ctx->state.speed_delay_us[axis_idx]);
         ESP_LOGI(APP_TAG, "MOVE_F %c RMT retornou %s", axis_upper, esp_err_to_name(rmt_err));
 
         xSemaphoreGive(ctx->motion_mutex);
@@ -197,8 +254,16 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
         }
 
         bool move_up = requested_steps > 0;
+        if (ctx->state.inverter[AXIS_Z_ID]) {
+            move_up = !move_up;
+        }
         int32_t steps = labs(requested_steps);
         gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
+        esp_rom_delay_us(2);
+        ESP_LOGI(APP_TAG, "MOVE_F Z steps=%d dir_pin=%d (Z_DIR_UP=%d Z_DIR_DOWN=%d)",
+                 (int)requested_steps,
+                 (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),
+                 (int)Z_DIR_UP, (int)Z_DIR_DOWN);
 
         for (int32_t i = 0; i < steps; ++i) {
             if (!move_up) {
@@ -213,7 +278,7 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
                 }
                 ctx->state.atual_z++;
             }
-            hardware_step_pulse(STEP_Z, ctx->state.move_delay_us);
+            hardware_step_pulse(STEP_Z, ctx->state.speed_delay_us[AXIS_Z_ID]);
             if ((i & 0xFFFU) == 0U) {
                 vTaskDelay(pdMS_TO_TICKS(1));
             }
@@ -278,11 +343,11 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
 
     if (axis == 'X') {
         dir_pin = DIR_X;
-        invert = INVERTER_X;
+        invert = ctx->state.inverter[AXIS_X_ID];
         reduction = REDUCAO_X;
     } else if (axis == 'Y') {
         dir_pin = DIR_Y;
-        invert = INVERTER_Y;
+        invert = ctx->state.inverter[AXIS_Y_ID];
         reduction = REDUCAO_Y;
     } else {
         return ESP_ERR_INVALID_ARG;
@@ -322,7 +387,13 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     gpio_set_level(dir_pin, ((permitted_move_deg > 0.0f) ^ invert) ? 1 : 0);
-    esp_err_t rmt_err = hardware_step_pulse_rmt(axis, steps_to_execute, ctx->state.move_delay_us);
+    esp_rom_delay_us(2);
+    ESP_LOGI(APP_TAG, "MOVE %c steps=%d dir_pin=%d invert=%d permitted_deg=%.2f",
+             axis, (int)requested_steps,
+             (int)(((permitted_move_deg > 0.0f) ^ invert) ? 1 : 0),
+             (int)invert, permitted_move_deg);
+    size_t axis_idx = (axis == 'X') ? AXIS_X_ID : AXIS_Y_ID;
+    esp_err_t rmt_err = hardware_step_pulse_rmt(axis, steps_to_execute, ctx->state.speed_delay_us[axis_idx]);
 
     xSemaphoreGive(ctx->motion_mutex);
     return rmt_err;
@@ -343,8 +414,16 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
     }
 
     bool move_up = requested_steps > 0;
+    if (ctx->state.inverter[AXIS_Z_ID]) {
+        move_up = !move_up;
+    }
     int32_t steps = labs(requested_steps);
     gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
+    esp_rom_delay_us(2);
+    ESP_LOGI(APP_TAG, "MOVE Z steps=%d dir_pin=%d (Z_DIR_UP=%d Z_DIR_DOWN=%d)",
+             (int)requested_steps,
+             (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),
+             (int)Z_DIR_UP, (int)Z_DIR_DOWN);
 
     for (int32_t i = 0; i < steps; ++i) {
         if (!move_up) {
@@ -359,7 +438,7 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
             }
             ctx->state.atual_z++;
         }
-        hardware_step_pulse(STEP_Z, ctx->state.move_delay_us);
+        hardware_step_pulse(STEP_Z, ctx->state.speed_delay_us[AXIS_Z_ID]);
         if ((i & 0xFFFU) == 0U) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }

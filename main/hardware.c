@@ -154,6 +154,7 @@ esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
     }
 
     if (chan == NULL || s_rmt_copy_encoder == NULL) {
+        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -175,8 +176,18 @@ esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
         }
     };
 
-    ESP_RETURN_ON_ERROR(rmt_transmit(chan, s_rmt_copy_encoder, &pulse, sizeof(pulse), &tx_config), APP_TAG, "RMT transmit failed");
-    ESP_RETURN_ON_ERROR(rmt_tx_wait_all_done(chan, -1), APP_TAG, "RMT wait failed");
+    ESP_LOGI(APP_TAG, "RMT %c: steps=%u delay=%u loop=%u", axis_upper, (unsigned)steps, (unsigned)delay_us, (unsigned)tx_config.loop_count);
+    esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, &pulse, sizeof(pulse), &tx_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
+        return err;
+    }
+
+    err = rmt_tx_wait_all_done(chan, -1);
+    if (err != ESP_OK) {
+        ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
+        return err;
+    }
 
     return ESP_OK;
 }

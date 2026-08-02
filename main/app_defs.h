@@ -126,6 +126,7 @@ typedef struct {
     uint8_t tmc_irun[AXIS_COUNT];
     uint8_t tmc_ihold_delay[AXIS_COUNT];
     uint16_t tmc_microsteps[AXIS_COUNT];
+    uint16_t steps_per_rev;
 } persisted_settings_t;
 
 typedef struct {
@@ -153,7 +154,8 @@ typedef struct {
 
 typedef enum {
     MOTION_CMD_MOVE_REL,
-    MOTION_CMD_HOME
+    MOTION_CMD_HOME,
+    MOTION_CMD_MOVE_FORCE,
 } motion_cmd_type_t;
 
 typedef struct {
@@ -189,7 +191,8 @@ typedef struct {
         .tmc_ihold = {8, 8, 8},             \
         .tmc_irun = {20, 20, 20},           \
         .tmc_ihold_delay = {6, 6, 6},       \
-        .tmc_microsteps = {16, 16, 16}      \
+        .tmc_microsteps = {16, 16, 16},      \
+        .steps_per_rev = 200                  \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \

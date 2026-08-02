@@ -25,13 +25,13 @@ static float get_deg_per_step(app_context_t *ctx, char axis)
     } else if (axis_upper == 'Y') {
         axis_index = AXIS_Y_ID;
     } else {
-        return 1.8f / 16.0f;
+        return 360.0f / (float)ctx->settings.steps_per_rev;
     }
     uint16_t msteps = ctx->settings.tmc_microsteps[axis_index];
     if (msteps == 0) {
         msteps = 16;
     }
-    return 360.0f / (200.0f * (float)msteps);
+    return 360.0f / ((float)ctx->settings.steps_per_rev * (float)msteps);
 }
 
 
@@ -145,6 +145,86 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
 }
 
 
+
+static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_t requested_steps)
+{
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+
+    char axis_upper = (char)toupper((unsigned char)axis);
+    ESP_LOGI(APP_TAG, "MOVE_F %c steps=%d", axis_upper, (int)requested_steps);
+
+    if (axis_upper == 'X' || axis_upper == 'Y') {
+        gpio_num_t dir_pin;
+        bool invert;
+
+        if (axis_upper == 'X') {
+            dir_pin = DIR_X;
+            invert = INVERTER_X;
+        } else {
+            dir_pin = DIR_Y;
+            invert = INVERTER_Y;
+        }
+
+        bool positive_motion = requested_steps > 0;
+        if (invert) {
+            positive_motion = !positive_motion;
+        }
+
+        if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            ESP_LOGE(APP_TAG, "MOVE_F %c timeout no motion_mutex", axis_upper);
+            return ESP_ERR_TIMEOUT;
+        }
+
+        gpio_set_level(dir_pin, positive_motion ? 1 : 0);
+        esp_err_t rmt_err = hardware_step_pulse_rmt(axis_upper, (uint32_t)labs(requested_steps), ctx->state.move_delay_us);
+        ESP_LOGI(APP_TAG, "MOVE_F %c RMT retornou %s", axis_upper, esp_err_to_name(rmt_err));
+
+        xSemaphoreGive(ctx->motion_mutex);
+        return rmt_err;
+    }
+
+    if (axis_upper == 'Z') {
+        if (ctx->state.z_bloqueado) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (requested_steps == 0) {
+            return ESP_OK;
+        }
+
+        if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        bool move_up = requested_steps > 0;
+        int32_t steps = labs(requested_steps);
+        gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
+
+        for (int32_t i = 0; i < steps; ++i) {
+            if (!move_up) {
+                if (ctx->state.atual_z <= 0 || hardware_is_z_switch_pressed()) {
+                    ctx->state.z_bloqueado = hardware_is_z_switch_pressed();
+                    break;
+                }
+                ctx->state.atual_z--;
+            } else {
+                if (ctx->state.atual_z >= ctx->settings.max_passos_z) {
+                    break;
+                }
+                ctx->state.atual_z++;
+            }
+            hardware_step_pulse(STEP_Z, ctx->state.move_delay_us);
+            if ((i & 0xFFFU) == 0U) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+
+        xSemaphoreGive(ctx->motion_mutex);
+        return ESP_OK;
+    }
+
+    return ESP_ERR_INVALID_ARG;
+}
 
 static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requested_steps)
 {
@@ -297,9 +377,13 @@ static void motion_task(void *arg)
     while (true) {
         if (xQueueReceive(ctx->motion_queue, &cmd, portMAX_DELAY) == pdTRUE) {
             esp_err_t err = ESP_OK;
+            ESP_LOGI(APP_TAG, "motion_task recebeu cmd type=%d axis=%c steps=%d opcode=0x%02X", (int)cmd.type, cmd.axis, (int)cmd.steps, cmd.opcode);
             switch (cmd.type) {
             case MOTION_CMD_MOVE_REL:
                 err = do_motion_move_axis(ctx, cmd.axis, cmd.steps);
+                break;
+            case MOTION_CMD_MOVE_FORCE:
+                err = do_motion_move_axis_force(ctx, cmd.axis, cmd.steps);
                 break;
             case MOTION_CMD_HOME:
                 if (cmd.axis == 'Z') {
@@ -309,6 +393,8 @@ static void motion_task(void *arg)
                 }
                 break;
             }
+
+            ESP_LOGI(APP_TAG, "motion_task cmd type=%d axis=%c finalizado err=%s", (int)cmd.type, cmd.axis, esp_err_to_name(err));
 
             bool can_online = false;
             if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -353,6 +439,18 @@ esp_err_t motion_post_move_axis(app_context_t *ctx, char axis, int32_t steps, ui
 {
     motion_cmd_t cmd = {
         .type = MOTION_CMD_MOVE_REL,
+        .axis = (char)toupper((unsigned char)axis),
+        .steps = steps,
+        .sender_node_id = sender_id,
+        .opcode = opcode
+    };
+    return enqueue_motion_cmd(ctx, &cmd);
+}
+
+esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t steps, uint8_t sender_id, uint8_t opcode)
+{
+    motion_cmd_t cmd = {
+        .type = MOTION_CMD_MOVE_FORCE,
         .axis = (char)toupper((unsigned char)axis),
         .steps = steps,
         .sender_node_id = sender_id,

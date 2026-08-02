@@ -28,9 +28,13 @@ void commands_print_help(void)
     puts("SETHOME X / SETHOME Y");
     puts("HOME X / HOME Y / HOME Z");
     puts("SETLENGTH Z <passos>");
+    puts("STEPS <passos_por_rev>");
     puts("MOVE X <passos>");
     puts("MOVE Y <passos>");
     puts("MOVE Z <passos>");
+    puts("MOVE_F X <passos>");
+    puts("MOVE_F Y <passos>");
+    puts("MOVE_F Z <passos>");
     puts("LASER 1 ON|OFF|0..255");
     puts("LASER 2 ON|OFF|0..255");
     puts("FAN 0 / FAN 1 / FAN AUTO");
@@ -199,6 +203,22 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
             printf("Limite Z definido manualmente para %ld passos.\n", steps_z);
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    long steps_per_rev = 0;
+    if (sscanf(cmd, "STEPS %ld", &steps_per_rev) == 1) {
+        if (steps_per_rev <= 0 || steps_per_rev > 10000) {
+            puts("Valor invalido para passos por rev (deve ser entre 1 e 10000).");
+            return;
+        }
+        ctx->settings.steps_per_rev = (uint16_t)steps_per_rev;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            printf("Passos por revolucao definidos para %lu.\n", (unsigned long)steps_per_rev);
         } else {
             printf("Erro ao salvar: %s\n", esp_err_to_name(err));
         }
@@ -585,6 +605,22 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             printf("MOVE %c enfileirado.\n", axis);
         } else {
             printf("ERRO no MOVE %c: %s\n", axis, esp_err_to_name(err));
+        }
+        return;
+    }
+
+    if (sscanf(cmd, "MOVE_F %c %ld", &axis, &steps) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        esp_err_t err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
+        if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
+            puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
+            return;
+        }
+
+        if (err == ESP_OK) {
+            printf("MOVE_F %c enfileirado (sem encoder).\n", axis);
+        } else {
+            printf("ERRO no MOVE_F %c: %s\n", axis, esp_err_to_name(err));
         }
         return;
     }

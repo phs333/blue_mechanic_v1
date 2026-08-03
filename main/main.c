@@ -109,6 +109,9 @@ void app_main(void) {
 
   ESP_ERROR_CHECK(storage_init());
   ESP_ERROR_CHECK(storage_load_settings(&g_app.settings));
+  for (size_t i = 0; i < AXIS_COUNT; ++i) {
+      g_app.state.speed_delay_us[i] = g_app.settings.speed_delay_us[i];
+  }
   ESP_ERROR_CHECK(hardware_init(&g_app));
   g_app.state.driver_mode_requested =
       (driver_bus_mode_t)g_app.settings.driver_bus_mode;

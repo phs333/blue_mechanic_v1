@@ -32,8 +32,9 @@ void commands_print_help(void)
     puts("STEPS X|Y|Z <steps_per_rev>");
     puts("SPEED X|Y <deg/s> | Z <mm/s>");
     puts("ACCEL X|Y <deg/s^2> | Z <mm/s^2>");
-    puts("MOVE X|Y|Z <steps>");
-    puts("MOVE_F X|Y|Z <steps>");
+    puts("SPEED_MAX X|Y|Z <value> | ACCEL_MAX X|Y|Z <value>");
+    puts("MOVE X|Y|Z <steps> [S<speed>] [F<accel>]");
+    puts("MOVE_F X|Y|Z <steps> [S<speed>] [F<accel>]");
     puts("LASER 1|2 ON|OFF|0..255");
     puts("FAN 0|1|AUTO");
     puts("TEMP");
@@ -305,17 +306,17 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             puts("Eixo invalido. Use X, Y ou Z.");
             return;
         }
-        if (axis == 'Z') {
-            if (speed_val < 0.01f || speed_val > 100.0f) {
-                puts("Velocidade Z invalida. Use mm/s entre 0.01 e 100.");
-                return;
-            }
-        } else {
-            if (speed_val < 0.1f || speed_val > 1000.0f) {
-                puts("Velocidade XY invalida. Use deg/s entre 0.1 e 1000.");
-                return;
-            }
-        }
+         if (axis == 'Z') {
+             if (speed_val < SPEED_MIN_MM_S_Z || speed_val > ctx->settings.speed_max[axis_index]) {
+                 printf("Velocidade Z invalida. Use mm/s entre %.2f e %.2f.\n", SPEED_MIN_MM_S_Z, ctx->settings.speed_max[axis_index]);
+                 return;
+             }
+         } else {
+             if (speed_val < SPEED_MIN_DEG_S_XY || speed_val > ctx->settings.speed_max[axis_index]) {
+                 printf("Velocidade %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_XY, ctx->settings.speed_max[axis_index]);
+                 return;
+             }
+         }
         uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed_val);
         ctx->settings.speed_delay_us[axis_index] = delay_us;
         ctx->state.speed_delay_us[axis_index] = delay_us;
@@ -346,9 +347,16 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             puts("Eixo invalido. Use X, Y ou Z.");
             return;
         }
-        if (accel_val < 0.1f || accel_val > 5000.0f) {
-            puts("Aceleracao invalida. Use 0.1 a 5000.");
-            return;
+        if (axis == 'Z') {
+            if (accel_val < ACCEL_MIN_MM_S2_Z || accel_val > ctx->settings.accel_max[axis_index]) {
+                printf("Aceleracao Z invalida. Use mm/s^2 entre %.2f e %.2f.\n", ACCEL_MIN_MM_S2_Z, ctx->settings.accel_max[axis_index]);
+                return;
+            }
+        } else {
+            if (accel_val < ACCEL_MIN_DEG_S2_XY || accel_val > ctx->settings.accel_max[axis_index]) {
+                printf("Aceleracao %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_XY, ctx->settings.accel_max[axis_index]);
+                return;
+            }
         }
         ctx->settings.accel[axis_index] = accel_val;
         esp_err_t err = persist_settings(ctx);
@@ -357,6 +365,86 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 printf("Aceleracao Z definida para %.2f mm/s^2.\n", accel_val);
             } else {
                 printf("Aceleracao %c definida para %.2f deg/s^2.\n", axis, accel_val);
+            }
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    float speed_max_val = 0.0f;
+    if (sscanf(cmd, "SPEED_MAX %c %f", &axis, &speed_max_val) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
+            return;
+        }
+        if (axis == 'Z') {
+            if (speed_max_val < SPEED_MIN_MM_S_Z || speed_max_val > SPEED_MAX_MM_S_Z) {
+                printf("Velocidade maxima Z invalida. Use mm/s entre %.2f e %.2f.\n", SPEED_MIN_MM_S_Z, SPEED_MAX_MM_S_Z);
+                return;
+            }
+        } else {
+            if (speed_max_val < SPEED_MIN_DEG_S_XY || speed_max_val > SPEED_MAX_DEG_S_XY) {
+                printf("Velocidade maxima %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_XY, SPEED_MAX_DEG_S_XY);
+                return;
+            }
+        }
+        ctx->settings.speed_max[axis_index] = speed_max_val;
+        ctx->state.speed_max[axis_index] = speed_max_val;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            if (axis == 'Z') {
+                printf("Velocidade maxima Z definida para %.2f mm/s.\n", speed_max_val);
+            } else {
+                printf("Velocidade maxima %c definida para %.2f deg/s.\n", axis, speed_max_val);
+            }
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    float accel_max_val = 0.0f;
+    if (sscanf(cmd, "ACCEL_MAX %c %f", &axis, &accel_max_val) == 2) {
+        axis = (char)toupper((unsigned char)axis);
+        size_t axis_index = 0;
+        if (axis == 'X') {
+            axis_index = AXIS_X_ID;
+        } else if (axis == 'Y') {
+            axis_index = AXIS_Y_ID;
+        } else if (axis == 'Z') {
+            axis_index = AXIS_Z_ID;
+        } else {
+            puts("Eixo invalido. Use X, Y ou Z.");
+            return;
+        }
+        if (axis == 'Z') {
+            if (accel_max_val < ACCEL_MIN_MM_S2_Z || accel_max_val > ACCEL_MAX_MM_S2_Z) {
+                printf("Aceleracao maxima Z invalida. Use mm/s^2 entre %.2f e %.2f.\n", ACCEL_MIN_MM_S2_Z, ACCEL_MAX_MM_S2_Z);
+                return;
+            }
+        } else {
+            if (accel_max_val < ACCEL_MIN_DEG_S2_XY || accel_max_val > ACCEL_MAX_DEG_S2_XY) {
+                printf("Aceleracao maxima %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_XY, ACCEL_MAX_DEG_S2_XY);
+                return;
+            }
+        }
+        ctx->settings.accel_max[axis_index] = accel_max_val;
+        ctx->state.accel_max[axis_index] = accel_max_val;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            if (axis == 'Z') {
+                printf("Aceleracao maxima Z definida para %.2f mm/s^2.\n", accel_max_val);
+            } else {
+                printf("Aceleracao maxima %c definida para %.2f deg/s^2.\n", axis, accel_max_val);
             }
         } else {
             printf("Erro ao salvar: %s\n", esp_err_to_name(err));
@@ -674,8 +762,39 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     long steps = 0;
-    if (sscanf(cmd, "MOVE %c %ld", &axis, &steps) == 2) {
+    float move_speed_val = -1.0f;
+    float move_accel_val = -1.0f;
+    char suffix[64];
+    suffix[0] = '\0';
+
+    if (sscanf(cmd, "MOVE %c %ld %63[^\n]", &axis, &steps, suffix) >= 2) {
         axis = (char)toupper((unsigned char)axis);
+        // Parse optional S=<speed> F=<accel> params
+        char *sp = suffix;
+        while (sp && *sp) {
+            while (*sp && isspace((unsigned char)*sp)) sp++;
+            if (*sp == 'S') {
+                sp++;
+                if (*sp == '=') sp++;
+                char *endptr = NULL;
+                move_speed_val = strtof(sp, &endptr);
+                if (endptr == sp) {
+                    move_speed_val = -1.0f;
+                }
+                sp = endptr;
+            } else if (*sp == 'F') {
+                sp++;
+                if (*sp == '=') sp++;
+                char *endptr = NULL;
+                move_accel_val = strtof(sp, &endptr);
+                if (endptr == sp) {
+                    move_accel_val = -1.0f;
+                }
+                sp = endptr;
+            } else {
+                break;
+            }
+        }
         esp_err_t err = motion_post_move_axis(ctx, axis, (int32_t)steps, 0, 0);
         if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
             puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
@@ -690,10 +809,43 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (sscanf(cmd, "MOVE_F %c %ld", &axis, &steps) == 2) {
+    if (sscanf(cmd, "MOVE_F %c %ld %63[^\n]", &axis, &steps, suffix) >= 2) {
         axis = (char)toupper((unsigned char)axis);
         ESP_LOGI(APP_TAG, "PARSER MOVE_F axis=%c raw_steps=%ld", axis, steps);
-        esp_err_t err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
+
+        // Parse optional S=<speed> F=<accel> params
+        char *sp = suffix;
+        while (sp && *sp) {
+            while (*sp && isspace((unsigned char)*sp)) sp++;
+            if (*sp == 'S') {
+                sp++;
+                if (*sp == '=') sp++;
+                char *endptr = NULL;
+                move_speed_val = strtof(sp, &endptr);
+                if (endptr == sp) {
+                    move_speed_val = -1.0f;
+                }
+                sp = endptr;
+            } else if (*sp == 'F') {
+                sp++;
+                if (*sp == '=') sp++;
+                char *endptr = NULL;
+                move_accel_val = strtof(sp, &endptr);
+                if (endptr == sp) {
+                    move_accel_val = -1.0f;
+                }
+                sp = endptr;
+            } else {
+                break;
+            }
+        }
+
+        esp_err_t err;
+        if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
+            err = motion_post_move_axis_with_params(ctx, axis, (int32_t)steps, move_speed_val, move_accel_val, 0, 0);
+        } else {
+            err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
+        }
         if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
             puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
             return;

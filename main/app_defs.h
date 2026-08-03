@@ -95,6 +95,25 @@
 #define FAN_AUTO_ON_TEMP_C 45.0f
 #define FAN_AUTO_OFF_TEMP_C 40.0f
 
+// --- Limites por eixo ---
+// Velocidade máxima em deg/s para X/Y, mm/s para Z
+#define DEFAULT_SPEED_MAX_DEG_S_XY 1500.0f
+#define DEFAULT_SPEED_MAX_MM_S_Z   80.0f
+// Aceleração máxima em deg/s² para X/Y, mm/s² para Z
+#define DEFAULT_ACCEL_MAX_DEG_S2_XY 5000.0f
+#define DEFAULT_ACCEL_MAX_MM_S2_Z    1000.0f
+
+// --- Limites mínimos/máximos para validação ---
+#define SPEED_MIN_DEG_S_XY 0.1f
+#define SPEED_MAX_DEG_S_XY 10000.0f
+#define SPEED_MIN_MM_S_Z   0.01f
+#define SPEED_MAX_MM_S_Z   500.0f
+
+#define ACCEL_MIN_DEG_S2_XY 1.0f
+#define ACCEL_MAX_DEG_S2_XY 50000.0f
+#define ACCEL_MIN_MM_S2_Z   0.1f
+#define ACCEL_MAX_MM_S2_Z   5000.0f
+
 typedef enum {
     FAN_MODE_MANUAL_OFF = 0,
     FAN_MODE_MANUAL_ON,
@@ -132,6 +151,8 @@ typedef struct {
     uint16_t steps_per_rev[AXIS_COUNT];
     uint32_t speed_delay_us[AXIS_COUNT];
     float accel[AXIS_COUNT];
+    float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
+    float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
 } persisted_settings_t;
 
 typedef struct {
@@ -143,6 +164,8 @@ typedef struct {
     volatile fan_mode_t fan_mode;
     volatile uint8_t laser_level[2];
     volatile uint32_t speed_delay_us[AXIS_COUNT];
+    volatile float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
+    volatile float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     volatile int32_t atual_z;
     volatile float last_temp_c;
     volatile bool temp_valid;
@@ -170,6 +193,8 @@ typedef struct {
     int32_t steps;
     uint8_t sender_node_id;
     uint8_t opcode;
+    float speed_override;   // velocidade em deg/s (X/Y) ou mm/s (Z), -1.0 = usar padrão
+    float accel_override;   // aceleração em deg/s² (X/Y) ou mm/s² (Z), -1.0 = usar padrão
 } motion_cmd_t;
 
 typedef struct {
@@ -200,11 +225,13 @@ typedef struct {
         .tmc_microsteps = {16, 16, 16},      \
         .steps_per_rev = {200, 200, 200},    \
         .speed_delay_us = {400, 400, 400},   \
-        .accel = {900.0f, 900.0f, 500.0f}     \
+        .accel = {900.0f, 900.0f, 500.0f},     \
+        .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
+        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z} \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \
-    {                                     \
+    {                                                       \
         .alarme_z_ativo = true,           \
         .z_bloqueado = false,             \
         .em_homing_z = false,             \
@@ -213,6 +240,8 @@ typedef struct {
         .fan_mode = FAN_MODE_MANUAL_OFF,  \
         .laser_level = {0, 0},            \
         .speed_delay_us = {400, 400, 400}, \
+        .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
+        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .atual_z = 0,                     \
         .last_temp_c = 0.0f,              \
         .temp_valid = false,              \

@@ -192,6 +192,200 @@ esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
     return ESP_OK;
 }
 
+uint32_t hardware_compute_step_delay(uint32_t start_delay, uint32_t end_delay, uint32_t step_num, uint32_t total_steps, uint32_t ramp_steps)
+{
+    if (total_steps == 0 || ramp_steps == 0) {
+        return end_delay;
+    }
+
+    float start_speed = 1000000.0f / (2.0f * (float)start_delay);
+    float end_speed   = 1000000.0f / (2.0f * (float)end_delay);
+
+    if (step_num < ramp_steps) {
+        float t = (float)step_num / (float)ramp_steps;
+        float speed = start_speed + (end_speed - start_speed) * t;
+        float delay_f = 1000000.0f / (2.0f * speed);
+        if (delay_f < 10.0f) {
+            delay_f = 10.0f;
+        }
+        if (delay_f > 32767.0f) {
+            delay_f = 32767.0f;
+        }
+        return (uint32_t)delay_f;
+    }
+
+    if (step_num >= total_steps - ramp_steps) {
+        float t = (float)(step_num - (total_steps - ramp_steps)) / (float)ramp_steps;
+        if (t > 1.0f) {
+            t = 1.0f;
+        }
+        float speed = end_speed + (start_speed - end_speed) * t;
+        float delay_f = 1000000.0f / (2.0f * speed);
+        if (delay_f < 10.0f) {
+            delay_f = 10.0f;
+        }
+        if (delay_f > 32767.0f) {
+            delay_f = 32767.0f;
+        }
+        return (uint32_t)delay_f;
+    }
+
+    return end_delay;
+}
+
+esp_err_t hardware_step_pulse_rmt_with_accel(char axis, uint32_t steps, uint32_t start_delay_us, uint32_t end_delay_us, uint32_t ramp_steps)
+{
+    if (steps == 0) {
+        return ESP_OK;
+    }
+
+    rmt_channel_handle_t chan = NULL;
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (axis_upper == 'X') {
+        chan = s_rmt_x_chan;
+    } else if (axis_upper == 'Y') {
+        chan = s_rmt_y_chan;
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (chan == NULL || s_rmt_copy_encoder == NULL) {
+        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (ramp_steps > steps / 2) {
+        ramp_steps = steps / 2;
+    }
+
+    const uint32_t chunk_size = 64;
+    rmt_symbol_word_t chunk[chunk_size];
+
+    ESP_LOGI(APP_TAG, "RMT %c accel: steps=%u start_delay=%u end_delay=%u ramp=%u",
+             axis_upper, (unsigned)steps, (unsigned)start_delay_us, (unsigned)end_delay_us, (unsigned)ramp_steps);
+
+    for (uint32_t i = 0; i < steps; i += chunk_size) {
+        uint32_t remaining = steps - i;
+        uint32_t current_chunk = (remaining < chunk_size) ? remaining : chunk_size;
+
+        for (uint32_t j = 0; j < current_chunk; j++) {
+            uint32_t step_num = i + j;
+            uint32_t delay = hardware_compute_step_delay(start_delay_us, end_delay_us, step_num, steps, ramp_steps);
+            if (delay < 10U) {
+                delay = 10U;
+            }
+            if (delay > 32767U) {
+                delay = 32767U;
+            }
+
+            chunk[j].duration0 = delay;
+            chunk[j].level0 = 1;
+            chunk[j].duration1 = delay;
+            chunk[j].level1 = 0;
+        }
+
+        rmt_transmit_config_t tx_config = {
+            .loop_count = 0,
+            .flags = {
+                .eot_level = 0,
+            }
+        };
+
+        esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, chunk, current_chunk * sizeof(rmt_symbol_word_t), &tx_config);
+        if (err != ESP_OK) {
+            ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
+            return err;
+        }
+
+        if (i + chunk_size < steps) {
+            // Not the last chunk - wait for completion before next transmit
+            err = rmt_tx_wait_all_done(chan, -1);
+            if (err != ESP_OK) {
+                ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
+                return err;
+            }
+        } else {
+            // Last chunk - still wait to ensure all steps complete
+            err = rmt_tx_wait_all_done(chan, -1);
+            if (err != ESP_OK) {
+                ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
+                return err;
+            }
+        }
+    }
+
+    return ESP_OK;
+}
+
+// Pre-computed delay profile version - eliminates per-step RMT overhead
+// by transmitting pre-calculated delays directly.
+esp_err_t hardware_step_pulse_rmt_profiled(char axis, uint32_t *delay_us, uint32_t steps)
+{
+    if (steps == 0 || delay_us == NULL) {
+        return ESP_OK;
+    }
+
+    rmt_channel_handle_t chan = NULL;
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (axis_upper == 'X') {
+        chan = s_rmt_x_chan;
+    } else if (axis_upper == 'Y') {
+        chan = s_rmt_y_chan;
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (chan == NULL || s_rmt_copy_encoder == NULL) {
+        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const uint32_t chunk_size = 256;
+    rmt_symbol_word_t chunk[chunk_size];
+
+    for (uint32_t i = 0; i < steps; i += chunk_size) {
+        uint32_t remaining = steps - i;
+        uint32_t current_chunk = (remaining < chunk_size) ? remaining : chunk_size;
+
+        for (uint32_t j = 0; j < current_chunk; j++) {
+            uint32_t step_num = i + j;
+            uint32_t delay = delay_us[step_num];
+            if (delay < 10U) {
+                delay = 10U;
+            }
+            if (delay > 32767U) {
+                delay = 32767U;
+            }
+
+            chunk[j].duration0 = delay;
+            chunk[j].level0 = 1;
+            chunk[j].duration1 = delay;
+            chunk[j].level1 = 0;
+        }
+
+        rmt_transmit_config_t tx_config = {
+            .loop_count = 0,
+            .flags = {
+                .eot_level = 0,
+            }
+        };
+
+        esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, chunk, current_chunk * sizeof(rmt_symbol_word_t), &tx_config);
+        if (err != ESP_OK) {
+            ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
+            return err;
+        }
+
+        err = rmt_tx_wait_all_done(chan, -1);
+        if (err != ESP_OK) {
+            ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    return ESP_OK;
+}
+
 void hardware_set_driver_enable(app_context_t *ctx, bool enable)
 {
     gpio_set_level(EN_PIN, enable ? 0 : 1);

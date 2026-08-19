@@ -27,6 +27,7 @@ static esp_err_t init_gpio_matrix(void);
 static esp_err_t init_i2c_buses(void);
 static esp_err_t init_led_pwm(app_context_t *ctx);
 static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg);
+static uint32_t laser_level_to_duty(uint8_t level);
 
 static inline void one_wire_drive_low(void)
 {
@@ -406,7 +407,7 @@ esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint8
 {
     ESP_RETURN_ON_FALSE(laser_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Laser invalido");
 
-    uint32_t duty = (LASER_PWM_MAX_DUTY * level) / 255U;
+    uint32_t duty = laser_level_to_duty(level);
     ESP_RETURN_ON_ERROR(
         ledc_set_duty(LEDC_LOW_SPEED_MODE, k_laser_channels[laser_index], duty),
         APP_TAG,
@@ -420,6 +421,23 @@ esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint8
         ctx->state.laser_level[laser_index] = level;
     }
     return ESP_OK;
+}
+
+static uint32_t laser_level_to_duty(uint8_t level)
+{
+    if (level == 0U) {
+        return 0U;
+    }
+
+    const uint32_t min_duty = (LASER_PWM_MAX_DUTY * LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) / 255U;
+    const uint32_t max_duty = (LASER_PWM_MAX_DUTY * LASER_PWM_MAX_USEFUL_LEVEL_8BIT) / 255U;
+    if (max_duty <= min_duty) {
+        return max_duty;
+    }
+
+    // Spread the full logical range over the laser's measured useful window.
+    const uint32_t span = max_duty - min_duty;
+    return min_duty + ((span * (uint32_t)(level - 1U)) + 127U) / 254U;
 }
 
 bool hardware_is_z_switch_pressed(void)

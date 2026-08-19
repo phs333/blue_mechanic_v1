@@ -33,6 +33,7 @@ static void prepare_rx_pool_once(void);
 static void can_task(void *arg);
 static esp_err_t can_node_start(app_context_t *ctx);
 static void can_node_stop(app_context_t *ctx);
+static twai_timing_basic_config_t can_get_bit_timing_config(uint32_t bitrate);
 static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len, bool can_online);
 esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0, uint8_t arg1);
 static uint8_t speed_level_from_delay(uint32_t delay_us);
@@ -248,6 +249,7 @@ static esp_err_t can_node_start(app_context_t *ctx)
         .tx_queue_depth = 8,
         .intr_priority = 0,
     };
+    node_config.bit_timing = can_get_bit_timing_config(ctx->settings.can_bitrate);
 
     twai_event_callbacks_t callbacks = {
         .on_rx_done = can_on_rx_done,
@@ -270,12 +272,14 @@ static esp_err_t can_node_start(app_context_t *ctx)
         ctx->state.can_online = true;
         xSemaphoreGive(ctx->state_mutex);
     }
-    ESP_LOGI(APP_TAG, "CAN/TWAI ativo: node=%u cmd=0x%03X status=0x%03X event=0x%03X bitrate=%" PRIu32,
+    ESP_LOGI(APP_TAG, "CAN/TWAI ativo: node=%u cmd=0x%03X status=0x%03X event=0x%03X bitrate=%" PRIu32 " sample=%" PRIu32 ".%" PRIu32 "%%",
              (unsigned)ctx->settings.node_id,
              ctx->settings.can_command_base_id + ctx->settings.node_id,
              ctx->settings.can_status_base_id + ctx->settings.node_id,
              ctx->settings.can_event_base_id + ctx->settings.node_id,
-             ctx->settings.can_bitrate);
+             ctx->settings.can_bitrate,
+             node_config.bit_timing.sp_permill / 10U,
+             node_config.bit_timing.sp_permill % 10U);
     return ESP_OK;
 
 err:
@@ -590,6 +594,16 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         (void)can_send_event(ctx, CAN_EVT_ERROR, buf[0], (uint8_t)ESP_ERR_NOT_SUPPORTED);
         break;
     }
+}
+
+static twai_timing_basic_config_t can_get_bit_timing_config(uint32_t bitrate)
+{
+    twai_timing_basic_config_t timing = {
+        .bitrate = bitrate,
+        .sp_permill = 880,
+        .ssp_permill = 0,
+    };
+    return timing;
 }
 
 static bool IRAM_ATTR can_on_rx_done(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *user_ctx)

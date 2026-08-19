@@ -688,6 +688,22 @@ static void motion_task(void *arg)
     }
 }
 
+static esp_err_t validate_motion_enqueue_request(app_context_t *ctx, char axis, int32_t steps)
+{
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (axis_upper != 'X' && axis_upper != 'Y' && axis_upper != 'Z') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (axis_upper == 'Z' && steps != 0 && ctx->state.z_bloqueado) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t motion_init(app_context_t *ctx)
 {
     ctx->motion_queue = xQueueCreate(10, sizeof(motion_cmd_t));
@@ -716,6 +732,8 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
 
 esp_err_t motion_post_move_axis(app_context_t *ctx, char axis, int32_t steps, uint8_t sender_id, uint8_t opcode)
 {
+    ESP_RETURN_ON_ERROR(validate_motion_enqueue_request(ctx, axis, steps), APP_TAG, "movimento rejeitado");
+
     motion_cmd_t cmd = {
         .type = MOTION_CMD_MOVE_REL,
         .axis = (char)toupper((unsigned char)axis),
@@ -730,6 +748,8 @@ esp_err_t motion_post_move_axis(app_context_t *ctx, char axis, int32_t steps, ui
 
 esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t steps, uint8_t sender_id, uint8_t opcode)
 {
+    ESP_RETURN_ON_ERROR(validate_motion_enqueue_request(ctx, axis, steps), APP_TAG, "movimento forçado rejeitado");
+
     motion_cmd_t cmd = {
         .type = MOTION_CMD_MOVE_FORCE,
         .axis = (char)toupper((unsigned char)axis),
@@ -744,6 +764,8 @@ esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t ste
 
 esp_err_t motion_post_move_axis_with_params(app_context_t *ctx, char axis, int32_t steps, float speed, float accel, uint8_t sender_id, uint8_t opcode)
 {
+    ESP_RETURN_ON_ERROR(validate_motion_enqueue_request(ctx, axis, steps), APP_TAG, "movimento parametrizado rejeitado");
+
     motion_cmd_t cmd = {
         .type = MOTION_CMD_MOVE_FORCE,
         .axis = (char)toupper((unsigned char)axis),
@@ -769,5 +791,4 @@ esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id
     };
     return enqueue_motion_cmd(ctx, &cmd);
 }
-
 

@@ -206,10 +206,10 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 |------|---------------------------------------|
 | 0    | Opcode (`0x30`)                       |
 | 1    | Índice do laser (1 ou 2)              |
-| 2    | Nível PWM (0–255)                     |
+| 2    | Nível lógico do laser (0–255)         |
 | 3 (opcional) | Sequência                        |
 
-**Ação:** Configura o nível PWM do laser selecionado via `hardware_set_laser_level()`.
+**Ação:** Configura o nível lógico do laser selecionado via `hardware_set_laser_level()`, remapeado internamente para a faixa útil calibrada do módulo.
 
 **Resposta:** `CAN_EVT_ACK` ou `CAN_EVT_ERROR`.
 
@@ -273,8 +273,8 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 | 0    | Evento (`0x82`)                       |
 | 1    | Node ID do slave                      |
 | 2    | Flags de estado (bitmask)             |
-| 3    | Nível do laser 1 (0–255)              |
-| 4    | Nível do laser 2 (0–255)              |
+| 3    | Nível lógico do laser 1 (0–255)       |
+| 4    | Nível lógico do laser 2 (0–255)       |
 | 5    | Flags do fan (bitmask)                |
 | 6    | Temperatura atual (int8_t, °C × 100)  |
 | 7    | Nível de velocade (1–5)               |

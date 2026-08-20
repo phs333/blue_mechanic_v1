@@ -108,7 +108,11 @@ void app_main(void) {
   }
 
   ESP_ERROR_CHECK(storage_init());
-  ESP_ERROR_CHECK(storage_load_settings(&g_app.settings));
+  esp_err_t store_err = storage_load_settings(&g_app.settings);
+  if (store_err != ESP_OK) {
+      ESP_LOGE(APP_TAG, "Aviso ao carregar settings da NVS (%s). Usando padroes.", esp_err_to_name(store_err));
+      g_app.settings = (persisted_settings_t)APP_SETTINGS_DEFAULT_INIT;
+  }
   for (size_t i = 0; i < AXIS_COUNT; ++i) {
       g_app.state.speed_delay_us[i] = g_app.settings.speed_delay_us[i];
   }

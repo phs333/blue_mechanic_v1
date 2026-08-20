@@ -16,21 +16,26 @@ esp_err_t storage_init(void)
 
 esp_err_t storage_load_settings(persisted_settings_t *settings)
 {
-    nvs_handle_t handle;
     ESP_RETURN_ON_FALSE(settings != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "settings nulo");
-    ESP_RETURN_ON_ERROR(nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle), APP_TAG, "Falha ao abrir NVS");
+
+    nvs_handle_t handle;
+    esp_err_t open_err = nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle);
+    if (open_err != ESP_OK) {
+        ESP_LOGW(APP_TAG, "NVS namespace '%s' nao encontrado ou erro (%s). Carregando padroes.",
+                 SETTINGS_NAMESPACE, esp_err_to_name(open_err));
+        *settings = (persisted_settings_t)APP_SETTINGS_DEFAULT_INIT;
+        return storage_save_settings(settings);
+    }
 
     size_t required_size = sizeof(*settings);
     esp_err_t err = nvs_get_blob(handle, SETTINGS_KEY, settings, &required_size);
     nvs_close(handle);
 
-    if (err == ESP_ERR_NVS_NOT_FOUND || required_size != sizeof(*settings) || settings->version != SETTINGS_VERSION) {
+    if (err != ESP_OK || required_size != sizeof(*settings) || settings->version != SETTINGS_VERSION) {
+        ESP_LOGI(APP_TAG, "NVS blob inexistente, tamanho divergente ou versao antiga. Gravando padroes versao %u.",
+                 (unsigned)SETTINGS_VERSION);
         *settings = (persisted_settings_t)APP_SETTINGS_DEFAULT_INIT;
         return storage_save_settings(settings);
-    }
-
-    if (err != ESP_OK) {
-        return err;
     }
 
     if (settings->max_passos_z <= 0) {

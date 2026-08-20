@@ -171,21 +171,21 @@ class SerialClient(BaseClient):
         if m:
             self.state.update_telemetry(z_bloqueado=(m.group(1).upper() == "BLOQUEADO"))
 
-        # Drivers: ENERGIZADOS / DESLIGADOS
-        m = re.search(r'Drivers:\s*(ENERGIZADOS|DESLIGADOS)', line, re.IGNORECASE)
+        # Drivers: ENERGIZADOS / DESLIGADOS ou Drivers energizados / desligados
+        m = re.search(r'Drivers:?\s*(ENERGIZADOS|DESLIGADOS)', line, re.IGNORECASE)
         if m:
             self.state.update_telemetry(drivers_enabled=(m.group(1).upper() == "ENERGIZADOS"))
 
-        # Laser 1: 50% (128/255)
-        m = re.search(r'Laser 1:.*\((\d+)/255\)', line, re.IGNORECASE)
+        # Laser 1 / Laser Esquerdo: 50% (128/255)
+        m = re.search(r'Laser\s*(?:1|Esquerdo)?:.*\((\d+)/255\)', line, re.IGNORECASE)
         if m:
             try:
                 self.state.update_telemetry(laser1_level=int(m.group(1)))
             except ValueError:
                 pass
 
-        # Laser 2: 50% (128/255)
-        m = re.search(r'Laser 2:.*\((\d+)/255\)', line, re.IGNORECASE)
+        # Laser 2 / Laser Direito: 50% (128/255)
+        m = re.search(r'Laser\s*(?:2|Direito)?:.*\((\d+)/255\)', line, re.IGNORECASE)
         if m:
             try:
                 self.state.update_telemetry(laser2_level=int(m.group(1)))
@@ -246,10 +246,30 @@ class SerialClient(BaseClient):
         return self.send_raw("STATUS")
 
     def set_driver_enabled(self, enable: bool) -> bool:
+        self.state.update_telemetry(drivers_enabled=enable)
         return self.send_raw("DRIVER ENABLED ON" if enable else "DRIVER ENABLED OFF")
 
     def set_alarm_z(self, enable: bool) -> bool:
+        self.state.update_telemetry(alarme_z_ativo=enable)
         return self.send_raw("ALARM ON" if enable else "ALARM OFF")
+
+    def set_driver_mode(self, mode: str) -> bool:
+        """mode: 'STEPDIR' ou 'UART'"""
+        mode_u = mode.upper()
+        if "UART" in mode_u:
+            self.send_raw("DRIVER MODE UART")
+        else:
+            self.send_raw("DRIVER MODE STEPDIR")
+        return self.send_raw("DRIVER APPLY")
+
+    def set_driver_invert(self, axis: str, invert: bool) -> bool:
+        return self.send_raw(f"DRIVER INVERT {axis.upper()} {'ON' if invert else 'OFF'}")
+
+    def read_tmc_reg(self, axis: str, reg: int) -> bool:
+        return self.send_raw(f"DRIVER REG READ {axis.upper()} {reg}")
+
+    def write_tmc_reg(self, axis: str, reg: int, val: int) -> bool:
+        return self.send_raw(f"DRIVER REG WRITE {axis.upper()} {reg} {val}")
 
     def home_axis(self, axis: str) -> bool:
         axis = axis.upper()

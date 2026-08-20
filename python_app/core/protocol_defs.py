@@ -110,29 +110,12 @@ def delay_to_speed_level(delay_us: int) -> int:
 def speed_level_to_delay(level: int) -> int:
     return SPEED_LEVEL_DELAYS.get(level, 400)
 
-LASER_PWM_MIN_ACTIVE_LEVEL_8BIT = 3
-LASER_PWM_MAX_USEFUL_LEVEL_8BIT = 17
-
 def laser_level_to_percent(level: int) -> int:
-    """
-    Converte nível PWM 8-bit (0..255) em porcentagem (0..100%).
-    Faixa útil do laser: 3 a 17 (3=0%, 17=100%). Nível 0 = 0% (Desligado).
-    """
-    if level <= LASER_PWM_MIN_ACTIVE_LEVEL_8BIT:
-        return 0
-    if level >= LASER_PWM_MAX_USEFUL_LEVEL_8BIT:
-        return 100
-    span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT  # 14
-    return int(round(((level - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) * 100.0) / span))
+    level = max(0, min(255, level))
+    return int((level * 100 + 127) // 255)
 
 def percent_to_laser_level(percent: int) -> int:
-    """
-    Converte porcentagem (0..100%) em nível PWM 8-bit (3..17 de 255).
-    0% = 0 (Desligado). 1%..100% mapeia linearmente de 3 a 17.
-    """
-    if percent <= 0:
-        return 0
+    percent = max(0, min(100, percent))
     if percent >= 100:
-        return LASER_PWM_MAX_USEFUL_LEVEL_8BIT  # 17
-    span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT  # 14
-    return int(round(LASER_PWM_MIN_ACTIVE_LEVEL_8BIT + (percent * span) / 100.0))
+        return 255
+    return int((percent * 255 + 50) // 100)

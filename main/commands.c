@@ -963,26 +963,15 @@ static bool parse_laser_level_token(const char *text, uint8_t *level)
 
 static uint8_t percent_to_laser_level(uint32_t percent)
 {
-    if (percent == 0U) {
-        return 0U;
-    }
     if (percent >= 100U) {
-        return LASER_PWM_MAX_USEFUL_LEVEL_8BIT; // 17
+        return 255U;
     }
-    uint32_t span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT; // 14
-    return (uint8_t)(LASER_PWM_MIN_ACTIVE_LEVEL_8BIT + ((percent * span + 50U) / 100U));
+    return (uint8_t)((percent * 255U + 50U) / 100U);
 }
 
 static uint32_t laser_level_to_percent(uint8_t level)
 {
-    if (level <= LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) {
-        return 0U;
-    }
-    if (level >= LASER_PWM_MAX_USEFUL_LEVEL_8BIT) {
-        return 100U;
-    }
-    uint32_t span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT; // 14
-    return (((uint32_t)(level - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) * 100U + (span / 2U)) / span);
+    return ((uint32_t)level * 100U + 127U) / 255U;
 }
 
 static void trim_ascii(char *text)

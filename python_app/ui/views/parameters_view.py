@@ -1,15 +1,15 @@
 """
-Parameters and Hardware Configuration View (NVS, TMC2209 & CAN).
+Parameters and Hardware Configuration View (NVS, Kinematics, TMC2209 & CAN).
 
 Kinematics:
 - Eixo C: Base Rotativa
 - Eixo A: Pivot dos Lasers (2 Lasers Colineares Opostos)
-- Eixo Z: Atuador Linear (Correia e Polia GT2 com número de dentes configurável)
+- Eixo Z: Atuador Linear (Correia e Polia GT2 com dentes configuráveis)
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QFrame, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox, QGroupBox, QScrollArea,
+    QFrame, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox, QScrollArea,
     QLineEdit, QMessageBox
 )
 from PyQt6.QtCore import Qt
@@ -41,7 +41,7 @@ class ParametersView(QWidget):
         title_vbox = QVBoxLayout()
         title_lbl = QLabel("Gerenciamento de Parâmetros & NVS")
         title_lbl.setStyleSheet("color: #38bdf8; font-size: 16px; font-weight: 700;")
-        sub_lbl = QLabel("Ajuste cinemática dos Eixos C (Base), A (Pivot), Z (Linear e Polia GT2), TMC2209 e CAN")
+        sub_lbl = QLabel("Ajuste completo da cinemática C/A/Z, Driver Mode, Inversão de DIR, TMC2209 e CAN")
         sub_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
         title_vbox.addWidget(title_lbl)
         title_vbox.addWidget(sub_lbl)
@@ -49,16 +49,64 @@ class ParametersView(QWidget):
         
         header_layout.addStretch()
         
-        self.btn_refresh = QPushButton("📥 Ler do Hardware")
+        self.btn_refresh = QPushButton("📥 Ler do Hardware (STATUS)")
         self.btn_refresh.clicked.connect(self.comm.request_status)
         header_layout.addWidget(self.btn_refresh)
         
-        self.btn_save_nvs = QPushButton("💾 Gravar na NVS")
+        self.btn_save_nvs = QPushButton("💾 Gravar Toda Configuração na NVS")
         self.btn_save_nvs.setProperty("class", "btn-primary")
         self.btn_save_nvs.clicked.connect(self._apply_all_parameters)
         header_layout.addWidget(self.btn_save_nvs)
         
         main_layout.addWidget(header_card)
+        
+        # --- 0. Driver Mode & Hardware DIR Inversion Card ---
+        driver_mode_card = QFrame()
+        driver_mode_card.setProperty("class", "card")
+        driver_mode_layout = QVBoxLayout(driver_mode_card)
+        driver_mode_layout.setContentsMargins(16, 14, 16, 14)
+        driver_mode_layout.setSpacing(12)
+        
+        dm_title = QLabel("1. Modo do Barramento dos Drivers & Inversão de Sentido (DIR)")
+        dm_title.setProperty("class", "section-title")
+        driver_mode_layout.addWidget(dm_title)
+        
+        dm_grid = QGridLayout()
+        dm_grid.setSpacing(12)
+        
+        dm_grid.addWidget(QLabel("Modo do Barramento (DRIVER MODE):"), 0, 0)
+        self.combo_driver_mode = QComboBox()
+        self.combo_driver_mode.addItems(["STEP/DIR Puro (STEPDIR)", "UART TMC2209 Digital (UART)"])
+        self.combo_driver_mode.setCurrentIndex(1)
+        dm_grid.addWidget(self.combo_driver_mode, 0, 1)
+        
+        self.btn_apply_mode = QPushButton("⚡ Aplicar Modo (DRIVER APPLY)")
+        self.btn_apply_mode.clicked.connect(self._apply_driver_mode)
+        dm_grid.addWidget(self.btn_apply_mode, 0, 2)
+        
+        # Inversion checkboxes
+        inv_box = QHBoxLayout()
+        inv_box.setSpacing(16)
+        inv_lbl = QLabel("Inversão de Hardware (DRIVER INVERT):")
+        inv_lbl.setStyleSheet("color: #94a3b8; font-weight: 600;")
+        inv_box.addWidget(inv_lbl)
+        
+        self.chk_inv_hw_c = QCheckBox("Inverter DIR C (Base)")
+        self.chk_inv_hw_c.toggled.connect(lambda chk: self.comm.set_driver_invert('C', chk))
+        inv_box.addWidget(self.chk_inv_hw_c)
+        
+        self.chk_inv_hw_a = QCheckBox("Inverter DIR A (Pivot)")
+        self.chk_inv_hw_a.toggled.connect(lambda chk: self.comm.set_driver_invert('A', chk))
+        inv_box.addWidget(self.chk_inv_hw_a)
+        
+        self.chk_inv_hw_z = QCheckBox("Inverter DIR Z (Linear)")
+        self.chk_inv_hw_z.toggled.connect(lambda chk: self.comm.set_driver_invert('Z', chk))
+        inv_box.addWidget(self.chk_inv_hw_z)
+        
+        inv_box.addStretch()
+        driver_mode_layout.addLayout(dm_grid)
+        driver_mode_layout.addLayout(inv_box)
+        main_layout.addWidget(driver_mode_card)
         
         # --- 1. Kinematics & Limits Card ---
         kin_card = QFrame()
@@ -67,7 +115,7 @@ class ParametersView(QWidget):
         kin_layout.setContentsMargins(16, 14, 16, 14)
         kin_layout.setSpacing(12)
         
-        kin_title = QLabel("1. Cinemática e Limites de Velocidade/Aceleração")
+        kin_title = QLabel("2. Cinemática, Passos do Motor, Velocidade e Aceleração")
         kin_title.setProperty("class", "section-title")
         kin_layout.addWidget(kin_title)
         
@@ -76,16 +124,16 @@ class ParametersView(QWidget):
         
         # Headers
         kin_grid.addWidget(QLabel("Eixo"), 0, 0)
-        kin_grid.addWidget(QLabel("Passos/Volta"), 0, 1)
+        kin_grid.addWidget(QLabel("Passos Base Motor (ex: 200/400)"), 0, 1)
         kin_grid.addWidget(QLabel("Velocidade (deg/s ou mm/s)"), 0, 2)
         kin_grid.addWidget(QLabel("Aceleração (deg/s² ou mm/s²)"), 0, 3)
-        kin_grid.addWidget(QLabel("Inverter Rotação"), 0, 4)
         
         # Axis C (Base Rotativa)
         kin_grid.addWidget(QLabel("Eixo C (Base):"), 1, 0)
         self.spin_steps_c = QSpinBox()
-        self.spin_steps_c.setRange(200, 10000)
+        self.spin_steps_c.setRange(20, 10000)
         self.spin_steps_c.setValue(200)
+        self.spin_steps_c.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_c, 1, 1)
         
         self.spin_speed_c = QDoubleSpinBox()
@@ -98,14 +146,12 @@ class ParametersView(QWidget):
         self.spin_accel_c.setValue(5000.0)
         kin_grid.addWidget(self.spin_accel_c, 1, 3)
         
-        self.chk_invert_c = QCheckBox("Inverter C")
-        kin_grid.addWidget(self.chk_invert_c, 1, 4)
-        
         # Axis A (Pivot dos Lasers)
         kin_grid.addWidget(QLabel("Eixo A (Pivot):"), 2, 0)
         self.spin_steps_a = QSpinBox()
-        self.spin_steps_a.setRange(200, 10000)
+        self.spin_steps_a.setRange(20, 10000)
         self.spin_steps_a.setValue(200)
+        self.spin_steps_a.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_a, 2, 1)
         
         self.spin_speed_a = QDoubleSpinBox()
@@ -118,15 +164,12 @@ class ParametersView(QWidget):
         self.spin_accel_a.setValue(5000.0)
         kin_grid.addWidget(self.spin_accel_a, 2, 3)
         
-        self.chk_invert_a = QCheckBox("Inverter A")
-        kin_grid.addWidget(self.chk_invert_a, 2, 4)
-        
         # Axis Z (Linear)
         kin_grid.addWidget(QLabel("Eixo Z (Linear):"), 3, 0)
         self.spin_steps_z = QSpinBox()
-        self.spin_steps_z.setRange(200, 10000)
+        self.spin_steps_z.setRange(20, 10000)
         self.spin_steps_z.setValue(200)
-        self.spin_steps_z.valueChanged.connect(self._update_z_calc_preview)
+        self.spin_steps_z.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_z, 3, 1)
         
         self.spin_speed_z = QDoubleSpinBox()
@@ -138,9 +181,6 @@ class ParametersView(QWidget):
         self.spin_accel_z.setRange(1.0, 5000.0)
         self.spin_accel_z.setValue(1000.0)
         kin_grid.addWidget(self.spin_accel_z, 3, 3)
-        
-        self.chk_invert_z = QCheckBox("Inverter Z")
-        kin_grid.addWidget(self.chk_invert_z, 3, 4)
         
         kin_layout.addLayout(kin_grid)
         
@@ -158,8 +198,8 @@ class ParametersView(QWidget):
         self.spin_pulley_z = QSpinBox()
         self.spin_pulley_z.setRange(6, 200)
         self.spin_pulley_z.setValue(16)
-        self.spin_pulley_z.setToolTip("Número de dentes da polia dentada GT2 montada no eixo do motor Z (ex: 16T, 20T, 36T)")
-        self.spin_pulley_z.valueChanged.connect(self._update_z_calc_preview)
+        self.spin_pulley_z.setToolTip("Número de dentes da polia dentada GT2 montada no motor Z (ex: 16T, 20T, 36T)")
+        self.spin_pulley_z.valueChanged.connect(self._update_kinematics_preview)
         z_config_grid.addWidget(self.spin_pulley_z, 0, 1)
         
         z_config_grid.addWidget(QLabel("📏 Limite Máximo Z (max_passos_z):"), 0, 2)
@@ -167,15 +207,15 @@ class ParametersView(QWidget):
         self.spin_max_z.setRange(1000, 100000)
         self.spin_max_z.setValue(20000)
         self.spin_max_z.setSingleStep(500)
-        self.spin_max_z.valueChanged.connect(self._update_z_calc_preview)
+        self.spin_max_z.valueChanged.connect(self._update_kinematics_preview)
         z_config_grid.addWidget(self.spin_max_z, 0, 3)
         
         z_extra_layout.addLayout(z_config_grid)
         
         # Dynamic preview banner
-        self.lbl_z_calc_info = QLabel("Cálculo: 16 dentes GT2 (passo 2.0mm) → 32.00 mm/volta | Resolução: 10.00 µm/passo (100.0 passos/mm)")
-        self.lbl_z_calc_info.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
-        z_extra_layout.addWidget(self.lbl_z_calc_info)
+        self.lbl_kin_calc_info = QLabel("Cálculo: ...")
+        self.lbl_kin_calc_info.setStyleSheet("color: #38bdf8; font-weight: 600; font-size: 11px;")
+        z_extra_layout.addWidget(self.lbl_kin_calc_info)
         
         kin_layout.addWidget(z_extra_frame)
         main_layout.addWidget(kin_card)
@@ -187,7 +227,7 @@ class ParametersView(QWidget):
         tmc_layout.setContentsMargins(16, 14, 16, 14)
         tmc_layout.setSpacing(12)
         
-        tmc_title = QLabel("2. Configuração Avançada dos Drivers TMC2209")
+        tmc_title = QLabel("3. Configuração Avançada dos Drivers TMC2209")
         tmc_title.setProperty("class", "section-title")
         tmc_layout.addWidget(tmc_title)
         
@@ -221,6 +261,7 @@ class ParametersView(QWidget):
         self.combo_tmc_usteps_c = QComboBox()
         self.combo_tmc_usteps_c.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_c.setCurrentText("16")
+        self.combo_tmc_usteps_c.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_c, 1, 4)
         
         self.chk_tmc_sc_c = QCheckBox("SpreadCycle")
@@ -246,6 +287,7 @@ class ParametersView(QWidget):
         self.combo_tmc_usteps_a = QComboBox()
         self.combo_tmc_usteps_a.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_a.setCurrentText("16")
+        self.combo_tmc_usteps_a.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_a, 2, 4)
         
         self.chk_tmc_sc_a = QCheckBox("SpreadCycle")
@@ -271,7 +313,7 @@ class ParametersView(QWidget):
         self.combo_tmc_usteps_z = QComboBox()
         self.combo_tmc_usteps_z.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_z.setCurrentText("16")
-        self.combo_tmc_usteps_z.currentTextChanged.connect(self._update_z_calc_preview)
+        self.combo_tmc_usteps_z.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_z, 3, 4)
         
         self.chk_tmc_sc_z = QCheckBox("SpreadCycle")
@@ -279,14 +321,46 @@ class ParametersView(QWidget):
         
         tmc_layout.addLayout(tmc_grid)
         
-        # TMC Apply Button
+        # TMC Apply Button & Direct Register Access Tool
         tmc_btn_row = QHBoxLayout()
-        self.btn_apply_tmc = QPushButton("⚡ Aplicar Configuração UART TMC2209 (DRIVER APPLY)")
+        self.btn_apply_tmc = QPushButton("⚡ Aplicar Configuração UART TMC2209")
         self.btn_apply_tmc.clicked.connect(self._apply_tmc_settings)
         tmc_btn_row.addWidget(self.btn_apply_tmc)
         tmc_btn_row.addStretch()
         tmc_layout.addLayout(tmc_btn_row)
         
+        # Direct Register Tool
+        reg_frame = QFrame()
+        reg_frame.setProperty("class", "metric-card")
+        reg_layout = QHBoxLayout(reg_frame)
+        reg_layout.setContentsMargins(10, 8, 10, 8)
+        reg_layout.setSpacing(10)
+        
+        reg_layout.addWidget(QLabel("Diagnóstico TMC:"))
+        self.combo_reg_axis = QComboBox()
+        self.combo_reg_axis.addItems(["C", "A", "Z"])
+        reg_layout.addWidget(self.combo_reg_axis)
+        
+        self.txt_reg_addr = QLineEdit("0x06")
+        self.txt_reg_addr.setPlaceholderText("Reg Hex (ex: 0x06)")
+        self.txt_reg_addr.setMaximumWidth(80)
+        reg_layout.addWidget(self.txt_reg_addr)
+        
+        self.txt_reg_val = QLineEdit("0x00000000")
+        self.txt_reg_val.setPlaceholderText("Val Hex")
+        self.txt_reg_val.setMaximumWidth(110)
+        reg_layout.addWidget(self.txt_reg_val)
+        
+        self.btn_reg_read = QPushButton("📖 Ler Reg")
+        self.btn_reg_read.clicked.connect(self._read_tmc_reg)
+        reg_layout.addWidget(self.btn_reg_read)
+        
+        self.btn_reg_write = QPushButton("✏️ Gravar Reg")
+        self.btn_reg_write.clicked.connect(self._write_tmc_reg)
+        reg_layout.addWidget(self.btn_reg_write)
+        
+        reg_layout.addStretch()
+        tmc_layout.addWidget(reg_frame)
         main_layout.addWidget(tmc_card)
         
         # --- 3. CAN Network Settings Card ---
@@ -296,7 +370,7 @@ class ParametersView(QWidget):
         can_layout.setContentsMargins(16, 14, 16, 14)
         can_layout.setSpacing(12)
         
-        can_title = QLabel("3. Configurações da Rede CAN (TWAI ESP32-S3)")
+        can_title = QLabel("4. Configurações da Rede CAN (TWAI ESP32-S3)")
         can_title.setProperty("class", "section-title")
         can_layout.addWidget(can_title)
         
@@ -345,25 +419,52 @@ class ParametersView(QWidget):
         outer_layout.addWidget(scroll)
         
         self.state.parameters_updated.connect(self._on_parameters_updated)
-        self._update_z_calc_preview()
+        self._update_kinematics_preview()
 
-    def _update_z_calc_preview(self):
+    def _update_kinematics_preview(self):
         teeth = self.spin_pulley_z.value()
-        spr = self.spin_steps_z.value()
+        spr_z = self.spin_steps_z.value()
+        spr_c = self.spin_steps_c.value()
         try:
-            usteps = int(self.combo_tmc_usteps_z.currentText())
+            usteps_z = int(self.combo_tmc_usteps_z.currentText())
+            usteps_c = int(self.combo_tmc_usteps_c.currentText())
         except ValueError:
-            usteps = 16
+            usteps_z = 16
+            usteps_c = 16
+            
         mm_rev = calc_z_mm_per_rev(teeth)
-        mm_step = calc_z_mm_per_step(teeth, spr, usteps)
-        steps_mm = calc_z_steps_per_mm(teeth, spr, usteps)
+        mm_step = calc_z_mm_per_step(teeth, spr_z, usteps_z)
+        steps_mm = calc_z_steps_per_mm(teeth, spr_z, usteps_z)
         res_um = mm_step * 1000.0
         max_mm = self.spin_max_z.value() * mm_step
         
-        self.lbl_z_calc_info.setText(
-            f"Cálculo Z: {teeth} dentes GT2 ({Z_BELT_PITCH_MM:.1f}mm) → {mm_rev:.2f} mm/volta | "
-            f"Resolução: {res_um:.2f} µm/passo ({steps_mm:.1f} passos/mm @ {usteps}x) | Curso Total: {max_mm:.1f} mm"
+        deg_step_c = 360.0 / (spr_c * usteps_c) if (spr_c * usteps_c) > 0 else 0.1125
+        
+        self.lbl_kin_calc_info.setText(
+            f"Eixo C/A: {spr_c * usteps_c} micropassos/volta ({deg_step_c:.4f}°/passo @ {usteps_c}x) | "
+            f"Eixo Z: {teeth}T GT2 → {mm_rev:.2f} mm/volta | Resolução: {res_um:.2f} µm/passo ({steps_mm:.1f} passos/mm @ {usteps_z}x) | Curso: {max_mm:.1f} mm"
         )
+
+    def _apply_driver_mode(self):
+        mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
+        self.comm.set_driver_mode(mode)
+
+    def _read_tmc_reg(self):
+        try:
+            axis = self.combo_reg_axis.currentText()
+            reg = int(self.txt_reg_addr.text(), 0)
+            self.comm.read_tmc_reg(axis, reg)
+        except ValueError:
+            QMessageBox.warning(self, "Valor Inválido", "Endereço do registrador em formato inválido.")
+
+    def _write_tmc_reg(self):
+        try:
+            axis = self.combo_reg_axis.currentText()
+            reg = int(self.txt_reg_addr.text(), 0)
+            val = int(self.txt_reg_val.text(), 0)
+            self.comm.write_tmc_reg(axis, reg, val)
+        except ValueError:
+            QMessageBox.warning(self, "Valor Inválido", "Endereço ou valor do registrador em formato inválido.")
 
     def _on_parameters_updated(self, p: HardwareParameters):
         self.spin_pulley_z.blockSignals(True)
@@ -372,7 +473,7 @@ class ParametersView(QWidget):
         self.spin_max_z.blockSignals(True)
         self.spin_max_z.setValue(p.max_passos_z)
         self.spin_max_z.blockSignals(False)
-        self._update_z_calc_preview()
+        self._update_kinematics_preview()
 
     def _apply_tmc_settings(self):
         if hasattr(self.comm.active_client, 'set_tmc_uart_current'):
@@ -412,13 +513,13 @@ class ParametersView(QWidget):
             client.set_axis_speed('A', self.spin_speed_a.value())
             client.set_axis_speed('Z', self.spin_speed_z.value())
             # Inverts
-            client.set_driver_invert('C', self.chk_invert_c.isChecked())
-            client.set_driver_invert('A', self.chk_invert_a.isChecked())
-            client.set_driver_invert('Z', self.chk_invert_z.isChecked())
+            client.set_driver_invert('C', self.chk_inv_hw_c.isChecked())
+            client.set_driver_invert('A', self.chk_inv_hw_a.isChecked())
+            client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked())
             # Pulley Z & Max Z
             client.set_z_pulley_teeth(self.spin_pulley_z.value())
             client.set_length_z(self.spin_max_z.value())
             
         self._apply_tmc_settings()
         self._apply_can_settings()
-        QMessageBox.information(self, "Sucesso", "Parâmetros e número de dentes da polia Z enviados ao hardware!")
+        QMessageBox.information(self, "Sucesso", "Parâmetros e configurações de cinemática/drivers enviados ao hardware!")

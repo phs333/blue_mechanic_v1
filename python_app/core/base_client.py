@@ -85,3 +85,19 @@ class BaseClient(ABC):
     def set_z_pulley_teeth(self, teeth: int) -> bool:
         """Set Z motor pulley teeth count."""
         return True
+
+    def set_driver_mode(self, mode: str) -> bool:
+        """Set driver bus mode (STEPDIR or UART)."""
+        return True
+
+    def set_driver_invert(self, axis: str, invert: bool) -> bool:
+        """Set hardware driver DIR inversion (C, A, Z)."""
+        return True
+
+    def read_tmc_reg(self, axis: str, reg: int) -> bool:
+        """Read TMC register directly."""
+        return True
+
+    def write_tmc_reg(self, axis: str, reg: int, val: int) -> bool:
+        """Write TMC register directly."""
+        return True

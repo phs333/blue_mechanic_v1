@@ -126,9 +126,9 @@ void app_main(void) {
     ESP_LOGW(APP_TAG, "CAN/TWAI nao entrou totalmente. Firmware segue local.");
   }
 
-  ESP_LOGI(APP_TAG, "Postando pedido de auto-ajuste X e Y...");
-  (void)motion_post_home_axis(&g_app, 'X', 0, 0);
-  (void)motion_post_home_axis(&g_app, 'Y', 0, 0);
+  ESP_LOGI(APP_TAG, "Postando pedido de auto-ajuste C e A...");
+  (void)motion_post_home_axis(&g_app, 'C', 0, 0);
+  (void)motion_post_home_axis(&g_app, 'A', 0, 0);
 
   xTaskCreatePinnedToCore(safety_task, "safety_task", 4096, &g_app, 10, NULL,
                           1);

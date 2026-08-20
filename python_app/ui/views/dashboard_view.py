@@ -61,10 +61,10 @@ class DashboardView(QWidget):
         self.btn_home_all.clicked.connect(lambda: self.comm.home_axis("ALL"))
         header_layout.addWidget(self.btn_home_all)
         
-        self.btn_estop = QPushButton("🛑 Parar / Desligar")
-        self.btn_estop.setProperty("class", "btn-danger")
-        self.btn_estop.clicked.connect(lambda: self.comm.set_driver_enabled(False))
-        header_layout.addWidget(self.btn_estop)
+        self.btn_driver_toggle = QPushButton("⚡ Ligar Drivers")
+        self.btn_driver_toggle.setProperty("class", "btn-success")
+        self.btn_driver_toggle.clicked.connect(self._toggle_drivers)
+        header_layout.addWidget(self.btn_driver_toggle)
         
         self.main_layout.addWidget(header_card)
         
@@ -154,6 +154,10 @@ class DashboardView(QWidget):
         
     def _on_jog(self, axis: str, steps: int):
         self.comm.move_axis(axis, steps)
+
+    def _toggle_drivers(self):
+        new_state = not self.state.telemetry.drivers_enabled
+        self.comm.set_driver_enabled(new_state)
         
     def update_telemetry(self, t: HardwareTelemetry):
         # Update C & A
@@ -187,9 +191,15 @@ class DashboardView(QWidget):
         if t.drivers_enabled:
             self.card_drivers.set_value("ENERGIZADOS")
             self.card_drivers.set_badge("ON", "green")
+            self.btn_driver_toggle.setText("🛑 Desligar Drivers")
+            self.btn_driver_toggle.setProperty("class", "btn-danger")
         else:
             self.card_drivers.set_value("DESLIGADOS")
             self.card_drivers.set_badge("OFF", "gray")
+            self.btn_driver_toggle.setText("⚡ Ligar Drivers")
+            self.btn_driver_toggle.setProperty("class", "btn-success")
+        self.btn_driver_toggle.style().unpolish(self.btn_driver_toggle)
+        self.btn_driver_toggle.style().polish(self.btn_driver_toggle)
             
         # Update Alarm Z
         if t.z_bloqueado:

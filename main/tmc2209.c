@@ -328,10 +328,19 @@ static esp_err_t tmc_write_register_raw(uint8_t slave_addr, uint8_t reg_addr, ui
     frame[7] = tmc_crc8(frame, 7);
 
     ESP_RETURN_ON_FALSE(s_uart_installed, ESP_ERR_INVALID_STATE, APP_TAG, "UART TMC nao instalada");
-    ESP_RETURN_ON_ERROR(uart_flush_input(TMC_UART_PORT), APP_TAG, "Falha ao limpar RX UART");
-    ESP_RETURN_ON_FALSE(uart_write_bytes(TMC_UART_PORT, frame, sizeof(frame)) == (int)sizeof(frame), ESP_FAIL, APP_TAG, "Falha ao escrever UART TMC");
-    ESP_RETURN_ON_ERROR(uart_wait_tx_done(TMC_UART_PORT, pdMS_TO_TICKS(20)), APP_TAG, "Timeout TX UART TMC");
-    return ESP_OK;
+    
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        (void)uart_flush_input(TMC_UART_PORT);
+        if (uart_write_bytes(TMC_UART_PORT, frame, sizeof(frame)) == (int)sizeof(frame)) {
+            esp_err_t err = uart_wait_tx_done(TMC_UART_PORT, pdMS_TO_TICKS(20));
+            if (err == ESP_OK) {
+                esp_rom_delay_us(500);
+                return ESP_OK;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return ESP_FAIL;
 }
 
 static esp_err_t tmc_read_register_raw(uint8_t slave_addr, uint8_t reg_addr, uint32_t *value)
@@ -342,42 +351,48 @@ static esp_err_t tmc_read_register_raw(uint8_t slave_addr, uint8_t reg_addr, uin
         reg_addr,
         0,
     };
-    uint8_t rx_buf[24];
-
-    ESP_RETURN_ON_FALSE(value != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "value nulo");
     request[3] = tmc_crc8(request, 3);
 
-    ESP_RETURN_ON_ERROR(uart_flush_input(TMC_UART_PORT), APP_TAG, "Falha ao limpar RX UART");
-    ESP_RETURN_ON_FALSE(uart_write_bytes(TMC_UART_PORT, request, sizeof(request)) == (int)sizeof(request), ESP_FAIL, APP_TAG, "Falha ao enviar read UART");
-    ESP_RETURN_ON_ERROR(uart_wait_tx_done(TMC_UART_PORT, pdMS_TO_TICKS(20)), APP_TAG, "Timeout TX UART TMC");
+    ESP_RETURN_ON_FALSE(value != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "value nulo");
+    ESP_RETURN_ON_FALSE(s_uart_installed, ESP_ERR_INVALID_STATE, APP_TAG, "UART TMC nao instalada");
 
-    if (TMC_UART_TX_PIN == TMC_UART_RX_PIN) {
-        uint8_t dummy[4];
-        (void)uart_read_bytes(TMC_UART_PORT, dummy, sizeof(request), pdMS_TO_TICKS(10));
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        uint8_t rx_buf[32] = {0};
+        (void)uart_flush_input(TMC_UART_PORT);
+        
+        if (uart_write_bytes(TMC_UART_PORT, request, sizeof(request)) != (int)sizeof(request)) {
+            continue;
+        }
+        (void)uart_wait_tx_done(TMC_UART_PORT, pdMS_TO_TICKS(20));
+
+        int len = uart_read_bytes(TMC_UART_PORT, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(TMC_UART_REPLY_TIMEOUT_MS));
+        if (len >= 8) {
+            for (int start = 0; start <= (len - 8); ++start) {
+                if (rx_buf[start] != TMC_SYNC_BYTE) {
+                    continue;
+                }
+                // Resposta do TMC2209 sempre tem byte 1 = 0xFF (Master Address)
+                if (rx_buf[start + 1] != 0xFF) {
+                    continue;
+                }
+                if (rx_buf[start + 2] != reg_addr) {
+                    continue;
+                }
+                if (tmc_crc8(&rx_buf[start], 7) != rx_buf[start + 7]) {
+                    continue;
+                }
+
+                *value = ((uint32_t)rx_buf[start + 3] << 24) |
+                         ((uint32_t)rx_buf[start + 4] << 16) |
+                         ((uint32_t)rx_buf[start + 5] << 8) |
+                         (uint32_t)rx_buf[start + 6];
+                return ESP_OK;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(4));
     }
 
-    int len = uart_read_bytes(TMC_UART_PORT, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(TMC_UART_REPLY_TIMEOUT_MS));
-    ESP_RETURN_ON_FALSE(len >= 8, ESP_ERR_TIMEOUT, APP_TAG, "Sem resposta UART TMC");
-
-    for (int start = 0; start <= (len - 8); ++start) {
-        if (rx_buf[start] != TMC_SYNC_BYTE) {
-            continue;
-        }
-        if (rx_buf[start + 2] != reg_addr) {
-            continue;
-        }
-        if (tmc_crc8(&rx_buf[start], 7) != rx_buf[start + 7]) {
-            continue;
-        }
-
-        *value = ((uint32_t)rx_buf[start + 3] << 24) |
-                 ((uint32_t)rx_buf[start + 4] << 16) |
-                 ((uint32_t)rx_buf[start + 5] << 8) |
-                 (uint32_t)rx_buf[start + 6];
-        return ESP_OK;
-    }
-
-    return ESP_ERR_INVALID_CRC;
+    return ESP_ERR_TIMEOUT;
 }
 
 static int microsteps_to_mres(uint16_t microsteps)

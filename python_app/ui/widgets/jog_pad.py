@@ -1,20 +1,15 @@
 """
 Jog Pad Widget for Interactive Motion Control.
 Features directional cross-pad for Axis C (Base Rotativa) and Axis A (Pivot dos Lasers),
-vertical up/down for Axis Z (Atuador Linear), and customizable step sizes.
-
-Kinematic Architecture:
-- Eixo C: Base Rotativa
-- Eixo A: Pivot acoplado na base rotativa (com 2 lasers colineares opostos)
-- Eixo Z: Atuador Linear
+vertical up/down for Axis Z (Atuador Linear), customizable step sizes, and direction inversion.
 """
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QComboBox, QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox
+    QComboBox, QCheckBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from python_app.core.protocol_defs import GRAUS_POR_PASSO_CA, PASSOS_POR_MM_Z
+from python_app.core.protocol_defs import GRAUS_POR_PASSO_CA
 
 class JogPad(QFrame):
     # Emits (axis: 'C'|'A'|'Z', steps: int)
@@ -27,8 +22,9 @@ class JogPad(QFrame):
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(14, 12, 14, 12)
-        main_layout.setSpacing(12)
+        main_layout.setSpacing(10)
         
+        # Header
         title_layout = QHBoxLayout()
         title = QLabel("Painel de Jog & Movimentação")
         title.setProperty("class", "section-title")
@@ -36,30 +32,57 @@ class JogPad(QFrame):
         title_layout.addStretch()
         main_layout.addLayout(title_layout)
         
-        # Step Size Selector
+        # Step Size Selector Row
         step_layout = QHBoxLayout()
-        step_lbl = QLabel("Tamanho do Passo:")
-        step_lbl.setStyleSheet("color: #94a3b8; font-weight: 600;")
-        step_layout.addWidget(step_lbl)
+        step_layout.setSpacing(10)
         
+        step_layout.addWidget(QLabel("Passo C/A:"))
         self.combo_ca_step = QComboBox()
-        self.combo_ca_step.addItems(["0.5°", "1.0°", "2.0°", "5.0°", "10.0°", "45.0°"])
-        self.combo_ca_step.setCurrentIndex(3) # 5.0° default
-        step_layout.addWidget(QLabel("C / A:"))
+        self.combo_ca_step.addItems(["0.1°", "0.5°", "1.0°", "2.0°", "5.0°", "10.0°", "45.0°", "90.0°"])
+        self.combo_ca_step.setCurrentText("5.0°")
         step_layout.addWidget(self.combo_ca_step)
         
+        step_layout.addWidget(QLabel("Passo Z:"))
         self.combo_z_step = QComboBox()
-        self.combo_z_step.addItems(["100 passos (1 mm)", "400 passos (4 mm)", "1000 passos (10 mm)", "2000 passos (20 mm)"])
-        self.combo_z_step.setCurrentIndex(1) # 400 steps default
-        step_layout.addWidget(QLabel("Z:"))
+        self.combo_z_step.addItems([
+            "10 passos (0.1 mm)",
+            "50 passos (0.5 mm)",
+            "100 passos (1.0 mm)",
+            "400 passos (4.0 mm)",
+            "1000 passos (10.0 mm)",
+            "2000 passos (20.0 mm)"
+        ])
+        self.combo_z_step.setCurrentIndex(3) # 400 steps default
         step_layout.addWidget(self.combo_z_step)
         
         step_layout.addStretch()
         main_layout.addLayout(step_layout)
         
+        # Software Direction Inversion Row (Jog DIR)
+        inv_row = QHBoxLayout()
+        inv_row.setSpacing(14)
+        inv_lbl = QLabel("Sentido no Jog:")
+        inv_lbl.setStyleSheet("color: #64748b; font-size: 11px; font-weight: 600;")
+        inv_row.addWidget(inv_lbl)
+        
+        self.chk_inv_c = QCheckBox("Inverter C")
+        self.chk_inv_c.setStyleSheet("font-size: 11px;")
+        inv_row.addWidget(self.chk_inv_c)
+        
+        self.chk_inv_a = QCheckBox("Inverter A")
+        self.chk_inv_a.setStyleSheet("font-size: 11px;")
+        inv_row.addWidget(self.chk_inv_a)
+        
+        self.chk_inv_z = QCheckBox("Inverter Z")
+        self.chk_inv_z.setStyleSheet("font-size: 11px;")
+        inv_row.addWidget(self.chk_inv_z)
+        
+        inv_row.addStretch()
+        main_layout.addLayout(inv_row)
+        
         # Grid layout for Pads
         controls_layout = QHBoxLayout()
-        controls_layout.setSpacing(24)
+        controls_layout.setSpacing(20)
         
         # --- C/A Cross Pad ---
         ca_group = QVBoxLayout()
@@ -146,14 +169,21 @@ class JogPad(QFrame):
 
     def _get_z_step_steps(self) -> int:
         idx = self.combo_z_step.currentIndex()
-        values = [100, 400, 1000, 2000]
+        values = [10, 50, 100, 400, 1000, 2000]
         return values[idx] if idx < len(values) else 400
 
     def _on_jog_ca(self, axis: str, direction: int):
+        if axis == 'C' and self.chk_inv_c.isChecked():
+            direction *= -1
+        elif axis == 'A' and self.chk_inv_a.isChecked():
+            direction *= -1
+            
         deg = self._get_ca_step_deg()
         steps = int(round((deg / GRAUS_POR_PASSO_CA) * direction))
         self.jog_requested.emit(axis, steps)
 
     def _on_jog_z(self, direction: int):
+        if self.chk_inv_z.isChecked():
+            direction *= -1
         steps = self._get_z_step_steps() * direction
         self.jog_requested.emit('Z', steps)

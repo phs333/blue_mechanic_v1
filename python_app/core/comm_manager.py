@@ -139,3 +139,23 @@ class CommManager(QObject):
         if self.active_client:
             return self.active_client.set_z_pulley_teeth(teeth)
         return False
+
+    def set_driver_mode(self, mode: str) -> bool:
+        if self.active_client:
+            return self.active_client.set_driver_mode(mode)
+        return False
+
+    def set_driver_invert(self, axis: str, invert: bool) -> bool:
+        if self.active_client:
+            return self.active_client.set_driver_invert(axis, invert)
+        return False
+
+    def read_tmc_reg(self, axis: str, reg: int) -> bool:
+        if self.active_client:
+            return self.active_client.read_tmc_reg(axis, reg)
+        return False
+
+    def write_tmc_reg(self, axis: str, reg: int, val: int) -> bool:
+        if self.active_client:
+            return self.active_client.write_tmc_reg(axis, reg, val)
+        return False

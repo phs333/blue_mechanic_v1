@@ -398,12 +398,12 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
              return ESP_ERR_NO_MEM;
          }
          compute_trapezoidal_profile(ctx, axis_upper, start_delay, target_delay, abs_steps, ramp_steps, delay_buffer);
-         esp_err_t rmt_err = hardware_step_pulse_rmt_profiled(axis_upper, delay_buffer, abs_steps);
+         esp_err_t rmt_err = hardware_step_pulse_profiled(axis_upper, delay_buffer, abs_steps);
          heap_caps_free(delay_buffer);
          if (accel_override > 0.0f) {
              ctx->settings.accel[axis_idx] = save_accel;
          }
-         ESP_LOGI(APP_TAG, "MOVE_F %c RMT retornou %s", axis_upper, esp_err_to_name(rmt_err));
+         ESP_LOGI(APP_TAG, "MOVE_F %c concluido: %s", axis_upper, esp_err_to_name(rmt_err));
 
          xSemaphoreGive(ctx->motion_mutex);
          return rmt_err;
@@ -593,7 +593,7 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
         return ESP_ERR_NO_MEM;
     }
     compute_trapezoidal_profile(ctx, axis, start_delay, target_delay, abs_steps, ramp_steps, delay_buffer);
-    esp_err_t rmt_err = hardware_step_pulse_rmt_profiled(axis, delay_buffer, abs_steps);
+    esp_err_t rmt_err = hardware_step_pulse_profiled(axis_upper, delay_buffer, abs_steps);
     heap_caps_free(delay_buffer);
 
     xSemaphoreGive(ctx->motion_mutex);

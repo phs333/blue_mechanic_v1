@@ -133,9 +133,66 @@ esp_err_t hardware_init(app_context_t *ctx)
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us)
 {
     gpio_set_level(step_pin, 1);
-    esp_rom_delay_us(delay_us);
+    esp_rom_delay_us(3);
     gpio_set_level(step_pin, 0);
-    esp_rom_delay_us(delay_us);
+    uint32_t low_delay = (delay_us * 2U > 3U) ? (delay_us * 2U - 3U) : 5U;
+    esp_rom_delay_us(low_delay);
+}
+
+esp_err_t hardware_step_pulse_profiled(char axis, const uint32_t *delay_us, uint32_t steps)
+{
+    if (steps == 0 || delay_us == NULL) {
+        return ESP_OK;
+    }
+
+    char axis_upper = (char)toupper((unsigned char)axis);
+    gpio_num_t step_pin;
+    if (axis_upper == 'C' || axis_upper == 'X') {
+        step_pin = STEP_C;
+    } else if (axis_upper == 'A' || axis_upper == 'Y') {
+        step_pin = STEP_A;
+    } else if (axis_upper == 'Z') {
+        step_pin = STEP_Z;
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (uint32_t i = 0; i < steps; i++) {
+        uint32_t half_delay = delay_us[i];
+        if (half_delay < 5U) {
+            half_delay = 5U;
+        }
+        if (half_delay > 20000U) {
+            half_delay = 20000U;
+        }
+
+        // STEP High pulse: 3 us (TMC2209 requires min 100ns)
+        gpio_set_level(step_pin, 1);
+        esp_rom_delay_us(3);
+        gpio_set_level(step_pin, 0);
+
+        // Low interval: total step period is 2 * half_delay, minus 3 us high pulse
+        uint32_t low_delay = (half_delay * 2U > 3U) ? (half_delay * 2U - 3U) : 5U;
+        if (low_delay < 800U) {
+            esp_rom_delay_us(low_delay);
+        } else {
+            uint32_t chunks = low_delay / 400U;
+            uint32_t rem = low_delay % 400U;
+            for (uint32_t c = 0; c < chunks; c++) {
+                esp_rom_delay_us(400);
+            }
+            if (rem > 0) {
+                esp_rom_delay_us(rem);
+            }
+        }
+
+        // Periodically yield to FreeRTOS watchdog every 128 steps
+        if ((i & 0x7FU) == 0U) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)

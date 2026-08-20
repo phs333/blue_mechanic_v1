@@ -38,8 +38,8 @@ class JogPad(QFrame):
         
         step_layout.addWidget(QLabel("Passo C/A:"))
         self.combo_ca_step = QComboBox()
-        self.combo_ca_step.addItems(["0.1°", "0.5°", "1.0°", "2.0°", "5.0°", "10.0°", "45.0°", "90.0°"])
-        self.combo_ca_step.setCurrentText("5.0°")
+        self.combo_ca_step.addItems(["0.5°", "1.0°", "5.0°", "15.0°", "45.0°", "90.0°", "180.0°", "360.0°"])
+        self.combo_ca_step.setCurrentText("15.0°")
         step_layout.addWidget(self.combo_ca_step)
         
         step_layout.addWidget(QLabel("Passo Z:"))
@@ -161,11 +161,11 @@ class JogPad(QFrame):
         main_layout.addLayout(controls_layout)
 
     def _get_ca_step_deg(self) -> float:
-        text = self.combo_ca_step.currentText().replace("°", "").strip()
+        text = self.combo_ca_step.currentText().split("°")[0].strip()
         try:
             return float(text)
         except ValueError:
-            return 5.0
+            return 15.0
 
     def _get_z_step_steps(self) -> int:
         idx = self.combo_z_step.currentIndex()

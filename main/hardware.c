@@ -341,47 +341,47 @@ esp_err_t hardware_step_pulse_rmt_profiled(char axis, uint32_t *delay_us, uint32
         return ESP_ERR_INVALID_STATE;
     }
 
-    const uint32_t chunk_size = 256;
-    rmt_symbol_word_t chunk[chunk_size];
+    rmt_symbol_word_t *symbols = heap_caps_malloc(steps * sizeof(rmt_symbol_word_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    if (symbols == NULL) {
+        ESP_LOGE(APP_TAG, "RMT %c: falha ao alocar buffer de %u simbolos", axis_upper, (unsigned)steps);
+        return ESP_ERR_NO_MEM;
+    }
 
-    for (uint32_t i = 0; i < steps; i += chunk_size) {
-        uint32_t remaining = steps - i;
-        uint32_t current_chunk = (remaining < chunk_size) ? remaining : chunk_size;
-
-        for (uint32_t j = 0; j < current_chunk; j++) {
-            uint32_t step_num = i + j;
-            uint32_t delay = delay_us[step_num];
-            if (delay < 10U) {
-                delay = 10U;
-            }
-            if (delay > 32767U) {
-                delay = 32767U;
-            }
-
-            chunk[j].duration0 = delay;
-            chunk[j].level0 = 1;
-            chunk[j].duration1 = delay;
-            chunk[j].level1 = 0;
+    for (uint32_t j = 0; j < steps; j++) {
+        uint32_t delay = delay_us[j];
+        if (delay < 10U) {
+            delay = 10U;
+        }
+        if (delay > 32767U) {
+            delay = 32767U;
         }
 
-        rmt_transmit_config_t tx_config = {
-            .loop_count = 0,
-            .flags = {
-                .eot_level = 0,
-            }
-        };
+        symbols[j].duration0 = delay;
+        symbols[j].level0 = 1;
+        symbols[j].duration1 = delay;
+        symbols[j].level1 = 0;
+    }
 
-        esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, chunk, current_chunk * sizeof(rmt_symbol_word_t), &tx_config);
-        if (err != ESP_OK) {
-            ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
-            return err;
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,
+        .flags = {
+            .eot_level = 0,
         }
+    };
 
-        err = rmt_tx_wait_all_done(chan, -1);
-        if (err != ESP_OK) {
-            ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
-            return err;
-        }
+    esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, symbols, steps * sizeof(rmt_symbol_word_t), &tx_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
+        heap_caps_free(symbols);
+        return err;
+    }
+
+    err = rmt_tx_wait_all_done(chan, -1);
+    heap_caps_free(symbols);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
+        return err;
     }
 
     return ESP_OK;

@@ -97,6 +97,7 @@ class SerialClient(BaseClient):
             with self.lock:
                 self.serial_port.write(cmd_str.encode('utf-8'))
                 self.serial_port.flush()
+                time.sleep(0.040)  # Pacing delay between serial commands
             self.state.raw_message_received.emit("TX", cmd.strip())
             self.state.telemetry.tx_frames += 1
             return True
@@ -137,17 +138,21 @@ class SerialClient(BaseClient):
         m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
         if m_c:
             try:
-                self.state.update_telemetry(pos_c_deg=float(m_c.group(1)))
+                self.state.update_telemetry(pos_c_deg=float(m_c.group(1)), pos_c_valid=True)
             except ValueError:
                 pass
+        elif re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):
+            self.state.update_telemetry(pos_c_valid=False)
 
         # Eixo A (Pivot): 12.30 deg / Eixo Y: 12.30 deg
         m_a = re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
         if m_a:
             try:
-                self.state.update_telemetry(pos_a_deg=float(m_a.group(1)))
+                self.state.update_telemetry(pos_a_deg=float(m_a.group(1)), pos_a_valid=True)
             except ValueError:
                 pass
+        elif re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):
+            self.state.update_telemetry(pos_a_valid=False)
 
         # Eixo Z: 400 / 20000 passos
         m_z = re.search(r'Eixo Z:\s*([\d\-]+)(?:\s*/\s*(\d+))?\s*passos', line, re.IGNORECASE)

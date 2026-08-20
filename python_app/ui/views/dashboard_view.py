@@ -73,13 +73,13 @@ class DashboardView(QWidget):
         cards_grid.setSpacing(12)
         
         # Card C (Base Rotativa)
-        self.card_c = StatusCard("Eixo C (Base Rotativa)", "0.00", "deg (°)")
-        self.card_c.set_badge("AS5600 OK", "blue")
+        self.card_c = StatusCard("Eixo C (Base Rotativa)", "--", "deg")
+        self.card_c.set_badge("SEM ENCODER", "amber")
         cards_grid.addWidget(self.card_c, 0, 0)
         
         # Card A (Pivot dos Lasers)
-        self.card_a = StatusCard("Eixo A (Pivot Lasers)", "0.00", "deg (°)")
-        self.card_a.set_badge("AS5600 OK", "blue")
+        self.card_a = StatusCard("Eixo A (Pivot Lasers)", "--", "deg")
+        self.card_a.set_badge("SEM ENCODER", "amber")
         cards_grid.addWidget(self.card_a, 0, 1)
         
         # Card Z
@@ -160,9 +160,20 @@ class DashboardView(QWidget):
         self.comm.set_driver_enabled(new_state)
         
     def update_telemetry(self, t: HardwareTelemetry):
-        # Update C & A
-        self.card_c.set_value(f"{t.pos_c_deg:.2f}")
-        self.card_a.set_value(f"{t.pos_a_deg:.2f}")
+        # Update C & A with real encoder communication check
+        if t.pos_c_valid:
+            self.card_c.set_value(f"{t.pos_c_deg:.2f}")
+            self.card_c.set_badge("AS5600 OK", "green")
+        else:
+            self.card_c.set_value("--")
+            self.card_c.set_badge("SEM ENCODER", "amber")
+
+        if t.pos_a_valid:
+            self.card_a.set_value(f"{t.pos_a_deg:.2f}")
+            self.card_a.set_badge("AS5600 OK", "green")
+        else:
+            self.card_a.set_value("--")
+            self.card_a.set_badge("SEM ENCODER", "amber")
         
         # Update Z
         teeth = self.state.parameters.z_pulley_teeth or 16

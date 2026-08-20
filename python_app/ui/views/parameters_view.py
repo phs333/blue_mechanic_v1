@@ -545,8 +545,13 @@ class ParametersView(QWidget):
         self._update_kinematics_preview()
 
     def _apply_tmc_settings(self):
-        if hasattr(self.comm.active_client, 'set_tmc_uart_current'):
-            client = self.comm.active_client
+        client = self.comm.active_client
+        if client:
+            target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
+            # Always ensure UART is active to write TMC registers
+            client.set_driver_mode("UART")
+            client.apply_driver_settings()
+            
             client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6)
             client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6)
             client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6)
@@ -556,6 +561,9 @@ class ParametersView(QWidget):
             client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText()))
             client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText()))
             client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText()))
+            
+            # Restore and apply configured driver mode
+            client.set_driver_mode(target_mode)
             client.apply_driver_settings()
 
     def _apply_can_settings(self):
@@ -573,16 +581,12 @@ class ParametersView(QWidget):
     def _apply_all_parameters(self):
         client = self.comm.active_client
         if client:
-            # 1. Driver mode
-            mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
-            client.set_driver_mode(mode)
-            
-            # 2. Steps
+            # 1. Steps
             client.set_steps_per_rev('C', self.spin_steps_c.value())
             client.set_steps_per_rev('A', self.spin_steps_a.value())
             client.set_steps_per_rev('Z', self.spin_steps_z.value())
             
-            # 3. Speeds & Accel
+            # 2. Speeds & Accel
             client.set_axis_speed('C', self.spin_speed_c.value())
             client.set_axis_speed('A', self.spin_speed_a.value())
             client.set_axis_speed('Z', self.spin_speed_z.value())
@@ -590,22 +594,22 @@ class ParametersView(QWidget):
             client.set_axis_accel('A', self.spin_accel_a.value())
             client.set_axis_accel('Z', self.spin_accel_z.value())
             
-            # 4. Inverts
+            # 3. Inverts
             client.set_driver_invert('C', self.chk_inv_hw_c.isChecked())
             client.set_driver_invert('A', self.chk_inv_hw_a.isChecked())
             client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked())
             
-            # 5. Pulley Z & Max Z
+            # 4. Pulley Z & Max Z
             client.set_z_pulley_teeth(self.spin_pulley_z.value())
             client.set_length_z(self.spin_max_z.value())
             
-            # 6. TMC settings
+            # 5. TMC settings (handles temporary UART mode and restore)
             self._apply_tmc_settings()
             
-            # 7. CAN settings
+            # 6. CAN settings
             self._apply_can_settings()
             
-            # 8. Refresh and read back
+            # 7. Refresh and read back
             self.comm.request_status()
             
         QMessageBox.information(self, "Sucesso", "Todas as configurações e parâmetros foram gravados na NVS do hardware!")

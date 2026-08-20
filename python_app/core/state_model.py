@@ -19,6 +19,8 @@ class HardwareTelemetry:
     # Kinematics
     pos_c_deg: float = 0.0  # Base Rotativa
     pos_a_deg: float = 0.0  # Pivot dos Lasers
+    pos_c_valid: bool = False
+    pos_a_valid: bool = False
     pos_z_steps: int = 0    # Atuador Linear
     max_z_steps: int = 20000
     

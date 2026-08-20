@@ -91,20 +91,19 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 5U
+#define SETTINGS_VERSION 6U
 
-#define DEFAULT_HOME_C_DEG 0.0f
-#define DEFAULT_HOME_A_DEG 0.0f
-#define DEFAULT_HOME_X_DEG DEFAULT_HOME_C_DEG
-#define DEFAULT_HOME_Y_DEG DEFAULT_HOME_A_DEG
+#define DEFAULT_HOME_X_DEG 0.0f
+#define DEFAULT_HOME_Y_DEG 0.0f
 #define DEFAULT_MAX_Z_STEPS 20000
+#define DEFAULT_Z_PULLEY_TEETH 16U // Polia padrão GT2 16 dentes no motor Z
 
-#define DEFAULT_NODE_ID 1U
-#define DEFAULT_CAN_ENABLED 0U
-#define DEFAULT_CAN_COMMAND_BASE_ID 0x200U
-#define DEFAULT_CAN_STATUS_BASE_ID 0x280U
-#define DEFAULT_CAN_EVENT_BASE_ID 0x300U
-#define DEFAULT_CAN_BITRATE 500000U
+#define DEFAULT_NODE_ID 1
+#define DEFAULT_CAN_ENABLED 1
+#define DEFAULT_CAN_COMMAND_BASE_ID 0x200
+#define DEFAULT_CAN_STATUS_BASE_ID 0x280
+#define DEFAULT_CAN_EVENT_BASE_ID 0x300
+#define DEFAULT_CAN_BITRATE 500000
 
 #define Z_RESCUE_TIMEOUT_STEPS 4000
 #define Z_HOME_SEARCH_LIMIT_STEPS 30000
@@ -116,15 +115,15 @@
 #define FAN_AUTO_ON_TEMP_C 45.0f
 #define FAN_AUTO_OFF_TEMP_C 40.0f
 
-// --- Limites por eixo ---
-// Velocidade máxima em deg/s para C/A, mm/s para Z
-#define DEFAULT_SPEED_MAX_DEG_S_CA 1500.0f
+// --- Limites seguros para motor NEMA 17 17HS4401-22B com TMC2209 ---
+// Velocidade máxima em deg/s para C/A (1..2 rev/s), mm/s para Z (GT2 16T = 32mm/rev)
+#define DEFAULT_SPEED_MAX_DEG_S_CA 720.0f
 #define DEFAULT_SPEED_MAX_DEG_S_XY DEFAULT_SPEED_MAX_DEG_S_CA
-#define DEFAULT_SPEED_MAX_MM_S_Z   80.0f
+#define DEFAULT_SPEED_MAX_MM_S_Z   60.0f
 // Aceleração máxima em deg/s² para C/A, mm/s² para Z
-#define DEFAULT_ACCEL_MAX_DEG_S2_CA 5000.0f
+#define DEFAULT_ACCEL_MAX_DEG_S2_CA 3600.0f
 #define DEFAULT_ACCEL_MAX_DEG_S2_XY DEFAULT_ACCEL_MAX_DEG_S2_CA
-#define DEFAULT_ACCEL_MAX_MM_S2_Z    1000.0f
+#define DEFAULT_ACCEL_MAX_MM_S2_Z    800.0f
 
 // --- Limites mínimos/máximos para validação ---
 #define SPEED_MIN_DEG_S_CA 0.1f
@@ -257,15 +256,15 @@ typedef struct {
         .can_bitrate = DEFAULT_CAN_BITRATE, \
         .driver_bus_mode = DRIVER_BUS_MODE_STEP_DIR_ONLY, \
         .tmc_slave_addr = {0, 1, 2},        \
-        .tmc_ihold = {8, 8, 8},             \
-        .tmc_irun = {20, 20, 20},           \
+        .tmc_ihold = {5, 5, 6},             \
+        .tmc_irun = {14, 14, 15},           \
         .tmc_ihold_delay = {6, 6, 6},       \
         .tmc_microsteps = {16, 16, 16},      \
         .steps_per_rev = {200, 200, 200},    \
         .speed_delay_us = {400, 400, 400},   \
-        .accel = {900.0f, 900.0f, 500.0f},     \
-        .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
-        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
+        .accel = {1800.0f, 1800.0f, 300.0f}, \
+        .speed_max = {DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_MM_S_Z}, \
+        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH \
     }
 

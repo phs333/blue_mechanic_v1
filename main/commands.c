@@ -400,17 +400,25 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
-         if (axis == 'Z') {
-             if (speed_val < SPEED_MIN_MM_S_Z || speed_val > ctx->settings.speed_max[axis_index]) {
-                 printf("Velocidade Z invalida. Use mm/s entre %.2f e %.2f.\n", SPEED_MIN_MM_S_Z, ctx->settings.speed_max[axis_index]);
-                 return;
-             }
-         } else {
-             if (speed_val < SPEED_MIN_DEG_S_CA || speed_val > ctx->settings.speed_max[axis_index]) {
-                 printf("Velocidade %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_CA, ctx->settings.speed_max[axis_index]);
-                 return;
-             }
-         }
+        if (axis == 'Z') {
+            if (speed_val < SPEED_MIN_MM_S_Z || speed_val > SPEED_MAX_MM_S_Z) {
+                printf("Velocidade Z invalida. Use mm/s entre %.2f e %.2f.\n", SPEED_MIN_MM_S_Z, SPEED_MAX_MM_S_Z);
+                return;
+            }
+            if (speed_val > ctx->settings.speed_max[axis_index]) {
+                ctx->settings.speed_max[axis_index] = speed_val;
+                ctx->state.speed_max[axis_index] = speed_val;
+            }
+        } else {
+            if (speed_val < SPEED_MIN_DEG_S_CA || speed_val > SPEED_MAX_DEG_S_CA) {
+                printf("Velocidade %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_CA, SPEED_MAX_DEG_S_CA);
+                return;
+            }
+            if (speed_val > ctx->settings.speed_max[axis_index]) {
+                ctx->settings.speed_max[axis_index] = speed_val;
+                ctx->state.speed_max[axis_index] = speed_val;
+            }
+        }
         uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed_val);
         ctx->settings.speed_delay_us[axis_index] = delay_us;
         ctx->state.speed_delay_us[axis_index] = delay_us;
@@ -436,14 +444,22 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             return;
         }
         if (axis == 'Z') {
-            if (accel_val < ACCEL_MIN_MM_S2_Z || accel_val > ctx->settings.accel_max[axis_index]) {
-                printf("Aceleracao Z invalida. Use mm/s^2 entre %.2f e %.2f.\n", ACCEL_MIN_MM_S2_Z, ctx->settings.accel_max[axis_index]);
+            if (accel_val < ACCEL_MIN_MM_S2_Z || accel_val > ACCEL_MAX_MM_S2_Z) {
+                printf("Aceleracao Z invalida. Use mm/s^2 entre %.2f e %.2f.\n", ACCEL_MIN_MM_S2_Z, ACCEL_MAX_MM_S2_Z);
                 return;
             }
+            if (accel_val > ctx->settings.accel_max[axis_index]) {
+                ctx->settings.accel_max[axis_index] = accel_val;
+                ctx->state.accel_max[axis_index] = accel_val;
+            }
         } else {
-            if (accel_val < ACCEL_MIN_DEG_S2_CA || accel_val > ctx->settings.accel_max[axis_index]) {
-                printf("Aceleracao %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_CA, ctx->settings.accel_max[axis_index]);
+            if (accel_val < ACCEL_MIN_DEG_S2_CA || accel_val > ACCEL_MAX_DEG_S2_CA) {
+                printf("Aceleracao %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_CA, ACCEL_MAX_DEG_S2_CA);
                 return;
+            }
+            if (accel_val > ctx->settings.accel_max[axis_index]) {
+                ctx->settings.accel_max[axis_index] = accel_val;
+                ctx->state.accel_max[axis_index] = accel_val;
             }
         }
         ctx->settings.accel[axis_index] = accel_val;

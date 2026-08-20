@@ -137,13 +137,13 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_c, 1, 1)
         
         self.spin_speed_c = QDoubleSpinBox()
-        self.spin_speed_c.setRange(1.0, 10000.0)
-        self.spin_speed_c.setValue(1500.0)
+        self.spin_speed_c.setRange(1.0, 2000.0)
+        self.spin_speed_c.setValue(360.0)
         kin_grid.addWidget(self.spin_speed_c, 1, 2)
         
         self.spin_accel_c = QDoubleSpinBox()
-        self.spin_accel_c.setRange(10.0, 50000.0)
-        self.spin_accel_c.setValue(5000.0)
+        self.spin_accel_c.setRange(10.0, 10000.0)
+        self.spin_accel_c.setValue(1800.0)
         kin_grid.addWidget(self.spin_accel_c, 1, 3)
         
         # Axis A (Pivot dos Lasers)
@@ -155,13 +155,13 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_a, 2, 1)
         
         self.spin_speed_a = QDoubleSpinBox()
-        self.spin_speed_a.setRange(1.0, 10000.0)
-        self.spin_speed_a.setValue(1500.0)
+        self.spin_speed_a.setRange(1.0, 2000.0)
+        self.spin_speed_a.setValue(360.0)
         kin_grid.addWidget(self.spin_speed_a, 2, 2)
         
         self.spin_accel_a = QDoubleSpinBox()
-        self.spin_accel_a.setRange(10.0, 50000.0)
-        self.spin_accel_a.setValue(5000.0)
+        self.spin_accel_a.setRange(10.0, 10000.0)
+        self.spin_accel_a.setValue(1800.0)
         kin_grid.addWidget(self.spin_accel_a, 2, 3)
         
         # Axis Z (Linear)
@@ -173,13 +173,13 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_z, 3, 1)
         
         self.spin_speed_z = QDoubleSpinBox()
-        self.spin_speed_z.setRange(0.1, 500.0)
-        self.spin_speed_z.setValue(80.0)
+        self.spin_speed_z.setRange(0.1, 150.0)
+        self.spin_speed_z.setValue(25.0)
         kin_grid.addWidget(self.spin_speed_z, 3, 2)
         
         self.spin_accel_z = QDoubleSpinBox()
-        self.spin_accel_z.setRange(1.0, 5000.0)
-        self.spin_accel_z.setValue(1000.0)
+        self.spin_accel_z.setRange(1.0, 2000.0)
+        self.spin_accel_z.setValue(300.0)
         kin_grid.addWidget(self.spin_accel_z, 3, 3)
         
         kin_layout.addLayout(kin_grid)
@@ -250,12 +250,12 @@ class ParametersView(QWidget):
         
         self.spin_tmc_irun_c = QSpinBox()
         self.spin_tmc_irun_c.setRange(50, 2000)
-        self.spin_tmc_irun_c.setValue(800)
+        self.spin_tmc_irun_c.setValue(900)
         tmc_grid.addWidget(self.spin_tmc_irun_c, 1, 2)
         
         self.spin_tmc_ihold_c = QSpinBox()
         self.spin_tmc_ihold_c.setRange(50, 2000)
-        self.spin_tmc_ihold_c.setValue(300)
+        self.spin_tmc_ihold_c.setValue(350)
         tmc_grid.addWidget(self.spin_tmc_ihold_c, 1, 3)
         
         self.combo_tmc_usteps_c = QComboBox()
@@ -276,12 +276,12 @@ class ParametersView(QWidget):
         
         self.spin_tmc_irun_a = QSpinBox()
         self.spin_tmc_irun_a.setRange(50, 2000)
-        self.spin_tmc_irun_a.setValue(800)
+        self.spin_tmc_irun_a.setValue(900)
         tmc_grid.addWidget(self.spin_tmc_irun_a, 2, 2)
         
         self.spin_tmc_ihold_a = QSpinBox()
         self.spin_tmc_ihold_a.setRange(50, 2000)
-        self.spin_tmc_ihold_a.setValue(300)
+        self.spin_tmc_ihold_a.setValue(350)
         tmc_grid.addWidget(self.spin_tmc_ihold_a, 2, 3)
         
         self.combo_tmc_usteps_a = QComboBox()
@@ -302,12 +302,12 @@ class ParametersView(QWidget):
         
         self.spin_tmc_irun_z = QSpinBox()
         self.spin_tmc_irun_z.setRange(50, 2000)
-        self.spin_tmc_irun_z.setValue(800)
+        self.spin_tmc_irun_z.setValue(950)
         tmc_grid.addWidget(self.spin_tmc_irun_z, 3, 2)
         
         self.spin_tmc_ihold_z = QSpinBox()
         self.spin_tmc_ihold_z.setRange(50, 2000)
-        self.spin_tmc_ihold_z.setValue(300)
+        self.spin_tmc_ihold_z.setValue(400)
         tmc_grid.addWidget(self.spin_tmc_ihold_z, 3, 3)
         
         self.combo_tmc_usteps_z = QComboBox()

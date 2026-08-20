@@ -467,12 +467,81 @@ class ParametersView(QWidget):
             QMessageBox.warning(self, "Valor Inválido", "Endereço ou valor do registrador em formato inválido.")
 
     def _on_parameters_updated(self, p: HardwareParameters):
-        self.spin_pulley_z.blockSignals(True)
+        widgets = [
+            self.spin_steps_c, self.spin_steps_a, self.spin_steps_z,
+            self.spin_speed_c, self.spin_speed_a, self.spin_speed_z,
+            self.spin_accel_c, self.spin_accel_a, self.spin_accel_z,
+            self.chk_inv_hw_c, self.chk_inv_hw_a, self.chk_inv_hw_z,
+            self.spin_pulley_z, self.spin_max_z,
+            self.combo_driver_mode,
+            self.spin_tmc_addr_c, self.spin_tmc_addr_a, self.spin_tmc_addr_z,
+            self.spin_tmc_irun_c, self.spin_tmc_irun_a, self.spin_tmc_irun_z,
+            self.spin_tmc_ihold_c, self.spin_tmc_ihold_a, self.spin_tmc_ihold_z,
+            self.combo_tmc_usteps_c, self.combo_tmc_usteps_a, self.combo_tmc_usteps_z,
+            self.chk_tmc_sc_c, self.chk_tmc_sc_a, self.chk_tmc_sc_z,
+            self.spin_node_id, self.combo_can_bitrate, self.txt_base_cmd, self.txt_base_status, self.txt_base_event
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+
+        if len(p.steps_per_rev) >= 3:
+            self.spin_steps_c.setValue(p.steps_per_rev[0])
+            self.spin_steps_a.setValue(p.steps_per_rev[1])
+            self.spin_steps_z.setValue(p.steps_per_rev[2])
+
+        if len(p.speed_max) >= 3:
+            self.spin_speed_c.setValue(p.speed_max[0])
+            self.spin_speed_a.setValue(p.speed_max[1])
+            self.spin_speed_z.setValue(p.speed_max[2])
+
+        if len(p.accel_max) >= 3:
+            self.spin_accel_c.setValue(p.accel_max[0])
+            self.spin_accel_a.setValue(p.accel_max[1])
+            self.spin_accel_z.setValue(p.accel_max[2])
+
+        if len(p.inverter) >= 3:
+            self.chk_inv_hw_c.setChecked(p.inverter[0])
+            self.chk_inv_hw_a.setChecked(p.inverter[1])
+            self.chk_inv_hw_z.setChecked(p.inverter[2])
+
         self.spin_pulley_z.setValue(p.z_pulley_teeth if p.z_pulley_teeth > 0 else 16)
-        self.spin_pulley_z.blockSignals(False)
-        self.spin_max_z.blockSignals(True)
         self.spin_max_z.setValue(p.max_passos_z)
-        self.spin_max_z.blockSignals(False)
+        self.combo_driver_mode.setCurrentIndex(1 if p.driver_bus_mode == 1 else 0)
+
+        if len(p.tmc_slave_addr) >= 3:
+            self.spin_tmc_addr_c.setValue(p.tmc_slave_addr[0])
+            self.spin_tmc_addr_a.setValue(p.tmc_slave_addr[1])
+            self.spin_tmc_addr_z.setValue(p.tmc_slave_addr[2])
+
+        if len(p.tmc_irun_ma) >= 3:
+            self.spin_tmc_irun_c.setValue(p.tmc_irun_ma[0])
+            self.spin_tmc_irun_a.setValue(p.tmc_irun_ma[1])
+            self.spin_tmc_irun_z.setValue(p.tmc_irun_ma[2])
+
+        if len(p.tmc_ihold_ma) >= 3:
+            self.spin_tmc_ihold_c.setValue(p.tmc_ihold_ma[0])
+            self.spin_tmc_ihold_a.setValue(p.tmc_ihold_ma[1])
+            self.spin_tmc_ihold_z.setValue(p.tmc_ihold_ma[2])
+
+        if len(p.tmc_microsteps) >= 3:
+            self.combo_tmc_usteps_c.setCurrentText(str(p.tmc_microsteps[0]))
+            self.combo_tmc_usteps_a.setCurrentText(str(p.tmc_microsteps[1]))
+            self.combo_tmc_usteps_z.setCurrentText(str(p.tmc_microsteps[2]))
+
+        if len(p.tmc_spreadcycle) >= 3:
+            self.chk_tmc_sc_c.setChecked(p.tmc_spreadcycle[0])
+            self.chk_tmc_sc_a.setChecked(p.tmc_spreadcycle[1])
+            self.chk_tmc_sc_z.setChecked(p.tmc_spreadcycle[2])
+
+        self.spin_node_id.setValue(p.node_id)
+        self.combo_can_bitrate.setCurrentText(str(p.can_bitrate))
+        self.txt_base_cmd.setText(f"0x{p.can_command_base_id:03X}")
+        self.txt_base_status.setText(f"0x{p.can_status_base_id:03X}")
+        self.txt_base_event.setText(f"0x{p.can_event_base_id:03X}")
+
+        for w in widgets:
+            w.blockSignals(False)
+
         self._update_kinematics_preview()
 
     def _apply_tmc_settings(self):
@@ -502,24 +571,41 @@ class ParametersView(QWidget):
             QMessageBox.warning(self, "Valor Inválido", f"Formato hexadecimal incorreto nas bases CAN: {e}")
 
     def _apply_all_parameters(self):
-        if hasattr(self.comm.active_client, 'set_steps_per_rev'):
-            client = self.comm.active_client
-            # Steps
+        client = self.comm.active_client
+        if client:
+            # 1. Driver mode
+            mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
+            client.set_driver_mode(mode)
+            
+            # 2. Steps
             client.set_steps_per_rev('C', self.spin_steps_c.value())
             client.set_steps_per_rev('A', self.spin_steps_a.value())
             client.set_steps_per_rev('Z', self.spin_steps_z.value())
-            # Speeds
+            
+            # 3. Speeds & Accel
             client.set_axis_speed('C', self.spin_speed_c.value())
             client.set_axis_speed('A', self.spin_speed_a.value())
             client.set_axis_speed('Z', self.spin_speed_z.value())
-            # Inverts
+            client.set_axis_accel('C', self.spin_accel_c.value())
+            client.set_axis_accel('A', self.spin_accel_a.value())
+            client.set_axis_accel('Z', self.spin_accel_z.value())
+            
+            # 4. Inverts
             client.set_driver_invert('C', self.chk_inv_hw_c.isChecked())
             client.set_driver_invert('A', self.chk_inv_hw_a.isChecked())
             client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked())
-            # Pulley Z & Max Z
+            
+            # 5. Pulley Z & Max Z
             client.set_z_pulley_teeth(self.spin_pulley_z.value())
             client.set_length_z(self.spin_max_z.value())
             
-        self._apply_tmc_settings()
-        self._apply_can_settings()
-        QMessageBox.information(self, "Sucesso", "Parâmetros e configurações de cinemática/drivers enviados ao hardware!")
+            # 6. TMC settings
+            self._apply_tmc_settings()
+            
+            # 7. CAN settings
+            self._apply_can_settings()
+            
+            # 8. Refresh and read back
+            self.comm.request_status()
+            
+        QMessageBox.information(self, "Sucesso", "Todas as configurações e parâmetros foram gravados na NVS do hardware!")

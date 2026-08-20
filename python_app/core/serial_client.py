@@ -241,9 +241,98 @@ class SerialClient(BaseClient):
             except ValueError:
                 pass
 
+        # --- NVS CONFIG DUMP PARSERS ---
+        m_cfg_steps = re.search(r'CONFIG STEPS C=(\d+)\s+A=(\d+)\s+Z=(\d+)', line, re.IGNORECASE)
+        if m_cfg_steps:
+            c, a, z = int(m_cfg_steps.group(1)), int(m_cfg_steps.group(2)), int(m_cfg_steps.group(3))
+            self.state.parameters.steps_per_rev = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_spd = re.search(r'CONFIG SPEED C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_spd:
+            c, a, z = float(m_cfg_spd.group(1)), float(m_cfg_spd.group(2)), float(m_cfg_spd.group(3))
+            self.state.parameters.speed_max = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_acc = re.search(r'CONFIG ACCEL C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_acc:
+            c, a, z = float(m_cfg_acc.group(1)), float(m_cfg_acc.group(2)), float(m_cfg_acc.group(3))
+            self.state.parameters.accel_max = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_inv = re.search(r'CONFIG INVERT C=([01])\s+A=([01])\s+Z=([01])', line, re.IGNORECASE)
+        if m_cfg_inv:
+            c, a, z = (m_cfg_inv.group(1) == "1"), (m_cfg_inv.group(2) == "1"), (m_cfg_inv.group(3) == "1")
+            self.state.parameters.inverter = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_z = re.search(r'CONFIG PULLEY_Z=(\d+)\s+MAX_PASSOS_Z=(\d+)', line, re.IGNORECASE)
+        if m_cfg_z:
+            teeth = int(m_cfg_z.group(1))
+            max_z = int(m_cfg_z.group(2))
+            self.state.parameters.z_pulley_teeth = teeth
+            self.state.parameters.max_passos_z = max_z
+            self.state.telemetry.max_z_steps = max_z
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_mode = re.search(r'CONFIG DRIVER_BUS_MODE=(\d+)', line, re.IGNORECASE)
+        if m_cfg_mode:
+            self.state.parameters.driver_bus_mode = int(m_cfg_mode.group(1))
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_tmc = re.search(r'CONFIG TMC ([CAZ]) addr=(\d+) ihold=(\d+) irun=(\d+) delay=(\d+) usteps=(\d+) spread=([01])', line, re.IGNORECASE)
+        if m_cfg_tmc:
+            axis_char = m_cfg_tmc.group(1).upper()
+            idx = 0 if axis_char == 'C' else (1 if axis_char == 'A' else 2)
+            self.state.parameters.tmc_slave_addr[idx] = int(m_cfg_tmc.group(2))
+            self.state.parameters.tmc_ihold_ma[idx] = int(m_cfg_tmc.group(3))
+            self.state.parameters.tmc_irun_ma[idx] = int(m_cfg_tmc.group(4))
+            self.state.parameters.tmc_ihold_delay[idx] = int(m_cfg_tmc.group(5))
+            self.state.parameters.tmc_microsteps[idx] = int(m_cfg_tmc.group(6))
+            self.state.parameters.tmc_spreadcycle[idx] = (m_cfg_tmc.group(7) == "1")
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        # TMC line from STATUS (TMC C: addr=0 ihold=59mA irun=59mA delay=6 status=UART OK)
+        m_tmc_stat = re.search(r'TMC ([CAZ]):\s+addr=(\d+)\s+ihold=(\d+)mA\s+irun=(\d+)mA\s+delay=(\d+)', line, re.IGNORECASE)
+        if m_tmc_stat:
+            axis_char = m_tmc_stat.group(1).upper()
+            idx = 0 if axis_char == 'C' else (1 if axis_char == 'A' else 2)
+            self.state.parameters.tmc_slave_addr[idx] = int(m_tmc_stat.group(2))
+            self.state.parameters.tmc_ihold_ma[idx] = int(m_tmc_stat.group(3))
+            self.state.parameters.tmc_irun_ma[idx] = int(m_tmc_stat.group(4))
+            self.state.parameters.tmc_ihold_delay[idx] = int(m_tmc_stat.group(5))
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        # CAN bases from STATUS (CAN bases: cmd=0x200 status=0x280 event=0x300)
+        m_can_bases = re.search(r'CAN bases:\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
+        if m_can_bases:
+            try:
+                self.state.parameters.can_command_base_id = int(m_can_bases.group(1), 16)
+                self.state.parameters.can_status_base_id = int(m_can_bases.group(2), 16)
+                self.state.parameters.can_event_base_id = int(m_can_bases.group(3), 16)
+                self.state.parameters_updated.emit(self.state.parameters)
+            except ValueError:
+                pass
+
+        m_cfg_can = re.search(r'CONFIG CAN node=(\d+)\s+bitrate=(\d+)\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
+        if m_cfg_can:
+            try:
+                self.state.parameters.node_id = int(m_cfg_can.group(1))
+                self.state.parameters.can_bitrate = int(m_cfg_can.group(2))
+                self.state.parameters.can_command_base_id = int(m_cfg_can.group(3), 16)
+                self.state.parameters.can_status_base_id = int(m_cfg_can.group(4), 16)
+                self.state.parameters.can_event_base_id = int(m_cfg_can.group(5), 16)
+                self.state.parameters_updated.emit(self.state.parameters)
+            except ValueError:
+                pass
+
     # --- High Level Implementation ---
     def request_status(self) -> bool:
+        self.send_raw("CONFIG DUMP")
         return self.send_raw("STATUS")
+
+    def request_config_dump(self) -> bool:
+        return self.send_raw("CONFIG DUMP")
 
     def set_driver_enabled(self, enable: bool) -> bool:
         self.state.update_telemetry(drivers_enabled=enable)

@@ -137,6 +137,53 @@ void commands_print_status(app_context_t *ctx)
     printf("================\n");
 }
 
+void commands_print_config(const app_context_t *ctx)
+{
+    if (ctx == NULL) return;
+    printf("\n=== CONFIG DUMP ===\n");
+    printf("CONFIG STEPS C=%lu A=%lu Z=%lu\n",
+           (unsigned long)ctx->settings.steps_per_rev[0],
+           (unsigned long)ctx->settings.steps_per_rev[1],
+           (unsigned long)ctx->settings.steps_per_rev[2]);
+    printf("CONFIG SPEED C=%.2f A=%.2f Z=%.2f\n",
+           ctx->settings.speed[0], ctx->settings.speed[1], ctx->settings.speed[2]);
+    printf("CONFIG ACCEL C=%.2f A=%.2f Z=%.2f\n",
+           ctx->settings.accel[0], ctx->settings.accel[1], ctx->settings.accel[2]);
+    printf("CONFIG SPEED_MAX C=%.2f A=%.2f Z=%.2f\n",
+           ctx->settings.speed_max[0], ctx->settings.speed_max[1], ctx->settings.speed_max[2]);
+    printf("CONFIG ACCEL_MAX C=%.2f A=%.2f Z=%.2f\n",
+           ctx->settings.accel_max[0], ctx->settings.accel_max[1], ctx->settings.accel_max[2]);
+    printf("CONFIG INVERT C=%d A=%d Z=%d\n",
+           ctx->state.inverter[0] ? 1 : 0,
+           ctx->state.inverter[1] ? 1 : 0,
+           ctx->state.inverter[2] ? 1 : 0);
+    printf("CONFIG PULLEY_Z=%u MAX_PASSOS_Z=%lu\n",
+           (unsigned)ctx->settings.z_pulley_teeth,
+           (unsigned long)ctx->settings.max_passos_z);
+    printf("CONFIG HOME_DEG C=%.2f A=%.2f\n",
+           ctx->settings.home_c_deg, ctx->settings.home_a_deg);
+    printf("CONFIG DRIVER_BUS_MODE=%u\n",
+           (unsigned)ctx->settings.driver_bus_mode);
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        char ax = (i == 0) ? 'C' : ((i == 1) ? 'A' : 'Z');
+        printf("CONFIG TMC %c addr=%u ihold=%u irun=%u delay=%u usteps=%u spread=%d\n",
+               ax,
+               (unsigned)ctx->settings.tmc_slave_addr[i],
+               (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_ihold[i]),
+               (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_irun[i]),
+               (unsigned)ctx->settings.tmc_ihold_delay[i],
+               (unsigned)ctx->settings.tmc_microsteps[i],
+               ctx->settings.tmc_spreadcycle[i] ? 1 : 0);
+    }
+    printf("CONFIG CAN node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
+           (unsigned)ctx->settings.can_node_id,
+           (unsigned long)ctx->settings.can_bitrate,
+           (unsigned long)ctx->settings.can_base_cmd,
+           (unsigned long)ctx->settings.can_base_status,
+           (unsigned long)ctx->settings.can_base_event);
+    printf("===================\n");
+}
+
 void commands_handle_line(app_context_t *ctx, const char *line)
 {
     char cmd[96];
@@ -150,6 +197,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     if (strcmp(cmd, "STATUS") == 0) {
         commands_print_status(ctx);
+        return;
+    }
+
+    if (strcmp(cmd, "CONFIG DUMP") == 0 || strcmp(cmd, "CONFIG") == 0 || strcmp(cmd, "NVS DUMP") == 0) {
+        commands_print_config(ctx);
         return;
     }
 

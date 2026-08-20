@@ -303,3 +303,33 @@ class SimulatorClient(BaseClient):
         mm_rev = teeth * 2.0
         self.state.raw_message_received.emit("RX", f"Polia do motor Z configurada para {teeth} dentes GT2 (passo 2.0mm -> {mm_rev:.2f} mm/volta).")
         return True
+
+    def set_steps_per_rev(self, axis: str, steps: int) -> bool:
+        return True
+
+    def set_length_z(self, steps: int) -> bool:
+        self.state.update_parameters(max_passos_z=steps)
+        self.state.update_telemetry(max_z_steps=steps)
+        return True
+
+    def set_driver_mode(self, mode: str) -> bool:
+        return True
+
+    def set_driver_invert(self, axis: str, invert: bool) -> bool:
+        return True
+
+    def set_tmc_uart_current(self, axis: str, ihold: int, irun: int, delay: int) -> bool:
+        return True
+
+    def set_tmc_spreadcycle(self, axis: str, sc: bool) -> bool:
+        return True
+
+    def set_tmc_microsteps(self, axis: str, usteps: int) -> bool:
+        return True
+
+    def apply_driver_settings(self) -> bool:
+        return True
+
+    def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int) -> bool:
+        self.state.update_parameters(node_id=node_id, can_bitrate=bitrate, can_command_base_id=cmd_base, can_status_base_id=status_base, can_event_base_id=event_base)
+        return True

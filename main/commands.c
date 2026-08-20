@@ -22,6 +22,27 @@ static uint32_t laser_level_to_percent(uint8_t level);
 static void trim_ascii(char *text);
 static void to_upper_ascii(char *text);
 
+static bool parse_axis_token(char axis_char, size_t *axis_index, char *canonical_axis)
+{
+    char u = (char)toupper((unsigned char)axis_char);
+    if (u == 'C' || u == 'X') {
+        if (axis_index) *axis_index = AXIS_C_ID;
+        if (canonical_axis) *canonical_axis = 'C';
+        return true;
+    }
+    if (u == 'A' || u == 'Y') {
+        if (axis_index) *axis_index = AXIS_A_ID;
+        if (canonical_axis) *canonical_axis = 'A';
+        return true;
+    }
+    if (u == 'Z') {
+        if (axis_index) *axis_index = AXIS_Z_ID;
+        if (canonical_axis) *canonical_axis = 'Z';
+        return true;
+    }
+    return false;
+}
+
 void commands_print_help(void)
 {
     puts("\nComandos disponiveis:");
@@ -29,27 +50,28 @@ void commands_print_help(void)
     puts("HELP");
     puts("DRIVER ENABLED ON / OFF");
     puts("ALARM ON / ALARM OFF");
-    puts("SET_HOME X / Y");
-    puts("HOME X / Y / Z");
+    puts("SETHOME C / A (ou X / Y)");
+    puts("HOME C / A / Z (ou X / Y / Z)");
     puts("SET_LENGTH Z <steps>");
-    puts("STEPS X|Y|Z <steps_per_rev>");
-    puts("SPEED X|Y <deg/s> | Z <mm/s>");
-    puts("ACCEL X|Y <deg/s^2> | Z <mm/s^2>");
-    puts("SPEED_MAX X|Y|Z <value> | ACCEL_MAX X|Y|Z <value>");
-    puts("MOVE X|Y|Z <steps> [S<speed>] [F<accel>]");
-    puts("MOVE_F X|Y|Z <steps> [S<speed>] [F<accel>]");
+    puts("PULLEY Z <dentes> (ex: 16, 20)");
+    puts("STEPS C|A|Z <steps_per_rev>");
+    puts("SPEED C|A <deg/s> | Z <mm/s>");
+    puts("ACCEL C|A <deg/s^2> | Z <mm/s^2>");
+    puts("SPEED_MAX C|A|Z <value> | ACCEL_MAX C|A|Z <value>");
+    puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
+    puts("MOVE_F C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("LASER 1|2 ON|OFF|0..100%|0..255");
     puts("FAN 0|1|AUTO");
     puts("TEMP");
     puts("DRIVER STATUS");
-    puts("DRIVER INVERT X|Y|Z ON|OFF");
+    puts("DRIVER INVERT C|A|Z ON|OFF");
     puts("DRIVER MODE STEPDIR|UART");
-    puts("DRIVER UART ADDR X|Y|Z <0..3>");
-    puts("DRIVER UART CURRENT X|Y|Z <ihold_mA> <irun_mA> <delay>");
-    puts("DRIVER UART SPREADCYCLE X|Y|Z ON|OFF");
-    puts("DRIVER UART MICROSTEPS X|Y|Z <1..256>");
-    puts("DRIVER REG READ X|Y|Z <reg>");
-    puts("DRIVER REG WRITE X|Y|Z <reg> <value>");
+    puts("DRIVER UART ADDR C|A|Z <0..3>");
+    puts("DRIVER UART CURRENT C|A|Z <ihold_mA> <irun_mA> <delay>");
+    puts("DRIVER UART SPREADCYCLE C|A|Z ON|OFF");
+    puts("DRIVER UART MICROSTEPS C|A|Z <1..256>");
+    puts("DRIVER REG READ C|A|Z <reg>");
+    puts("DRIVER REG WRITE C|A|Z <reg> <value>");
     puts("DRIVER APPLY");
     puts("CAN STATUS");
     puts("CAN ON / CAN OFF / CAN APPLY");
@@ -61,24 +83,32 @@ void commands_print_help(void)
 
 void commands_print_status(app_context_t *ctx)
 {
-    float encoder_x = 0.0f;
-    float encoder_y = 0.0f;
-    esp_err_t err_x = hardware_read_axis_encoder('X', &encoder_x);
-    esp_err_t err_y = hardware_read_axis_encoder('Y', &encoder_y);
+    float encoder_c = 0.0f;
+    float encoder_a = 0.0f;
+    esp_err_t err_c = hardware_read_axis_encoder('C', &encoder_c);
+    esp_err_t err_a = hardware_read_axis_encoder('A', &encoder_a);
 
     printf("\n=== STATUS ===\n");
-    if (err_x == ESP_OK) {
-        printf("Eixo X: %.2f deg\n", encoder_x);
+    if (err_c == ESP_OK) {
+        printf("Eixo C (Base): %.2f deg\n", encoder_c);
     } else {
-        printf("Eixo X: erro de leitura (%s)\n", esp_err_to_name(err_x));
+        printf("Eixo C (Base): erro de leitura (%s)\n", esp_err_to_name(err_c));
     }
-    if (err_y == ESP_OK) {
-        printf("Eixo Y: %.2f deg\n", encoder_y);
+    if (err_a == ESP_OK) {
+        printf("Eixo A (Pivot): %.2f deg\n", encoder_a);
     } else {
-        printf("Eixo Y: erro de leitura (%s)\n", esp_err_to_name(err_y));
+        printf("Eixo A (Pivot): erro de leitura (%s)\n", esp_err_to_name(err_a));
     }
 
-    printf("Eixo Z: %ld / %ld passos\n", (long)ctx->state.atual_z, (long)ctx->settings.max_passos_z);
+    uint16_t z_teeth = ctx->settings.z_pulley_teeth ? ctx->settings.z_pulley_teeth : DEFAULT_Z_PULLEY_TEETH;
+    uint16_t msteps_z = ctx->settings.tmc_microsteps[AXIS_Z_ID] ? ctx->settings.tmc_microsteps[AXIS_Z_ID] : 16;
+    float spr_z = (float)ctx->settings.steps_per_rev[AXIS_Z_ID] > 0.0f ? (float)ctx->settings.steps_per_rev[AXIS_Z_ID] : 200.0f;
+    float mm_per_step_z = (float)(z_teeth * Z_BELT_PITCH_MM) / (spr_z * (float)msteps_z);
+    float pos_z_mm = (float)ctx->state.atual_z * mm_per_step_z;
+    float max_z_mm = (float)ctx->settings.max_passos_z * mm_per_step_z;
+
+    printf("Eixo Z: %ld / %ld passos (%.2f / %.2f mm | Polia: %uT GT2)\n",
+           (long)ctx->state.atual_z, (long)ctx->settings.max_passos_z, pos_z_mm, max_z_mm, (unsigned)z_teeth);
     printf("Alarme Z: %s\n", ctx->state.alarme_z_ativo ? "ON" : "OFF");
     printf("Estado Z: %s\n", ctx->state.z_bloqueado ? "BLOQUEADO" : "LIVRE");
     printf("Drivers: %s\n", ctx->state.drivers_enabled ? "ENERGIZADOS" : "DESLIGADOS");
@@ -154,22 +184,16 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     if (strncmp(cmd, "DRIVER INVERT ", 14) == 0) {
-        char axis = cmd[14];
+        char raw_axis = cmd[14];
         char state_str[8] = {0};
-        if (sscanf(cmd + 14, "%c %7s", &axis, state_str) != 2) {
-            puts("Uso: DRIVER INVERT X|Y|Z ON|OFF");
+        if (sscanf(cmd + 14, "%c %7s", &raw_axis, state_str) != 2) {
+            puts("Uso: DRIVER INVERT C|A|Z ON|OFF");
             return;
         }
-        axis = (char)toupper((unsigned char)axis);
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
         bool enable = (strcmp(state_str, "ON") == 0);
@@ -178,8 +202,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strcmp(cmd, "SETHOME X") == 0 || strcmp(cmd, "SETHOME Y") == 0) {
-        char axis = cmd[8];
+    if (strcmp(cmd, "SETHOME C") == 0 || strcmp(cmd, "SETHOME A") == 0 ||
+        strcmp(cmd, "SETHOME X") == 0 || strcmp(cmd, "SETHOME Y") == 0) {
+        char raw_axis = cmd[8];
+        size_t axis_index = 0;
+        char axis = '\0';
+        parse_axis_token(raw_axis, &axis_index, &axis);
+
         float current_deg = 0.0f;
         esp_err_t err = hardware_read_axis_encoder(axis, &current_deg);
         if (err != ESP_OK) {
@@ -187,10 +216,10 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             return;
         }
 
-        if (axis == 'X') {
-            ctx->settings.home_x_deg = current_deg;
+        if (axis == 'C') {
+            ctx->settings.home_c_deg = current_deg;
         } else {
-            ctx->settings.home_y_deg = current_deg;
+            ctx->settings.home_a_deg = current_deg;
         }
 
         err = storage_save_settings(&ctx->settings);
@@ -202,8 +231,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strcmp(cmd, "HOME X") == 0 || strcmp(cmd, "HOME Y") == 0) {
-        char axis = cmd[5];
+    if (strcmp(cmd, "HOME C") == 0 || strcmp(cmd, "HOME A") == 0 ||
+        strcmp(cmd, "HOME X") == 0 || strcmp(cmd, "HOME Y") == 0) {
+        char raw_axis = cmd[5];
+        char axis = '\0';
+        parse_axis_token(raw_axis, NULL, &axis);
         esp_err_t err = motion_post_home_axis(ctx, axis, 0, 0);
         if (err == ESP_OK) {
             printf("Home %c finalizado.\n", axis);
@@ -233,6 +265,24 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
             printf("Limite Z definido manualmente para %ld passos.\n", steps_z);
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    long teeth_z = 0;
+    if (sscanf(cmd, "PULLEY Z %ld", &teeth_z) == 1 || sscanf(cmd, "SET_PULLEY Z %ld", &teeth_z) == 1 || sscanf(cmd, "PULLEY_TEETH Z %ld", &teeth_z) == 1) {
+        if (teeth_z < 6 || teeth_z > 200) {
+            puts("Numero de dentes da polia Z invalido (use entre 6 e 200).");
+            return;
+        }
+        ctx->settings.z_pulley_teeth = (uint16_t)teeth_z;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            float mm_rev = (float)teeth_z * Z_BELT_PITCH_MM;
+            printf("Polia do motor Z configurada para %ld dentes GT2 (passo %.1fmm -> %.2f mm/volta).\n",
+                   teeth_z, Z_BELT_PITCH_MM, mm_rev);
         } else {
             printf("Erro ao salvar: %s\n", esp_err_to_name(err));
         }
@@ -270,19 +320,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         }
     }
 
-    char axis = '\0';
+    char raw_axis = '\0';
     long steps_per_rev = 0;
-    if (sscanf(cmd, "STEPS %c %ld", &axis, &steps_per_rev) == 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "STEPS %c %ld", &raw_axis, &steps_per_rev) == 2) {
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
         if (steps_per_rev <= 0 || steps_per_rev > 10000) {
@@ -300,17 +344,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     float speed_val = 0.0f;
-    if (sscanf(cmd, "SPEED %c %f", &axis, &speed_val) == 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "SPEED %c %f", &raw_axis, &speed_val) == 2) {
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
          if (axis == 'Z') {
@@ -319,8 +357,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                  return;
              }
          } else {
-             if (speed_val < SPEED_MIN_DEG_S_XY || speed_val > ctx->settings.speed_max[axis_index]) {
-                 printf("Velocidade %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_XY, ctx->settings.speed_max[axis_index]);
+             if (speed_val < SPEED_MIN_DEG_S_CA || speed_val > ctx->settings.speed_max[axis_index]) {
+                 printf("Velocidade %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_CA, ctx->settings.speed_max[axis_index]);
                  return;
              }
          }
@@ -341,17 +379,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     float accel_val = 0.0f;
-    if (sscanf(cmd, "ACCEL %c %f", &axis, &accel_val) == 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "ACCEL %c %f", &raw_axis, &accel_val) == 2) {
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
         if (axis == 'Z') {
@@ -360,8 +392,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 return;
             }
         } else {
-            if (accel_val < ACCEL_MIN_DEG_S2_XY || accel_val > ctx->settings.accel_max[axis_index]) {
-                printf("Aceleracao %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_XY, ctx->settings.accel_max[axis_index]);
+            if (accel_val < ACCEL_MIN_DEG_S2_CA || accel_val > ctx->settings.accel_max[axis_index]) {
+                printf("Aceleracao %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_CA, ctx->settings.accel_max[axis_index]);
                 return;
             }
         }
@@ -380,17 +412,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     float speed_max_val = 0.0f;
-    if (sscanf(cmd, "SPEED_MAX %c %f", &axis, &speed_max_val) == 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "SPEED_MAX %c %f", &raw_axis, &speed_max_val) == 2) {
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
         if (axis == 'Z') {
@@ -399,8 +425,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 return;
             }
         } else {
-            if (speed_max_val < SPEED_MIN_DEG_S_XY || speed_max_val > SPEED_MAX_DEG_S_XY) {
-                printf("Velocidade maxima %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_XY, SPEED_MAX_DEG_S_XY);
+            if (speed_max_val < SPEED_MIN_DEG_S_CA || speed_max_val > SPEED_MAX_DEG_S_CA) {
+                printf("Velocidade maxima %c invalida. Use deg/s entre %.2f e %.2f.\n", axis, SPEED_MIN_DEG_S_CA, SPEED_MAX_DEG_S_CA);
                 return;
             }
         }
@@ -420,17 +446,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     float accel_max_val = 0.0f;
-    if (sscanf(cmd, "ACCEL_MAX %c %f", &axis, &accel_max_val) == 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "ACCEL_MAX %c %f", &raw_axis, &accel_max_val) == 2) {
         size_t axis_index = 0;
-        if (axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido. Use X, Y ou Z.");
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
         if (axis == 'Z') {
@@ -439,8 +459,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 return;
             }
         } else {
-            if (accel_max_val < ACCEL_MIN_DEG_S2_XY || accel_max_val > ACCEL_MAX_DEG_S2_XY) {
-                printf("Aceleracao maxima %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_XY, ACCEL_MAX_DEG_S2_XY);
+            if (accel_max_val < ACCEL_MIN_DEG_S2_CA || accel_max_val > ACCEL_MAX_DEG_S2_CA) {
+                printf("Aceleracao maxima %c invalida. Use deg/s^2 entre %.2f e %.2f.\n", axis, ACCEL_MIN_DEG_S2_CA, ACCEL_MAX_DEG_S2_CA);
                 return;
             }
         }
@@ -523,19 +543,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    char driver_axis = '\0';
+    char raw_driver_axis = '\0';
     unsigned addr = 0;
-    if (sscanf(cmd, "DRIVER UART ADDR %c %u", &driver_axis, &addr) == 2) {
+    if (sscanf(cmd, "DRIVER UART ADDR %c %u", &raw_driver_axis, &addr) == 2) {
         size_t axis_index = 0;
-        driver_axis = (char)toupper((unsigned char)driver_axis);
-        if (driver_axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (driver_axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (driver_axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido para endereco TMC.");
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido para endereco TMC. Use C, A ou Z.");
             return;
         }
         if (addr > 3U) {
@@ -556,17 +570,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     unsigned ihold_ma = 0;
     unsigned irun_ma = 0;
     unsigned ihold_delay = 0;
-    if (sscanf(cmd, "DRIVER UART CURRENT %c %u %u %u", &driver_axis, &ihold_ma, &irun_ma, &ihold_delay) == 4) {
+    if (sscanf(cmd, "DRIVER UART CURRENT %c %u %u %u", &raw_driver_axis, &ihold_ma, &irun_ma, &ihold_delay) == 4) {
         size_t axis_index = 0;
-        driver_axis = (char)toupper((unsigned char)driver_axis);
-        if (driver_axis == 'X') {
-            axis_index = AXIS_X_ID;
-        } else if (driver_axis == 'Y') {
-            axis_index = AXIS_Y_ID;
-        } else if (driver_axis == 'Z') {
-            axis_index = AXIS_Z_ID;
-        } else {
-            puts("Eixo invalido para corrente TMC.");
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido para corrente TMC. Use C, A ou Z.");
             return;
         }
         if (ihold_ma > 2000U || irun_ma > 2000U || ihold_delay > 15U) {
@@ -588,8 +596,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     char mode_token[24];
-    if (sscanf(cmd, "DRIVER UART SPREADCYCLE %c %23s", &driver_axis, mode_token) == 2) {
-        driver_axis = (char)toupper((unsigned char)driver_axis);
+    if (sscanf(cmd, "DRIVER UART SPREADCYCLE %c %23s", &raw_driver_axis, mode_token) == 2) {
+        size_t axis_index = 0;
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido. Use C, A ou Z.");
+            return;
+        }
         to_upper_ascii(mode_token);
         bool enable = false;
         if (strcmp(mode_token, "ON") == 0) {
@@ -610,8 +623,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     unsigned microsteps_val = 0;
-    if (sscanf(cmd, "DRIVER UART MICROSTEPS %c %u", &driver_axis, &microsteps_val) == 2) {
-        driver_axis = (char)toupper((unsigned char)driver_axis);
+    if (sscanf(cmd, "DRIVER UART MICROSTEPS %c %u", &raw_driver_axis, &microsteps_val) == 2) {
+        size_t axis_index = 0;
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido. Use C, A ou Z.");
+            return;
+        }
         esp_err_t err = tmc2209_set_microsteps(ctx, driver_axis, (uint16_t)microsteps_val);
         if (err == ESP_OK) {
             printf("Eixo %c MICROSTEPS definido para %u\n", driver_axis, microsteps_val);
@@ -623,10 +641,15 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     char reg_token[24];
     char value_token[24];
-    if (sscanf(cmd, "DRIVER REG READ %c %23s", &driver_axis, reg_token) == 2) {
+    if (sscanf(cmd, "DRIVER REG READ %c %23s", &raw_driver_axis, reg_token) == 2) {
+        size_t axis_index = 0;
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido. Use C, A ou Z.");
+            return;
+        }
         uint32_t reg_addr = 0;
         uint32_t value = 0;
-        driver_axis = (char)toupper((unsigned char)driver_axis);
         if (!parse_u32_token(reg_token, &reg_addr) || reg_addr > 0x7FU) {
             puts("Endereco de registrador invalido.");
             return;
@@ -641,10 +664,15 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (sscanf(cmd, "DRIVER REG WRITE %c %23s %23s", &driver_axis, reg_token, value_token) == 3) {
+    if (sscanf(cmd, "DRIVER REG WRITE %c %23s %23s", &raw_driver_axis, reg_token, value_token) == 3) {
+        size_t axis_index = 0;
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido. Use C, A ou Z.");
+            return;
+        }
         uint32_t reg_addr = 0;
         uint32_t reg_value = 0;
-        driver_axis = (char)toupper((unsigned char)driver_axis);
         if (!parse_u32_token(reg_token, &reg_addr) || reg_addr > 0x7FU || !parse_u32_token(value_token, &reg_value)) {
             puts("Registrador ou valor invalido.");
             return;
@@ -766,9 +794,15 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     float move_accel_val = -1.0f;
     char suffix[64];
     suffix[0] = '\0';
+    char raw_axis_move = '\0';
 
-    if (sscanf(cmd, "MOVE %c %ld %63[^\n]", &axis, &steps, suffix) >= 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "MOVE %c %ld %63[^\n]", &raw_axis_move, &steps, suffix) >= 2) {
+        size_t axis_index = 0;
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis_move, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
+            return;
+        }
         // Parse optional S=<speed> F=<accel> params
         char *sp = suffix;
         while (sp && *sp) {
@@ -809,8 +843,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (sscanf(cmd, "MOVE_F %c %ld %63[^\n]", &axis, &steps, suffix) >= 2) {
-        axis = (char)toupper((unsigned char)axis);
+    if (sscanf(cmd, "MOVE_F %c %ld %63[^\n]", &raw_axis_move, &steps, suffix) >= 2) {
+        size_t axis_index = 0;
+        char axis = '\0';
+        if (!parse_axis_token(raw_axis_move, &axis_index, &axis)) {
+            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
+            return;
+        }
         ESP_LOGI(APP_TAG, "PARSER MOVE_F axis=%c raw_steps=%ld", axis, steps);
 
         // Parse optional S=<speed> F=<accel> params
@@ -924,15 +963,26 @@ static bool parse_laser_level_token(const char *text, uint8_t *level)
 
 static uint8_t percent_to_laser_level(uint32_t percent)
 {
-    if (percent >= 100U) {
-        return 255U;
+    if (percent == 0U) {
+        return 0U;
     }
-    return (uint8_t)((percent * 255U + 50U) / 100U);
+    if (percent >= 100U) {
+        return LASER_PWM_MAX_USEFUL_LEVEL_8BIT; // 17
+    }
+    uint32_t span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT; // 14
+    return (uint8_t)(LASER_PWM_MIN_ACTIVE_LEVEL_8BIT + ((percent * span + 50U) / 100U));
 }
 
 static uint32_t laser_level_to_percent(uint8_t level)
 {
-    return ((uint32_t)level * 100U + 127U) / 255U;
+    if (level <= LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) {
+        return 0U;
+    }
+    if (level >= LASER_PWM_MAX_USEFUL_LEVEL_8BIT) {
+        return 100U;
+    }
+    uint32_t span = LASER_PWM_MAX_USEFUL_LEVEL_8BIT - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT; // 14
+    return (((uint32_t)(level - LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) * 100U + (span / 2U)) / span);
 }
 
 static void trim_ascii(char *text)

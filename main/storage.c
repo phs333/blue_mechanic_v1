@@ -37,6 +37,10 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         settings->max_passos_z = DEFAULT_MAX_Z_STEPS;
     }
 
+    if (settings->z_pulley_teeth < 6 || settings->z_pulley_teeth > 200) {
+        settings->z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH;
+    }
+
     return ESP_OK;
 }
 

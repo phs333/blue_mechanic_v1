@@ -146,9 +146,9 @@ esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
 
     rmt_channel_handle_t chan = NULL;
     char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'X') {
+    if (axis_upper == 'C' || axis_upper == 'X') {
         chan = s_rmt_x_chan;
-    } else if (axis_upper == 'Y') {
+    } else if (axis_upper == 'A' || axis_upper == 'Y') {
         chan = s_rmt_y_chan;
     } else {
         return ESP_ERR_INVALID_ARG;
@@ -242,9 +242,9 @@ esp_err_t hardware_step_pulse_rmt_with_accel(char axis, uint32_t steps, uint32_t
 
     rmt_channel_handle_t chan = NULL;
     char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'X') {
+    if (axis_upper == 'C' || axis_upper == 'X') {
         chan = s_rmt_x_chan;
-    } else if (axis_upper == 'Y') {
+    } else if (axis_upper == 'A' || axis_upper == 'Y') {
         chan = s_rmt_y_chan;
     } else {
         return ESP_ERR_INVALID_ARG;
@@ -328,9 +328,9 @@ esp_err_t hardware_step_pulse_rmt_profiled(char axis, uint32_t *delay_us, uint32
 
     rmt_channel_handle_t chan = NULL;
     char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'X') {
+    if (axis_upper == 'C' || axis_upper == 'X') {
         chan = s_rmt_x_chan;
-    } else if (axis_upper == 'Y') {
+    } else if (axis_upper == 'A' || axis_upper == 'Y') {
         chan = s_rmt_y_chan;
     } else {
         return ESP_ERR_INVALID_ARG;
@@ -454,8 +454,10 @@ esp_err_t hardware_read_axis_encoder(char axis, float *angle_deg)
     ESP_RETURN_ON_FALSE(angle_deg != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "angle_deg nulo");
 
     switch (toupper((unsigned char)axis)) {
+    case 'C':
     case 'X':
         return read_encoder_deg(0, angle_deg);
+    case 'A':
     case 'Y':
         return read_encoder_deg(1, angle_deg);
     default:

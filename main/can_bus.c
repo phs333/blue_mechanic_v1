@@ -529,7 +529,8 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             }
             char axis = (char)buf[1];
             xSemaphoreGive(ctx->state_mutex);
-            if (axis == 'X' || axis == 'x' || axis == 'Y' || axis == 'y') {
+            if (axis == 'C' || axis == 'c' || axis == 'A' || axis == 'a' ||
+                axis == 'X' || axis == 'x' || axis == 'Y' || axis == 'y') {
                 err = motion_post_home_axis(ctx, axis, ctx->settings.node_id, CAN_OP_HOME);
             } else if (axis == 'Z' || axis == 'z') {
                 err = motion_post_home_axis(ctx, 'Z', ctx->settings.node_id, CAN_OP_HOME);

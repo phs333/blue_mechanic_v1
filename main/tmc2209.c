@@ -136,12 +136,12 @@ void tmc2209_print_status(const app_context_t *ctx)
 static bool axis_to_index(char axis, size_t *axis_index)
 {
     char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'X') {
-        *axis_index = AXIS_X_ID;
+    if (axis_upper == 'C' || axis_upper == 'X') {
+        *axis_index = AXIS_C_ID;
         return true;
     }
-    if (axis_upper == 'Y') {
-        *axis_index = AXIS_Y_ID;
+    if (axis_upper == 'A' || axis_upper == 'Y') {
+        *axis_index = AXIS_A_ID;
         return true;
     }
     if (axis_upper == 'Z') {
@@ -153,7 +153,7 @@ static bool axis_to_index(char axis, size_t *axis_index)
 
 static const char *axis_name_from_index(size_t axis_index)
 {
-    static const char *const names[AXIS_COUNT] = {"X", "Y", "Z"};
+    static const char *const names[AXIS_COUNT] = {"C", "A", "Z"};
     return (axis_index < AXIS_COUNT) ? names[axis_index] : "?";
 }
 

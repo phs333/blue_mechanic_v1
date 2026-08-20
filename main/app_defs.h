@@ -12,12 +12,22 @@
 #define AXIS_COUNT 3U
 
 // =================================================================
+// =================================================================
 // --- MAPEAMENTO DE PINOS ---
 // =================================================================
-#define DIR_X GPIO_NUM_4
-#define STEP_X GPIO_NUM_5
-#define DIR_Y GPIO_NUM_6
-#define STEP_Y GPIO_NUM_7
+// Eixo C (Base Rotativa)
+#define DIR_C GPIO_NUM_4
+#define STEP_C GPIO_NUM_5
+#define DIR_X DIR_C
+#define STEP_X STEP_C
+
+// Eixo A (Pivot com Lasers Colineares Opostos)
+#define DIR_A GPIO_NUM_6
+#define STEP_A GPIO_NUM_7
+#define DIR_Y DIR_A
+#define STEP_Y STEP_A
+
+// Eixo Z (Atuador Linear)
 #define DIR_Z GPIO_NUM_15
 #define STEP_Z GPIO_NUM_16
 #define EN_PIN GPIO_NUM_17
@@ -55,29 +65,38 @@
 #define Z_DIR_DOWN 1
 
 #define PASSOS_POR_VOLTA_MOTOR 3200.0f
-#define GRAUS_POR_PASSO_XY (360.0f / PASSOS_POR_VOLTA_MOTOR)
+#define GRAUS_POR_PASSO_CA (360.0f / PASSOS_POR_VOLTA_MOTOR)
+#define GRAUS_POR_PASSO_XY GRAUS_POR_PASSO_CA
 
-#define REDUCAO_X 1.0f
-#define REDUCAO_Y 1.0f
+#define REDUCAO_C 1.0f
+#define REDUCAO_A 1.0f
+#define REDUCAO_X REDUCAO_C
+#define REDUCAO_Y REDUCAO_A
 
-#define LIMITE_GRAUS_XY 90.0f
+#define LIMITE_GRAUS_CA 90.0f
+#define LIMITE_GRAUS_XY LIMITE_GRAUS_CA
 #define PASSOS_ALIVIO_EXTRA_Z 400
 
 #define Z_BELT_PITCH_MM 2.0f
 #define Z_BELT_PULLEY_TEETH 16U
+#define DEFAULT_Z_PULLEY_TEETH 16U
 
-#define INVERTER_X false
-#define INVERTER_Y false
+#define INVERTER_C false
+#define INVERTER_A false
+#define INVERTER_X INVERTER_C
+#define INVERTER_Y INVERTER_A
 
 #define ENCODER_ADDR 0x36
 #define ENCODER_REG_ANGLE 0x0E
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 4U
+#define SETTINGS_VERSION 5U
 
-#define DEFAULT_HOME_X_DEG 0.0f
-#define DEFAULT_HOME_Y_DEG 0.0f
+#define DEFAULT_HOME_C_DEG 0.0f
+#define DEFAULT_HOME_A_DEG 0.0f
+#define DEFAULT_HOME_X_DEG DEFAULT_HOME_C_DEG
+#define DEFAULT_HOME_Y_DEG DEFAULT_HOME_A_DEG
 #define DEFAULT_MAX_Z_STEPS 20000
 
 #define DEFAULT_NODE_ID 1U
@@ -98,21 +117,27 @@
 #define FAN_AUTO_OFF_TEMP_C 40.0f
 
 // --- Limites por eixo ---
-// Velocidade máxima em deg/s para X/Y, mm/s para Z
-#define DEFAULT_SPEED_MAX_DEG_S_XY 1500.0f
+// Velocidade máxima em deg/s para C/A, mm/s para Z
+#define DEFAULT_SPEED_MAX_DEG_S_CA 1500.0f
+#define DEFAULT_SPEED_MAX_DEG_S_XY DEFAULT_SPEED_MAX_DEG_S_CA
 #define DEFAULT_SPEED_MAX_MM_S_Z   80.0f
-// Aceleração máxima em deg/s² para X/Y, mm/s² para Z
-#define DEFAULT_ACCEL_MAX_DEG_S2_XY 5000.0f
+// Aceleração máxima em deg/s² para C/A, mm/s² para Z
+#define DEFAULT_ACCEL_MAX_DEG_S2_CA 5000.0f
+#define DEFAULT_ACCEL_MAX_DEG_S2_XY DEFAULT_ACCEL_MAX_DEG_S2_CA
 #define DEFAULT_ACCEL_MAX_MM_S2_Z    1000.0f
 
 // --- Limites mínimos/máximos para validação ---
-#define SPEED_MIN_DEG_S_XY 0.1f
-#define SPEED_MAX_DEG_S_XY 10000.0f
+#define SPEED_MIN_DEG_S_CA 0.1f
+#define SPEED_MIN_DEG_S_XY SPEED_MIN_DEG_S_CA
+#define SPEED_MAX_DEG_S_CA 10000.0f
+#define SPEED_MAX_DEG_S_XY SPEED_MAX_DEG_S_CA
 #define SPEED_MIN_MM_S_Z   0.01f
 #define SPEED_MAX_MM_S_Z   500.0f
 
-#define ACCEL_MIN_DEG_S2_XY 1.0f
-#define ACCEL_MAX_DEG_S2_XY 50000.0f
+#define ACCEL_MIN_DEG_S2_CA 1.0f
+#define ACCEL_MIN_DEG_S2_XY ACCEL_MIN_DEG_S2_CA
+#define ACCEL_MAX_DEG_S2_CA 50000.0f
+#define ACCEL_MAX_DEG_S2_XY ACCEL_MAX_DEG_S2_CA
 #define ACCEL_MIN_MM_S2_Z   0.1f
 #define ACCEL_MAX_MM_S2_Z   5000.0f
 
@@ -123,9 +148,11 @@ typedef enum {
 } fan_mode_t;
 
 typedef enum {
+    AXIS_C_ID = 0,
+    AXIS_A_ID = 1,
+    AXIS_Z_ID = 2,
     AXIS_X_ID = 0,
     AXIS_Y_ID = 1,
-    AXIS_Z_ID = 2,
 } axis_id_t;
 
 typedef enum {
@@ -135,8 +162,16 @@ typedef enum {
 
 typedef struct {
     uint32_t version;
-    float home_x_deg;
-    float home_y_deg;
+    union {
+        struct {
+            float home_c_deg;
+            float home_a_deg;
+        };
+        struct {
+            float home_x_deg;
+            float home_y_deg;
+        };
+    };
     int32_t max_passos_z;
     uint8_t node_id;
     uint8_t can_enabled;
@@ -155,6 +190,7 @@ typedef struct {
     float accel[AXIS_COUNT];
     float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
+    uint16_t z_pulley_teeth;       // número de dentes da polia GT2 no motor Z (ex: 16, 20)
 } persisted_settings_t;
 
 typedef struct {
@@ -229,7 +265,8 @@ typedef struct {
         .speed_delay_us = {400, 400, 400},   \
         .accel = {900.0f, 900.0f, 500.0f},     \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
-        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z} \
+        .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
+        .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \

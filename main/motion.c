@@ -290,11 +290,12 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     ctx->state.em_homing_z = true;
 
     gpio_set_level(DIR_Z, Z_DIR_DOWN);
+    esp_rom_delay_us(5);
     int32_t search_steps = 0;
     while (!hardware_is_z_switch_pressed() && search_steps < Z_HOME_SEARCH_LIMIT_STEPS) {
         hardware_step_pulse(STEP_Z, 400);
         ++search_steps;
-        if ((search_steps & 0xFFFU) == 0U) {
+        if ((search_steps & 0x3FU) == 0U) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
@@ -307,11 +308,12 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     }
 
     gpio_set_level(DIR_Z, Z_DIR_UP);
+    esp_rom_delay_us(5);
     int32_t release_steps = 0;
     while (hardware_is_z_switch_pressed() && release_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
         hardware_step_pulse(STEP_Z, 800);
         ++release_steps;
-        if ((release_steps & 0xFFFU) == 0U) {
+        if ((release_steps & 0x3FU) == 0U) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
@@ -535,7 +537,12 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     float current_deviation_deg = 0.0f;
-    ESP_RETURN_ON_ERROR(compute_axis_deviation(ctx, axis_upper, &current_deviation_deg), APP_TAG, "Falha ao calcular desvio");
+    esp_err_t enc_err = compute_axis_deviation(ctx, axis_upper, &current_deviation_deg);
+    if (enc_err != ESP_OK) {
+        ESP_LOGW(APP_TAG, "MOVE %c: Encoder indisponivel (%s). Movendo em malha aberta.",
+                 axis_upper, esp_err_to_name(enc_err));
+        return do_motion_move_axis_force(ctx, axis_upper, requested_steps, -1.0f, -1.0f);
+    }
 
     bool positive_motion = requested_steps > 0;
     if (invert) {
@@ -568,7 +575,7 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     gpio_set_level(dir_pin, ((permitted_move_deg > 0.0f) ^ invert) ? 1 : 0);
-    esp_rom_delay_us(2);
+    esp_rom_delay_us(5);
     ESP_LOGI(APP_TAG, "MOVE %c steps=%d dir_pin=%d invert=%d permitted_deg=%.2f",
              axis_upper, (int)requested_steps,
              (int)(((permitted_move_deg > 0.0f) ^ invert) ? 1 : 0),

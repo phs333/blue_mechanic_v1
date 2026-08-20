@@ -468,8 +468,8 @@ uint16_t tmc2209_cs_to_ma(uint8_t cs)
 
 esp_err_t tmc2209_set_spreadcycle(app_context_t *ctx, char axis, bool enabled)
 {
-    uint32_t gconf = 0;
-    ESP_RETURN_ON_ERROR(tmc2209_read_register(ctx, axis, TMC_REG_GCONF, &gconf), APP_TAG, "Erro ao ler GCONF");
+    uint32_t gconf = (1U << 6) | (1U << 7); // Default GCONF (pdn_disable=1, mstep_reg_select=1)
+    (void)tmc2209_read_register(ctx, axis, TMC_REG_GCONF, &gconf);
     if (enabled) {
         gconf |= (1U << 2);
     } else {
@@ -490,8 +490,8 @@ esp_err_t tmc2209_set_microsteps(app_context_t *ctx, char axis, uint16_t microst
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint32_t chopconf = 0;
-    ESP_RETURN_ON_ERROR(tmc2209_read_register(ctx, axis, TMC_REG_CHOPCONF, &chopconf), APP_TAG, "Erro ao ler CHOPCONF");
+    uint32_t chopconf = 0x10000053U; // Default CHOPCONF com intpol=1, toff=3, tbl=2, hend=0, hstrt=5
+    (void)tmc2209_read_register(ctx, axis, TMC_REG_CHOPCONF, &chopconf);
     chopconf &= ~(0x0FU << 24);
     chopconf |= ((uint32_t)mres << 24);
     ESP_RETURN_ON_ERROR(tmc2209_write_register(ctx, axis, TMC_REG_CHOPCONF, chopconf), APP_TAG, "Erro ao gravar CHOPCONF");

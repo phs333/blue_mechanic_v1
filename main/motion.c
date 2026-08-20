@@ -158,13 +158,19 @@ void compute_trapezoidal_profile(app_context_t *ctx, char axis,
             uint32_t decel_start = triangular ? accel_steps : (total_steps - decel_steps);
             uint32_t decel_step = i - decel_start;
             if (decel_steps == 0) {
-                speed = 0.0f;
+                speed = start_speed;
             } else {
                 float t = (float)decel_step / (float)decel_steps;
-                speed = effective_max_speed * (1.0f - t);
+                if (t > 1.0f) {
+                    t = 1.0f;
+                }
+                speed = effective_max_speed - (effective_max_speed - start_speed) * t;
             }
         }
 
+        if (speed < start_speed * 0.5f) {
+            speed = start_speed * 0.5f;
+        }
         if (speed < 1.0f) {
             speed = 1.0f;
         }
@@ -257,7 +263,7 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
         }
 
         gpio_set_level(dir_pin, ((error_deg > 0.0f) ^ invert) ? 1 : 0);
-        esp_rom_delay_us(2);
+        esp_rom_delay_us(5);
         uint32_t ramp_steps = compute_ramp_steps(ctx, axis_upper, 800, 800, (uint32_t)steps_to_move);
         if (ramp_steps > steps_to_move / 2) {
             ramp_steps = steps_to_move / 2;
@@ -360,7 +366,7 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
         }
 
          gpio_set_level(dir_pin, positive_motion ? 1 : 0);
-         esp_rom_delay_us(2);
+         esp_rom_delay_us(5);
          ESP_LOGI(APP_TAG, "MOVE_F %c steps=%d dir_pin=%d invert=%d",
                   axis_upper, (int)requested_steps,
                   (int)(positive_motion ? 1 : 0), (int)invert);
@@ -420,7 +426,7 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
         }
         int32_t steps = labs(requested_steps);
         gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
-        esp_rom_delay_us(2);
+        esp_rom_delay_us(5);
         ESP_LOGI(APP_TAG, "MOVE_F Z steps=%d dir_pin=%d (Z_DIR_UP=%d Z_DIR_DOWN=%d)",
                  (int)requested_steps,
                  (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),

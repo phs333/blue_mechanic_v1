@@ -57,6 +57,10 @@ class BaseClient(ABC):
         """Move specified axis by relative steps with optional speed/accel."""
         pass
 
+    def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
+        """Move C, A, and Z axes simultaneously in hardware."""
+        return True
+
     @abstractmethod
     def set_laser(self, laser_index: int, level: int) -> bool:
         """Set laser 1 or 2 level (0..255)."""

@@ -24,7 +24,9 @@
 #define TMC_REG_IOIN 0x06U
 #define TMC_REG_IHOLD_IRUN 0x10U
 #define TMC_REG_TPOWERDOWN 0x11U
+#define TMC_REG_TPWMTHRS 0x13U
 #define TMC_REG_CHOPCONF 0x6CU
+#define TMC_REG_PWMCONF 0x70U
 
 static volatile bool s_uart_installed;
 
@@ -414,13 +416,22 @@ static int microsteps_to_mres(uint16_t microsteps)
 static esp_err_t tmc_apply_axis_defaults(app_context_t *ctx, size_t axis_index)
 {
     uint32_t verify_value = 0;
-    uint32_t gconf = (1U << 6) | (1U << 7);
+    // GCONF: pdn_disable=1 (bit 6), mstep_reg_select=1 (bit 7), multistep_filt=1 (bit 8)
+    uint32_t gconf = (1U << 6) | (1U << 7) | (1U << 8);
+    if (ctx->settings.tmc_spreadcycle[axis_index]) {
+        gconf |= (1U << 2); // en_spreadCycle = 1
+    }
+
     int mres = microsteps_to_mres(ctx->settings.tmc_microsteps[axis_index]);
-    uint32_t chopconf = 0x10000053U | ((uint32_t)mres << 24); // 16 micropassos (mres=4) com interpolacao para 256 (intpol=1)
+    // CHOPCONF: intpol=1 (bit 28), mres (bits 24-27), tbl=2 (bits 15-16), hend=1 (bits 7-10), hstrt=4 (bits 4-6), toff=3 (bits 0-3)
+    uint32_t chopconf = (1U << 28) | ((uint32_t)mres << 24) | (2U << 15) | (1U << 7) | (4U << 4) | (3U);
     uint32_t ihold_irun =
         ((uint32_t)(ctx->settings.tmc_ihold_delay[axis_index] & 0x0FU) << 16) |
         ((uint32_t)(ctx->settings.tmc_irun[axis_index] & 0x1FU) << 8) |
         (uint32_t)(ctx->settings.tmc_ihold[axis_index] & 0x1FU);
+    
+    // PWMCONF: autoscale=1, autograd=1, freq=1, grad=14, ofs=36
+    uint32_t pwmconf = 0xC10D0024U;
 
     ESP_RETURN_ON_ERROR(
         tmc_read_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_IOIN, &verify_value),
@@ -439,9 +450,17 @@ static esp_err_t tmc_apply_axis_defaults(app_context_t *ctx, size_t axis_index)
         APP_TAG,
         "Falha ao gravar IHOLD_IRUN");
     ESP_RETURN_ON_ERROR(
+        tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_PWMCONF, pwmconf),
+        APP_TAG,
+        "Falha ao gravar PWMCONF");
+    ESP_RETURN_ON_ERROR(
         tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_TPOWERDOWN, 20U),
         APP_TAG,
         "Falha ao gravar TPOWERDOWN");
+    ESP_RETURN_ON_ERROR(
+        tmc_write_register_raw(ctx->settings.tmc_slave_addr[axis_index], TMC_REG_TPWMTHRS, 0U),
+        APP_TAG,
+        "Falha ao gravar TPWMTHRS");
     return ESP_OK;
 }
 
@@ -468,7 +487,11 @@ uint16_t tmc2209_cs_to_ma(uint8_t cs)
 
 esp_err_t tmc2209_set_spreadcycle(app_context_t *ctx, char axis, bool enabled)
 {
-    uint32_t gconf = (1U << 6) | (1U << 7); // Default GCONF (pdn_disable=1, mstep_reg_select=1)
+    size_t axis_index = 0;
+    if (!axis_to_index(axis, &axis_index)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint32_t gconf = (1U << 6) | (1U << 7) | (1U << 8); // pdn_disable=1, mstep_reg_select=1, multistep_filt=1
     (void)tmc2209_read_register(ctx, axis, TMC_REG_GCONF, &gconf);
     if (enabled) {
         gconf |= (1U << 2);
@@ -476,6 +499,8 @@ esp_err_t tmc2209_set_spreadcycle(app_context_t *ctx, char axis, bool enabled)
         gconf &= ~(1U << 2);
     }
     ESP_RETURN_ON_ERROR(tmc2209_write_register(ctx, axis, TMC_REG_GCONF, gconf), APP_TAG, "Erro ao gravar GCONF");
+    ctx->settings.tmc_spreadcycle[axis_index] = enabled ? 1U : 0U;
+    (void)storage_save_settings(&ctx->settings);
     return ESP_OK;
 }
 

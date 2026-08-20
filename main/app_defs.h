@@ -58,8 +58,8 @@
 
 #define LASER_PWM_FREQ_HZ 5000
 #define LASER_PWM_MAX_DUTY ((1U << 13) - 1U)
-#define LASER_PWM_MIN_ACTIVE_LEVEL_8BIT 3U
-#define LASER_PWM_MAX_USEFUL_LEVEL_8BIT 17U
+#define LASER_PWM_MIN_ACTIVE_LEVEL_8BIT 15U
+#define LASER_PWM_MAX_USEFUL_LEVEL_8BIT 255U
 
 #define Z_DIR_UP 0
 #define Z_DIR_DOWN 1
@@ -91,7 +91,7 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 6U
+#define SETTINGS_VERSION 7U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
@@ -184,6 +184,7 @@ typedef struct {
     uint8_t tmc_irun[AXIS_COUNT];
     uint8_t tmc_ihold_delay[AXIS_COUNT];
     uint16_t tmc_microsteps[AXIS_COUNT];
+    uint8_t tmc_spreadcycle[AXIS_COUNT];
     uint16_t steps_per_rev[AXIS_COUNT];
     uint32_t speed_delay_us[AXIS_COUNT];
     float accel[AXIS_COUNT];
@@ -222,12 +223,16 @@ typedef enum {
     MOTION_CMD_MOVE_REL,
     MOTION_CMD_HOME,
     MOTION_CMD_MOVE_FORCE,
+    MOTION_CMD_MOVE_SYNC,
 } motion_cmd_type_t;
 
 typedef struct {
     motion_cmd_type_t type;
     char axis;
     int32_t steps;
+    int32_t steps_c;
+    int32_t steps_a;
+    int32_t steps_z;
     uint8_t sender_node_id;
     uint8_t opcode;
     float speed_override;   // velocidade em deg/s (X/Y) ou mm/s (Z), -1.0 = usar padrão
@@ -254,12 +259,13 @@ typedef struct {
         .can_status_base_id = DEFAULT_CAN_STATUS_BASE_ID, \
         .can_event_base_id = DEFAULT_CAN_EVENT_BASE_ID, \
         .can_bitrate = DEFAULT_CAN_BITRATE, \
-        .driver_bus_mode = DRIVER_BUS_MODE_STEP_DIR_ONLY, \
+        .driver_bus_mode = DRIVER_BUS_MODE_UART_OPTIONAL, \
         .tmc_slave_addr = {0, 1, 2},        \
         .tmc_ihold = {5, 5, 6},             \
         .tmc_irun = {14, 14, 15},           \
         .tmc_ihold_delay = {6, 6, 6},       \
         .tmc_microsteps = {16, 16, 16},      \
+        .tmc_spreadcycle = {0, 0, 0},        \
         .steps_per_rev = {200, 200, 200},    \
         .speed_delay_us = {400, 400, 400},   \
         .accel = {1800.0f, 1800.0f, 300.0f}, \

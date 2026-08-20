@@ -385,6 +385,14 @@ class SerialClient(BaseClient):
             cmd += f" F={accel:.1f}"
         return self.send_raw(cmd)
 
+    def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
+        cmd = f"MOVE_SYNC C {steps_c} A {steps_a} Z {steps_z}"
+        if speed is not None and speed > 0:
+            cmd += f" S={speed:.1f}"
+        if accel is not None and accel > 0:
+            cmd += f" F={accel:.1f}"
+        return self.send_raw(cmd)
+
     def set_laser(self, laser_index: int, level: int) -> bool:
         level = max(0, min(255, level))
         return self.send_raw(f"LASER {laser_index} {level}")

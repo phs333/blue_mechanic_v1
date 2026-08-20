@@ -7,6 +7,7 @@ idf_component_register(
         "commands.c"
         "tmc2209.c"
         "can_bus.c"
+        "stepper_motor_encoder.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -17,4 +18,5 @@ idf_component_register(
         esp_driver_uart
         esp_driver_rmt
         esp_rom
+        esp_timer
 )

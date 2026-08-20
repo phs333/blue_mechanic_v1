@@ -10,12 +10,35 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 
-static rmt_channel_handle_t s_rmt_x_chan = NULL;
-static rmt_channel_handle_t s_rmt_y_chan = NULL;
-static rmt_encoder_handle_t s_rmt_copy_encoder = NULL;
+#include "stepper_motor_encoder.h"
+
+static rmt_channel_handle_t s_rmt_chan[AXIS_COUNT] = {NULL, NULL, NULL};
+
+static esp_err_t init_rmt_channels(void)
+{
+    const gpio_num_t step_pins[AXIS_COUNT] = {STEP_C, STEP_A, STEP_Z};
+
+    for (size_t i = 0; i < AXIS_COUNT; i++) {
+        if (s_rmt_chan[i] != NULL) {
+            continue;
+        }
+        rmt_tx_channel_config_t tx_chan_config = {
+            .clk_src = RMT_CLK_SRC_DEFAULT,
+            .gpio_num = step_pins[i],
+            .mem_block_symbols = 64,
+            .resolution_hz = 1000000,
+            .trans_queue_depth = 10,
+        };
+        ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_chan_config, &s_rmt_chan[i]), APP_TAG, "Falha ao criar canal RMT");
+        ESP_RETURN_ON_ERROR(rmt_enable(s_rmt_chan[i]), APP_TAG, "Falha ao habilitar canal RMT");
+    }
+    return ESP_OK;
+}
 
 static const gpio_num_t k_laser_pins[2] = {LASER_1_PIN, LASER_2_PIN};
 static const ledc_channel_t k_laser_channels[2] = {LEDC_CHANNEL_0, LEDC_CHANNEL_1};
@@ -94,24 +117,7 @@ static uint8_t one_wire_read_byte(void)
 esp_err_t hardware_init(app_context_t *ctx)
 {
     ESP_RETURN_ON_ERROR(init_gpio_matrix(), APP_TAG, "Falha ao configurar GPIOs");
-
-    rmt_tx_channel_config_t tx_chan_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .mem_block_symbols = 64,
-        .resolution_hz = 1000000,
-        .trans_queue_depth = 4,
-    };
-
-    tx_chan_config.gpio_num = STEP_X;
-    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_chan_config, &s_rmt_x_chan), APP_TAG, "RMT X failed");
-    ESP_RETURN_ON_ERROR(rmt_enable(s_rmt_x_chan), APP_TAG, "RMT enable X failed");
-
-    tx_chan_config.gpio_num = STEP_Y;
-    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_chan_config, &s_rmt_y_chan), APP_TAG, "RMT Y failed");
-    ESP_RETURN_ON_ERROR(rmt_enable(s_rmt_y_chan), APP_TAG, "RMT enable Y failed");
-
-    rmt_copy_encoder_config_t copy_encoder_config = {};
-    ESP_RETURN_ON_ERROR(rmt_new_copy_encoder(&copy_encoder_config, &s_rmt_copy_encoder), APP_TAG, "RMT copy encoder failed");
+    ESP_RETURN_ON_ERROR(init_rmt_channels(), APP_TAG, "Falha ao iniciar RMT");
 
     ESP_LOGI(APP_TAG, "SISTEMA ENERGIZADO: aguardando estabilizacao da fonte...");
     vTaskDelay(pdMS_TO_TICKS(1500));
@@ -130,12 +136,13 @@ esp_err_t hardware_init(app_context_t *ctx)
     return ESP_OK;
 }
 
+
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us)
 {
     gpio_set_level(step_pin, 1);
-    esp_rom_delay_us(3);
+    esp_rom_delay_us(5);
     gpio_set_level(step_pin, 0);
-    uint32_t low_delay = (delay_us * 2U > 3U) ? (delay_us * 2U - 3U) : 5U;
+    uint32_t low_delay = (delay_us * 2U > 5U) ? (delay_us * 2U - 5U) : 5U;
     esp_rom_delay_us(low_delay);
 }
 
@@ -157,6 +164,8 @@ esp_err_t hardware_step_pulse_profiled(char axis, const uint32_t *delay_us, uint
         return ESP_ERR_INVALID_ARG;
     }
 
+    int64_t last_yield = esp_timer_get_time();
+
     for (uint32_t i = 0; i < steps; i++) {
         uint32_t half_delay = delay_us[i];
         if (half_delay < 5U) {
@@ -166,85 +175,20 @@ esp_err_t hardware_step_pulse_profiled(char axis, const uint32_t *delay_us, uint
             half_delay = 20000U;
         }
 
-        // STEP High pulse: 3 us (TMC2209 requires min 100ns)
         gpio_set_level(step_pin, 1);
-        esp_rom_delay_us(3);
+        esp_rom_delay_us(5);
         gpio_set_level(step_pin, 0);
 
-        // Low interval: total step period is 2 * half_delay, minus 3 us high pulse
-        uint32_t low_delay = (half_delay * 2U > 3U) ? (half_delay * 2U - 3U) : 5U;
-        if (low_delay < 800U) {
-            esp_rom_delay_us(low_delay);
-        } else {
-            uint32_t chunks = low_delay / 400U;
-            uint32_t rem = low_delay % 400U;
-            for (uint32_t c = 0; c < chunks; c++) {
-                esp_rom_delay_us(400);
-            }
-            if (rem > 0) {
-                esp_rom_delay_us(rem);
+        uint32_t low_delay = (half_delay * 2U > 5U) ? (half_delay * 2U - 5U) : 5U;
+        esp_rom_delay_us(low_delay);
+
+        if ((i & 0x7FU) == 0U && i > 0) {
+            int64_t now = esp_timer_get_time();
+            if ((now - last_yield) > 300000LL) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                last_yield = esp_timer_get_time();
             }
         }
-
-        // Periodically yield to FreeRTOS watchdog every 128 steps
-        if ((i & 0x7FU) == 0U) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t hardware_step_pulse_rmt(char axis, uint32_t steps, uint32_t delay_us)
-{
-    if (steps == 0) {
-        return ESP_OK;
-    }
-
-    rmt_channel_handle_t chan = NULL;
-    char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'C' || axis_upper == 'X') {
-        chan = s_rmt_x_chan;
-    } else if (axis_upper == 'A' || axis_upper == 'Y') {
-        chan = s_rmt_y_chan;
-    } else {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (chan == NULL || s_rmt_copy_encoder == NULL) {
-        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (delay_us > 32767U) {
-        delay_us = 32767U;
-    }
-
-    rmt_symbol_word_t pulse = {
-        .duration0 = delay_us,
-        .level0 = 1,
-        .duration1 = delay_us,
-        .level1 = 0,
-    };
-
-    rmt_transmit_config_t tx_config = {
-        .loop_count = steps - 1,
-        .flags = {
-            .eot_level = 0,
-        }
-    };
-
-    ESP_LOGI(APP_TAG, "RMT %c: steps=%u delay=%u loop=%u", axis_upper, (unsigned)steps, (unsigned)delay_us, (unsigned)tx_config.loop_count);
-    esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, &pulse, sizeof(pulse), &tx_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
-        return err;
-    }
-
-    err = rmt_tx_wait_all_done(chan, -1);
-    if (err != ESP_OK) {
-        ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
-        return err;
     }
 
     return ESP_OK;
@@ -291,157 +235,362 @@ uint32_t hardware_compute_step_delay(uint32_t start_delay, uint32_t end_delay, u
     return end_delay;
 }
 
-esp_err_t hardware_step_pulse_rmt_with_accel(char axis, uint32_t steps, uint32_t start_delay_us, uint32_t end_delay_us, uint32_t ramp_steps)
+esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t start_freq_hz, uint32_t target_freq_hz, uint32_t ramp_steps)
 {
-    if (steps == 0) {
+    if (total_steps == 0) {
         return ESP_OK;
     }
 
-    rmt_channel_handle_t chan = NULL;
     char axis_upper = (char)toupper((unsigned char)axis);
+    size_t axis_idx;
     if (axis_upper == 'C' || axis_upper == 'X') {
-        chan = s_rmt_x_chan;
+        axis_idx = 0;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
-        chan = s_rmt_y_chan;
+        axis_idx = 1;
+    } else if (axis_upper == 'Z') {
+        axis_idx = 2;
     } else {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (chan == NULL || s_rmt_copy_encoder == NULL) {
-        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
+    rmt_channel_handle_t chan = s_rmt_chan[axis_idx];
+    if (chan == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (ramp_steps > steps / 2) {
-        ramp_steps = steps / 2;
+    if (start_freq_hz < 50U) {
+        start_freq_hz = 50U;
+    }
+    if (target_freq_hz < 50U) {
+        target_freq_hz = 50U;
+    }
+    if (target_freq_hz > 60000U) {
+        target_freq_hz = 60000U;
     }
 
-    const uint32_t chunk_size = 64;
-    rmt_symbol_word_t chunk[chunk_size];
+    uint32_t accel_steps = ramp_steps;
+    uint32_t decel_steps = ramp_steps;
+    if (accel_steps * 2U > total_steps) {
+        accel_steps = total_steps / 2U;
+        decel_steps = total_steps - accel_steps;
+    }
+    uint32_t cruise_steps = total_steps - accel_steps - decel_steps;
 
-    ESP_LOGI(APP_TAG, "RMT %c accel: steps=%u start_delay=%u end_delay=%u ramp=%u",
-             axis_upper, (unsigned)steps, (unsigned)start_delay_us, (unsigned)end_delay_us, (unsigned)ramp_steps);
-
-    for (uint32_t i = 0; i < steps; i += chunk_size) {
-        uint32_t remaining = steps - i;
-        uint32_t current_chunk = (remaining < chunk_size) ? remaining : chunk_size;
-
-        for (uint32_t j = 0; j < current_chunk; j++) {
-            uint32_t step_num = i + j;
-            uint32_t delay = hardware_compute_step_delay(start_delay_us, end_delay_us, step_num, steps, ramp_steps);
-            if (delay < 10U) {
-                delay = 10U;
-            }
-            if (delay > 32767U) {
-                delay = 32767U;
-            }
-
-            chunk[j].duration0 = delay;
-            chunk[j].level0 = 1;
-            chunk[j].duration1 = delay;
-            chunk[j].level1 = 0;
+    if (accel_steps > 0) {
+        if (target_freq_hz <= start_freq_hz) {
+            start_freq_hz = (target_freq_hz > 100U) ? (target_freq_hz / 2U) : 50U;
         }
-
-        rmt_transmit_config_t tx_config = {
-            .loop_count = 0,
-            .flags = {
-                .eot_level = 0,
-            }
-        };
-
-        esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, chunk, current_chunk * sizeof(rmt_symbol_word_t), &tx_config);
-        if (err != ESP_OK) {
-            ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
-            return err;
+        if ((target_freq_hz - start_freq_hz) < accel_steps) {
+            accel_steps = target_freq_hz - start_freq_hz;
+            decel_steps = accel_steps;
+            cruise_steps = total_steps - accel_steps - decel_steps;
         }
-
-        if (i + chunk_size < steps) {
-            // Not the last chunk - wait for completion before next transmit
-            err = rmt_tx_wait_all_done(chan, -1);
-            if (err != ESP_OK) {
-                ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
-                return err;
-            }
-        } else {
-            // Last chunk - still wait to ensure all steps complete
-            err = rmt_tx_wait_all_done(chan, -1);
-            if (err != ESP_OK) {
-                ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
-                return err;
-            }
-        }
-    }
-
-    return ESP_OK;
-}
-
-// Pre-computed delay profile version - eliminates per-step RMT overhead
-// by transmitting pre-calculated delays directly.
-esp_err_t hardware_step_pulse_rmt_profiled(char axis, uint32_t *delay_us, uint32_t steps)
-{
-    if (steps == 0 || delay_us == NULL) {
-        return ESP_OK;
-    }
-
-    rmt_channel_handle_t chan = NULL;
-    char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'C' || axis_upper == 'X') {
-        chan = s_rmt_x_chan;
-    } else if (axis_upper == 'A' || axis_upper == 'Y') {
-        chan = s_rmt_y_chan;
-    } else {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (chan == NULL || s_rmt_copy_encoder == NULL) {
-        ESP_LOGE(APP_TAG, "RMT %c: canal=%p encoder=%p", axis_upper, (void *)chan, (void *)s_rmt_copy_encoder);
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    rmt_symbol_word_t *symbols = heap_caps_malloc(steps * sizeof(rmt_symbol_word_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
-    if (symbols == NULL) {
-        ESP_LOGE(APP_TAG, "RMT %c: falha ao alocar buffer de %u simbolos", axis_upper, (unsigned)steps);
-        return ESP_ERR_NO_MEM;
-    }
-
-    for (uint32_t j = 0; j < steps; j++) {
-        uint32_t delay = delay_us[j];
-        if (delay < 10U) {
-            delay = 10U;
-        }
-        if (delay > 32767U) {
-            delay = 32767U;
-        }
-
-        symbols[j].duration0 = delay;
-        symbols[j].level0 = 1;
-        symbols[j].duration1 = delay;
-        symbols[j].level1 = 0;
     }
 
     rmt_transmit_config_t tx_config = {
         .loop_count = 0,
-        .flags = {
-            .eot_level = 0,
-        }
     };
 
-    esp_err_t err = rmt_transmit(chan, s_rmt_copy_encoder, symbols, steps * sizeof(rmt_symbol_word_t), &tx_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(APP_TAG, "RMT %c transmit falhou: %s", axis_upper, esp_err_to_name(err));
-        heap_caps_free(symbols);
+    if (accel_steps > 0 && target_freq_hz > start_freq_hz) {
+        stepper_motor_curve_encoder_config_t accel_cfg = {
+            .resolution = 1000000,
+            .sample_points = accel_steps,
+            .start_freq_hz = start_freq_hz,
+            .end_freq_hz = target_freq_hz,
+        };
+        rmt_encoder_handle_t accel_encoder = NULL;
+        ESP_RETURN_ON_ERROR(rmt_new_stepper_motor_curve_encoder(&accel_cfg, &accel_encoder), APP_TAG, "Falha ao criar encoder aceleracao");
+
+        stepper_motor_uniform_encoder_config_t uniform_cfg = {
+            .resolution = 1000000,
+        };
+        rmt_encoder_handle_t uniform_encoder = NULL;
+        esp_err_t u_err = rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &uniform_encoder);
+        if (u_err != ESP_OK) {
+            rmt_del_encoder(accel_encoder);
+            return u_err;
+        }
+
+        stepper_motor_curve_encoder_config_t decel_cfg = {
+            .resolution = 1000000,
+            .sample_points = decel_steps,
+            .start_freq_hz = target_freq_hz,
+            .end_freq_hz = start_freq_hz,
+        };
+        rmt_encoder_handle_t decel_encoder = NULL;
+        esp_err_t d_err = rmt_new_stepper_motor_curve_encoder(&decel_cfg, &decel_encoder);
+        if (d_err != ESP_OK) {
+            rmt_del_encoder(accel_encoder);
+            rmt_del_encoder(uniform_encoder);
+            return d_err;
+        }
+
+        // Transmit Acceleration phase
+        tx_config.loop_count = 0;
+        esp_err_t err = rmt_transmit(chan, accel_encoder, &accel_steps, sizeof(accel_steps), &tx_config);
+
+        // Transmit Uniform Cruise phase (loop_count represents number of repetitions)
+        if (err == ESP_OK && cruise_steps > 0) {
+            tx_config.loop_count = (cruise_steps > 0) ? (cruise_steps - 1) : 0;
+            err = rmt_transmit(chan, uniform_encoder, &target_freq_hz, sizeof(target_freq_hz), &tx_config);
+        }
+
+        // Transmit Deceleration phase
+        if (err == ESP_OK && decel_steps > 0) {
+            tx_config.loop_count = 0;
+            err = rmt_transmit(chan, decel_encoder, &decel_steps, sizeof(decel_steps), &tx_config);
+        }
+
+        // Wait for all hardware pulses to complete
+        if (err == ESP_OK) {
+            err = rmt_tx_wait_all_done(chan, -1);
+        }
+
+        rmt_del_encoder(accel_encoder);
+        rmt_del_encoder(uniform_encoder);
+        rmt_del_encoder(decel_encoder);
+        return err;
+    } else {
+        stepper_motor_uniform_encoder_config_t uniform_cfg = {
+            .resolution = 1000000,
+        };
+        rmt_encoder_handle_t uniform_encoder = NULL;
+        ESP_RETURN_ON_ERROR(rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &uniform_encoder), APP_TAG, "Falha ao criar encoder uniforme");
+
+        tx_config.loop_count = (total_steps > 0) ? (total_steps - 1) : 0;
+        esp_err_t err = rmt_transmit(chan, uniform_encoder, &target_freq_hz, sizeof(target_freq_hz), &tx_config);
+        if (err == ESP_OK) {
+            err = rmt_tx_wait_all_done(chan, -1);
+        }
+        rmt_del_encoder(uniform_encoder);
         return err;
     }
+}
 
-    err = rmt_tx_wait_all_done(chan, -1);
-    heap_caps_free(symbols);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(APP_TAG, "RMT %c wait falhou: %s", axis_upper, esp_err_to_name(err));
-        return err;
+esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_freq_c, uint32_t target_freq_c, uint32_t ramp_c,
+                                             uint32_t steps_a, uint32_t start_freq_a, uint32_t target_freq_a, uint32_t ramp_a,
+                                             uint32_t steps_z, uint32_t start_freq_z, uint32_t target_freq_z, uint32_t ramp_z)
+{
+    if (steps_c == 0 && steps_a == 0 && steps_z == 0) {
+        return ESP_OK;
     }
 
-    return ESP_OK;
+    rmt_channel_handle_t chan_c = s_rmt_chan[0];
+    rmt_channel_handle_t chan_a = s_rmt_chan[1];
+    rmt_channel_handle_t chan_z = s_rmt_chan[2];
+
+    if ((steps_c > 0 && chan_c == NULL) ||
+        (steps_a > 0 && chan_a == NULL) ||
+        (steps_z > 0 && chan_z == NULL)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    rmt_encoder_handle_t accel_enc_c = NULL, unif_enc_c = NULL, decel_enc_c = NULL;
+    rmt_encoder_handle_t accel_enc_a = NULL, unif_enc_a = NULL, decel_enc_a = NULL;
+    rmt_encoder_handle_t accel_enc_z = NULL, unif_enc_z = NULL, decel_enc_z = NULL;
+    stepper_motor_uniform_encoder_config_t uniform_cfg = { .resolution = 1000000 };
+
+    // Axis C params
+    uint32_t accel_c = ramp_c, decel_c = ramp_c, cruise_c = 0;
+    if (steps_c > 0) {
+        if (start_freq_c < 50U) start_freq_c = 50U;
+        if (target_freq_c < 50U) target_freq_c = 50U;
+        if (target_freq_c > 60000U) target_freq_c = 60000U;
+        if (accel_c * 2U > steps_c) {
+            accel_c = steps_c / 2U;
+            decel_c = steps_c - accel_c;
+        }
+        cruise_c = steps_c - accel_c - decel_c;
+        if (target_freq_c <= start_freq_c) {
+            start_freq_c = (target_freq_c > 100U) ? (target_freq_c / 2U) : 50U;
+        }
+        if ((target_freq_c - start_freq_c) < accel_c) {
+            accel_c = target_freq_c - start_freq_c;
+            decel_c = accel_c;
+            cruise_c = steps_c - accel_c - decel_c;
+        }
+    }
+
+    // Axis A params
+    uint32_t accel_a = ramp_a, decel_a = ramp_a, cruise_a = 0;
+    if (steps_a > 0) {
+        if (start_freq_a < 50U) start_freq_a = 50U;
+        if (target_freq_a < 50U) target_freq_a = 50U;
+        if (target_freq_a > 60000U) target_freq_a = 60000U;
+        if (accel_a * 2U > steps_a) {
+            accel_a = steps_a / 2U;
+            decel_a = steps_a - accel_a;
+        }
+        cruise_a = steps_a - accel_a - decel_a;
+        if (target_freq_a <= start_freq_a) {
+            start_freq_a = (target_freq_a > 100U) ? (target_freq_a / 2U) : 50U;
+        }
+        if ((target_freq_a - start_freq_a) < accel_a) {
+            accel_a = target_freq_a - start_freq_a;
+            decel_a = accel_a;
+            cruise_a = steps_a - accel_a - decel_a;
+        }
+    }
+
+    // Axis Z params
+    uint32_t accel_z = ramp_z, decel_z = ramp_z, cruise_z = 0;
+    if (steps_z > 0) {
+        if (start_freq_z < 50U) start_freq_z = 50U;
+        if (target_freq_z < 50U) target_freq_z = 50U;
+        if (target_freq_z > 60000U) target_freq_z = 60000U;
+        if (accel_z * 2U > steps_z) {
+            accel_z = steps_z / 2U;
+            decel_z = steps_z - accel_z;
+        }
+        cruise_z = steps_z - accel_z - decel_z;
+        if (target_freq_z <= start_freq_z) {
+            start_freq_z = (target_freq_z > 100U) ? (target_freq_z / 2U) : 50U;
+        }
+        if ((target_freq_z - start_freq_z) < accel_z) {
+            accel_z = target_freq_z - start_freq_z;
+            decel_z = accel_z;
+            cruise_z = steps_z - accel_z - decel_z;
+        }
+    }
+
+    // Build encoders for Axis C
+    if (steps_c > 0) {
+        if (accel_c > 0 && target_freq_c > start_freq_c) {
+            stepper_motor_curve_encoder_config_t ac_cfg = {
+                .resolution = 1000000, .sample_points = accel_c,
+                .start_freq_hz = start_freq_c, .end_freq_hz = target_freq_c
+            };
+            rmt_new_stepper_motor_curve_encoder(&ac_cfg, &accel_enc_c);
+            stepper_motor_curve_encoder_config_t dc_cfg = {
+                .resolution = 1000000, .sample_points = decel_c,
+                .start_freq_hz = target_freq_c, .end_freq_hz = start_freq_c
+            };
+            rmt_new_stepper_motor_curve_encoder(&dc_cfg, &decel_enc_c);
+        }
+        rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_c);
+    }
+
+    // Build encoders for Axis A
+    if (steps_a > 0) {
+        if (accel_a > 0 && target_freq_a > start_freq_a) {
+            stepper_motor_curve_encoder_config_t aa_cfg = {
+                .resolution = 1000000, .sample_points = accel_a,
+                .start_freq_hz = start_freq_a, .end_freq_hz = target_freq_a
+            };
+            rmt_new_stepper_motor_curve_encoder(&aa_cfg, &accel_enc_a);
+            stepper_motor_curve_encoder_config_t da_cfg = {
+                .resolution = 1000000, .sample_points = decel_a,
+                .start_freq_hz = target_freq_a, .end_freq_hz = start_freq_a
+            };
+            rmt_new_stepper_motor_curve_encoder(&da_cfg, &decel_enc_a);
+        }
+        rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_a);
+    }
+
+    // Build encoders for Axis Z
+    if (steps_z > 0) {
+        if (accel_z > 0 && target_freq_z > start_freq_z) {
+            stepper_motor_curve_encoder_config_t az_cfg = {
+                .resolution = 1000000, .sample_points = accel_z,
+                .start_freq_hz = start_freq_z, .end_freq_hz = target_freq_z
+            };
+            rmt_new_stepper_motor_curve_encoder(&az_cfg, &accel_enc_z);
+            stepper_motor_curve_encoder_config_t dz_cfg = {
+                .resolution = 1000000, .sample_points = decel_z,
+                .start_freq_hz = target_freq_z, .end_freq_hz = start_freq_z
+            };
+            rmt_new_stepper_motor_curve_encoder(&dz_cfg, &decel_enc_z);
+        }
+        rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_z);
+    }
+
+    // Transmit Axis C queue in parallel
+    rmt_transmit_config_t tx_c = { .loop_count = 0 };
+    if (steps_c > 0) {
+        if (accel_c > 0 && accel_enc_c) {
+            rmt_transmit(chan_c, accel_enc_c, &accel_c, sizeof(accel_c), &tx_c);
+        }
+        if (cruise_c > 0 && unif_enc_c) {
+            tx_c.loop_count = (cruise_c > 0) ? (cruise_c - 1) : 0;
+            rmt_transmit(chan_c, unif_enc_c, &target_freq_c, sizeof(target_freq_c), &tx_c);
+        }
+        if (decel_c > 0 && decel_enc_c) {
+            tx_c.loop_count = 0;
+            rmt_transmit(chan_c, decel_enc_c, &decel_c, sizeof(decel_c), &tx_c);
+        }
+        if (accel_c == 0 && unif_enc_c) {
+            tx_c.loop_count = (steps_c > 0) ? (steps_c - 1) : 0;
+            rmt_transmit(chan_c, unif_enc_c, &target_freq_c, sizeof(target_freq_c), &tx_c);
+        }
+    }
+
+    // Transmit Axis A queue in parallel
+    rmt_transmit_config_t tx_a = { .loop_count = 0 };
+    if (steps_a > 0) {
+        if (accel_a > 0 && accel_enc_a) {
+            rmt_transmit(chan_a, accel_enc_a, &accel_a, sizeof(accel_a), &tx_a);
+        }
+        if (cruise_a > 0 && unif_enc_a) {
+            tx_a.loop_count = (cruise_a > 0) ? (cruise_a - 1) : 0;
+            rmt_transmit(chan_a, unif_enc_a, &target_freq_a, sizeof(target_freq_a), &tx_a);
+        }
+        if (decel_a > 0 && decel_enc_a) {
+            tx_a.loop_count = 0;
+            rmt_transmit(chan_a, decel_enc_a, &decel_a, sizeof(decel_a), &tx_a);
+        }
+        if (accel_a == 0 && unif_enc_a) {
+            tx_a.loop_count = (steps_a > 0) ? (steps_a - 1) : 0;
+            rmt_transmit(chan_a, unif_enc_a, &target_freq_a, sizeof(target_freq_a), &tx_a);
+        }
+    }
+
+    // Transmit Axis Z queue in parallel
+    rmt_transmit_config_t tx_z = { .loop_count = 0 };
+    if (steps_z > 0) {
+        if (accel_z > 0 && accel_enc_z) {
+            rmt_transmit(chan_z, accel_enc_z, &accel_z, sizeof(accel_z), &tx_z);
+        }
+        if (cruise_z > 0 && unif_enc_z) {
+            tx_z.loop_count = (cruise_z > 0) ? (cruise_z - 1) : 0;
+            rmt_transmit(chan_z, unif_enc_z, &target_freq_z, sizeof(target_freq_z), &tx_z);
+        }
+        if (decel_z > 0 && decel_enc_z) {
+            tx_z.loop_count = 0;
+            rmt_transmit(chan_z, decel_enc_z, &decel_z, sizeof(decel_z), &tx_z);
+        }
+        if (accel_z == 0 && unif_enc_z) {
+            tx_z.loop_count = (steps_z > 0) ? (steps_z - 1) : 0;
+            rmt_transmit(chan_z, unif_enc_z, &target_freq_z, sizeof(target_freq_z), &tx_z);
+        }
+    }
+
+    // Wait for all active axes to complete
+    esp_err_t err_c = (steps_c > 0) ? rmt_tx_wait_all_done(chan_c, -1) : ESP_OK;
+    esp_err_t err_a = (steps_a > 0) ? rmt_tx_wait_all_done(chan_a, -1) : ESP_OK;
+    esp_err_t err_z = (steps_z > 0) ? rmt_tx_wait_all_done(chan_z, -1) : ESP_OK;
+
+    // Clean up all allocated encoders
+    if (accel_enc_c) rmt_del_encoder(accel_enc_c);
+    if (unif_enc_c)  rmt_del_encoder(unif_enc_c);
+    if (decel_enc_c) rmt_del_encoder(decel_enc_c);
+    if (accel_enc_a) rmt_del_encoder(accel_enc_a);
+    if (unif_enc_a)  rmt_del_encoder(unif_enc_a);
+    if (decel_enc_a) rmt_del_encoder(decel_enc_a);
+    if (accel_enc_z) rmt_del_encoder(accel_enc_z);
+    if (unif_enc_z)  rmt_del_encoder(unif_enc_z);
+    if (decel_enc_z) rmt_del_encoder(decel_enc_z);
+
+    if (err_c != ESP_OK) return err_c;
+    if (err_a != ESP_OK) return err_a;
+    return err_z;
+}
+
+esp_err_t hardware_step_pulse_rmt_move_dual(uint32_t steps_c, uint32_t start_freq_c, uint32_t target_freq_c, uint32_t ramp_c,
+                                            uint32_t steps_a, uint32_t start_freq_a, uint32_t target_freq_a, uint32_t ramp_a)
+{
+    return hardware_step_pulse_rmt_move_sync3(steps_c, start_freq_c, target_freq_c, ramp_c,
+                                              steps_a, start_freq_a, target_freq_a, ramp_a,
+                                              0, 0, 0, 0);
 }
 
 void hardware_set_driver_enable(app_context_t *ctx, bool enable)
@@ -569,9 +718,9 @@ esp_err_t hardware_read_temperature_c(float *temp_c)
 static esp_err_t init_gpio_matrix(void)
 {
     const uint64_t outputs =
-        (1ULL << DIR_X) |
-        (1ULL << DIR_Y) |
-        (1ULL << DIR_Z) | (1ULL << STEP_Z) |
+        (1ULL << STEP_X) | (1ULL << DIR_X) |
+        (1ULL << STEP_Y) | (1ULL << DIR_Y) |
+        (1ULL << STEP_Z) | (1ULL << DIR_Z) |
         (1ULL << EN_PIN) | (1ULL << FAN_PIN);
 
     gpio_config_t output_conf = {
@@ -601,23 +750,15 @@ static esp_err_t init_gpio_matrix(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&temp_conf), APP_TAG, "Falha ao configurar DS18B20");
 
+    gpio_set_level(STEP_X, 0);
+    gpio_set_level(STEP_Y, 0);
     gpio_set_level(STEP_Z, 0);
     gpio_set_level(DIR_X, 0);
     gpio_set_level(DIR_Y, 0);
     gpio_set_level(DIR_Z, Z_DIR_UP);
     gpio_set_level(TEMP_PIN, 1);
     gpio_set_level(FAN_PIN, 0);
-    gpio_set_level(EN_PIN, 1);
-
-    gpio_config_t pdn_conf = {
-        .pin_bit_mask = (1ULL << TMC_UART_TX_PIN),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&pdn_conf), APP_TAG, "Falha ao configurar PDN/TMC pin");
-    gpio_set_level(TMC_UART_TX_PIN, 0);
+    gpio_set_level(EN_PIN, 0); // 0 = DRIVERS ENERGIZADOS (Active Low)
 
     return ESP_OK;
 }
@@ -742,18 +883,11 @@ void hardware_deinit(void)
         }
     }
 
-    if (s_rmt_copy_encoder != NULL) {
-        rmt_del_encoder(s_rmt_copy_encoder);
-        s_rmt_copy_encoder = NULL;
-    }
-    if (s_rmt_y_chan != NULL) {
-        rmt_disable(s_rmt_y_chan);
-        rmt_del_channel(s_rmt_y_chan);
-        s_rmt_y_chan = NULL;
-    }
-    if (s_rmt_x_chan != NULL) {
-        rmt_disable(s_rmt_x_chan);
-        rmt_del_channel(s_rmt_x_chan);
-        s_rmt_x_chan = NULL;
+    for (size_t i = 0; i < AXIS_COUNT; i++) {
+        if (s_rmt_chan[i] != NULL) {
+            rmt_disable(s_rmt_chan[i]);
+            rmt_del_channel(s_rmt_chan[i]);
+            s_rmt_chan[i] = NULL;
+        }
     }
 }

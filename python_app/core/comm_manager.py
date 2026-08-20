@@ -110,6 +110,11 @@ class CommManager(QObject):
             return self.active_client.move_axis(axis, steps, speed, accel, force_no_encoder)
         return False
 
+    def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
+        if self.active_client:
+            return self.active_client.move_sync(steps_c, steps_a, steps_z, speed, accel)
+        return False
+
     def set_laser(self, laser_index: int, level: int) -> bool:
         if self.active_client:
             return self.active_client.set_laser(laser_index, level)

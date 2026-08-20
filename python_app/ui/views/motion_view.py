@@ -164,6 +164,44 @@ class MotionView(QWidget):
         
         move_vbox.addLayout(calib_grid)
         
+        move_vbox.addSpacing(6)
+        
+        # Synchronized Move C+A+Z
+        sync_title = QLabel("Movimento Sincronizado Simultâneo (C + A + Z por Hardware RMT):")
+        sync_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        move_vbox.addWidget(sync_title)
+        
+        sync_grid = QGridLayout()
+        sync_grid.setSpacing(8)
+        
+        sync_grid.addWidget(QLabel("Passos C:"), 0, 0)
+        self.spin_sync_c = QSpinBox()
+        self.spin_sync_c.setRange(-100000, 100000)
+        self.spin_sync_c.setValue(1600)
+        self.spin_sync_c.setSingleStep(100)
+        sync_grid.addWidget(self.spin_sync_c, 0, 1)
+        
+        sync_grid.addWidget(QLabel("Passos A:"), 0, 2)
+        self.spin_sync_a = QSpinBox()
+        self.spin_sync_a.setRange(-100000, 100000)
+        self.spin_sync_a.setValue(3200)
+        self.spin_sync_a.setSingleStep(100)
+        sync_grid.addWidget(self.spin_sync_a, 0, 3)
+
+        sync_grid.addWidget(QLabel("Passos Z:"), 1, 0)
+        self.spin_sync_z = QSpinBox()
+        self.spin_sync_z.setRange(-100000, 100000)
+        self.spin_sync_z.setValue(0)
+        self.spin_sync_z.setSingleStep(100)
+        sync_grid.addWidget(self.spin_sync_z, 1, 1)
+        
+        self.btn_sync_move = QPushButton("⚡ Mover C, A e Z Simultaneamente (MOVE_SYNC)")
+        self.btn_sync_move.setProperty("class", "btn-warning")
+        self.btn_sync_move.clicked.connect(self._execute_sync_move)
+        sync_grid.addWidget(self.btn_sync_move, 2, 0, 1, 4)
+        
+        move_vbox.addLayout(sync_grid)
+        
         grid_layout.addWidget(move_card, 1)
         main_layout.addLayout(grid_layout)
         
@@ -218,6 +256,14 @@ class MotionView(QWidget):
         force = self.chk_force.isChecked()
         
         self.comm.move_axis(axis, steps, speed=speed, accel=accel, force_no_encoder=force)
+
+    def _execute_sync_move(self):
+        steps_c = self.spin_sync_c.value()
+        steps_a = self.spin_sync_a.value()
+        steps_z = self.spin_sync_z.value()
+        speed = self.spin_speed.value() if self.spin_speed.value() > 0 else None
+        accel = self.spin_accel.value() if self.spin_accel.value() > 0 else None
+        self.comm.move_sync(steps_c, steps_a, steps_z, speed=speed, accel=accel)
 
     def _toggle_drivers(self):
         new_state = not self.state.telemetry.drivers_enabled

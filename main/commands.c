@@ -60,6 +60,7 @@ void commands_print_help(void)
     puts("SPEED_MAX C|A|Z <value> | ACCEL_MAX C|A|Z <value>");
     puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("MOVE_F C|A|Z <steps> [S<speed>] [F<accel>]");
+    puts("MOVE_SYNC C <steps_c> A <steps_a> Z <steps_z> [S<speed>] [F<accel>]");
     puts("LASER 1|2 ON|OFF|0..100%|0..255");
     puts("FAN 0|1|AUTO");
     puts("TEMP");
@@ -164,13 +165,14 @@ void commands_print_config(const app_context_t *ctx)
            (unsigned)ctx->settings.driver_bus_mode);
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
         char ax = (i == 0) ? 'C' : ((i == 1) ? 'A' : 'Z');
-        printf("CONFIG TMC %c addr=%u ihold=%u irun=%u delay=%u usteps=%u spread=0\n",
+        printf("CONFIG TMC %c addr=%u ihold=%u irun=%u delay=%u usteps=%u spread=%u\n",
                ax,
                (unsigned)ctx->settings.tmc_slave_addr[i],
                (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_ihold[i]),
                (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_irun[i]),
                (unsigned)ctx->settings.tmc_ihold_delay[i],
-               (unsigned)ctx->settings.tmc_microsteps[i]);
+               (unsigned)ctx->settings.tmc_microsteps[i],
+               (unsigned)ctx->settings.tmc_spreadcycle[i]);
     }
     printf("CONFIG CAN node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
            (unsigned)ctx->settings.node_id,
@@ -959,6 +961,75 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             printf("MOVE_F %c enfileirado (sem encoder).\n", axis);
         } else {
             printf("ERRO no MOVE_F %c: %s\n", axis, esp_err_to_name(err));
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "MOVE_SYNC", 9) == 0) {
+        long steps_c_sync = 0;
+        long steps_a_sync = 0;
+        long steps_z_sync = 0;
+        float sync_speed_val = -1.0f;
+        float sync_accel_val = -1.0f;
+
+        const char *p = cmd + 9;
+        int positional_idx = 0;
+        while (*p) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (*p == '\0') break;
+
+            if (*p == 'C' || *p == 'c' || *p == 'X' || *p == 'x') {
+                p++;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                steps_c_sync = strtol(p, &endp, 10);
+                p = endp;
+            } else if (*p == 'A' || *p == 'a' || *p == 'Y' || *p == 'y') {
+                p++;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                steps_a_sync = strtol(p, &endp, 10);
+                p = endp;
+            } else if (*p == 'Z' || *p == 'z') {
+                p++;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                steps_z_sync = strtol(p, &endp, 10);
+                p = endp;
+            } else if (*p == 'S' || *p == 's') {
+                p++;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                sync_speed_val = strtof(p, &endp);
+                p = endp;
+            } else if (*p == 'F' || *p == 'f') {
+                p++;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                sync_accel_val = strtof(p, &endp);
+                p = endp;
+            } else if (isdigit((unsigned char)*p) || *p == '-') {
+                char *endp = NULL;
+                long val = strtol(p, &endp, 10);
+                p = endp;
+                if (positional_idx == 0) {
+                    steps_c_sync = val;
+                } else if (positional_idx == 1) {
+                    steps_a_sync = val;
+                } else if (positional_idx == 2) {
+                    steps_z_sync = val;
+                }
+                positional_idx++;
+            } else {
+                p++;
+            }
+        }
+
+        esp_err_t err = motion_post_move_sync(ctx, (int32_t)steps_c_sync, (int32_t)steps_a_sync, (int32_t)steps_z_sync, sync_speed_val, sync_accel_val, 0, 0);
+        if (err == ESP_OK) {
+            printf("MOVE_SYNC C=%ld A=%ld Z=%ld enfileirado.\n", steps_c_sync, steps_a_sync, steps_z_sync);
+        } else {
+            printf("ERRO no MOVE_SYNC: %s\n", esp_err_to_name(err));
         }
         return;
     }

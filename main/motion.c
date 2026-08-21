@@ -494,21 +494,24 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     gpio_num_t dir_pin;
     bool invert;
     float reduction;
+    float home_deg = 0.0f;
 
     if (axis_upper == 'C' || axis_upper == 'X') {
         dir_pin = DIR_C;
         invert = ctx->state.inverter[AXIS_C_ID];
         reduction = REDUCAO_C;
+        home_deg = ctx->settings.home_c_deg;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
         dir_pin = DIR_A;
         invert = ctx->state.inverter[AXIS_A_ID];
         reduction = REDUCAO_A;
+        home_deg = ctx->settings.home_a_deg;
     } else {
         return ESP_ERR_INVALID_ARG;
     }
 
-    float current_deviation_deg = 0.0f;
-    esp_err_t enc_err = compute_axis_deviation(ctx, axis_upper, &current_deviation_deg);
+    float actual_deg = 0.0f;
+    esp_err_t enc_err = hardware_read_axis_encoder(axis_upper, &actual_deg);
     if (enc_err != ESP_OK) {
         ESP_LOGW(APP_TAG, "MOVE %c: Encoder indisponivel (%s). Movendo em malha aberta.",
                  axis_upper, esp_err_to_name(enc_err));
@@ -517,34 +520,39 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
 
     bool moving_positive = (requested_steps > 0);
     float deg_per_step = get_deg_per_step(ctx, axis_upper);
-    float limit_deg = LIMITE_GRAUS_CA * reduction;
+    float span_deg = LIMITE_GRAUS_CA * reduction; // 90.0 deg
+    float min_limit_deg = home_deg - span_deg;
+    float max_limit_deg = home_deg + span_deg;
+    if (min_limit_deg < 0.0f) min_limit_deg = 0.0f;
+    if (max_limit_deg > 360.0f) max_limit_deg = 360.0f;
+
     float permitted_move_deg = 0.0f;
 
-    // Check directional soft limits based on current position from encoder
+    // Check directional limits based on direct absolute encoder degree
     if (moving_positive) {
-        if (current_deviation_deg >= limit_deg) {
-            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo ja atingiu o limite positivo (%.2f >= %.2f deg)",
-                     axis_upper, current_deviation_deg, limit_deg);
+        if (actual_deg >= max_limit_deg) {
+            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo atingiu o limite maximo (%.2f >= %.2f deg | Home=%.2f)",
+                     axis_upper, actual_deg, max_limit_deg, home_deg);
             return ESP_OK;
         }
         float requested_move_deg = fabsf((float)requested_steps) * deg_per_step;
-        float target_deg = current_deviation_deg + requested_move_deg;
-        if (target_deg > limit_deg) {
-            target_deg = limit_deg;
+        float target_deg = actual_deg + requested_move_deg;
+        if (target_deg > max_limit_deg) {
+            target_deg = max_limit_deg;
         }
-        permitted_move_deg = target_deg - current_deviation_deg;
+        permitted_move_deg = target_deg - actual_deg;
     } else {
-        if (current_deviation_deg <= -limit_deg) {
-            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo ja atingiu o limite negativo (%.2f <= -%.2f deg)",
-                     axis_upper, current_deviation_deg, limit_deg);
+        if (actual_deg <= min_limit_deg) {
+            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo atingiu o limite minimo (%.2f <= %.2f deg | Home=%.2f)",
+                     axis_upper, actual_deg, min_limit_deg, home_deg);
             return ESP_OK;
         }
         float requested_move_deg = fabsf((float)requested_steps) * deg_per_step;
-        float target_deg = current_deviation_deg - requested_move_deg;
-        if (target_deg < -limit_deg) {
-            target_deg = -limit_deg;
+        float target_deg = actual_deg - requested_move_deg;
+        if (target_deg < min_limit_deg) {
+            target_deg = min_limit_deg;
         }
-        permitted_move_deg = current_deviation_deg - target_deg;
+        permitted_move_deg = actual_deg - target_deg;
     }
 
     if (permitted_move_deg < deg_per_step) {
@@ -566,10 +574,10 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
     gpio_set_level(dir_pin, dir_level ? 1 : 0);
     esp_rom_delay_us(5);
-    ESP_LOGI(APP_TAG, "MOVE %c steps=%d (exec=%ld) dir_pin=%d invert=%d permitted_deg=%.2f pos_deg=%.2f",
+    ESP_LOGI(APP_TAG, "MOVE %c steps=%d (exec=%ld) dir_pin=%d invert=%d permitted_deg=%.2f pos_deg=%.2f limits=[%.2f, %.2f]",
              axis_upper, (int)requested_steps, (long)steps_to_execute,
              (int)(dir_level ? 1 : 0),
-             (int)invert, permitted_move_deg, current_deviation_deg);
+             (int)invert, permitted_move_deg, actual_deg, min_limit_deg, max_limit_deg);
     size_t axis_idx = axis_to_index(axis_upper);
     float step_size = get_step_size(ctx, axis_upper);
     float accel_val = ctx->settings.accel[axis_idx];

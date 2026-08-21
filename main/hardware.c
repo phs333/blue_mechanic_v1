@@ -62,19 +62,24 @@ static inline void one_wire_release(void)
     gpio_set_level(TEMP_PIN, 1);
 }
 
+static portMUX_TYPE s_onewire_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static bool one_wire_reset(void)
 {
+    portENTER_CRITICAL(&s_onewire_mux);
     one_wire_drive_low();
     esp_rom_delay_us(480);
     one_wire_release();
     esp_rom_delay_us(70);
     bool present = (gpio_get_level(TEMP_PIN) == 0);
     esp_rom_delay_us(410);
+    portEXIT_CRITICAL(&s_onewire_mux);
     return present;
 }
 
 static void one_wire_write_bit(int bit_value)
 {
+    portENTER_CRITICAL(&s_onewire_mux);
     one_wire_drive_low();
     if (bit_value) {
         esp_rom_delay_us(6);
@@ -85,16 +90,19 @@ static void one_wire_write_bit(int bit_value)
         one_wire_release();
         esp_rom_delay_us(10);
     }
+    portEXIT_CRITICAL(&s_onewire_mux);
 }
 
 static int one_wire_read_bit(void)
 {
+    portENTER_CRITICAL(&s_onewire_mux);
     one_wire_drive_low();
     esp_rom_delay_us(6);
     one_wire_release();
     esp_rom_delay_us(9);
     int bit_value = gpio_get_level(TEMP_PIN);
     esp_rom_delay_us(55);
+    portEXIT_CRITICAL(&s_onewire_mux);
     return bit_value;
 }
 

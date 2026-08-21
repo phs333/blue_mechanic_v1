@@ -793,48 +793,62 @@ esp_err_t hardware_read_temperature_c(float *temp_c)
 {
     ESP_RETURN_ON_FALSE(temp_c != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "temp_c nulo");
 
-    if (!one_wire_reset()) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    one_wire_write_byte(0xCC);
-    one_wire_write_byte(0x44);
-
-    int waited_ms = 0;
-    while (waited_ms < DS18B20_CONVERSION_TIMEOUT_MS) {
-        if (one_wire_read_bit()) {
-            break;
+    for (int retry = 0; retry < 2; ++retry) {
+        if (!one_wire_reset()) {
+            if (retry == 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            return ESP_ERR_NOT_FOUND;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
-        waited_ms += 10;
+
+        one_wire_write_byte(0xCC);
+        one_wire_write_byte(0x44);
+        one_wire_release();
+
+        // 12-bit DS18B20 conversion takes up to 750 ms.
+        // Wait 750 ms without bus polling to avoid draining power/disturbing conversion.
+        vTaskDelay(pdMS_TO_TICKS(750));
+
+        if (!one_wire_reset()) {
+            if (retry == 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            return ESP_ERR_NOT_FOUND;
+        }
+
+        one_wire_write_byte(0xCC);
+        one_wire_write_byte(0xBE);
+
+        uint8_t scratchpad[9] = {0};
+        for (size_t i = 0; i < sizeof(scratchpad); ++i) {
+            scratchpad[i] = one_wire_read_byte();
+        }
+
+        if (ds18b20_crc8(scratchpad, sizeof(scratchpad) - 1U) != scratchpad[8]) {
+            if (retry == 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            return ESP_ERR_INVALID_CRC;
+        }
+
+        int16_t raw = (int16_t)(((uint16_t)scratchpad[1] << 8) | scratchpad[0]);
+        float val = (float)raw / 16.0f;
+        if (val < -55.0f || val > 125.0f) {
+            if (retry == 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+            return ESP_ERR_INVALID_CRC;
+        }
+
+        *temp_c = val;
+        return ESP_OK;
     }
 
-    if (waited_ms >= DS18B20_CONVERSION_TIMEOUT_MS) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    if (!one_wire_reset()) {
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    one_wire_write_byte(0xCC);
-    one_wire_write_byte(0xBE);
-
-    uint8_t scratchpad[9];
-    for (size_t i = 0; i < sizeof(scratchpad); ++i) {
-        scratchpad[i] = one_wire_read_byte();
-    }
-
-    if (ds18b20_crc8(scratchpad, sizeof(scratchpad) - 1U) != scratchpad[8]) {
-        return ESP_ERR_INVALID_CRC;
-    }
-
-    int16_t raw = (int16_t)(((uint16_t)scratchpad[1] << 8) | scratchpad[0]);
-    *temp_c = (float)raw / 16.0f;
-    if (*temp_c < -55.0f || *temp_c > 125.0f) {
-        return ESP_ERR_INVALID_CRC;
-    }
-    return ESP_OK;
+    return ESP_FAIL;
 }
 
 static esp_err_t init_gpio_matrix(void)

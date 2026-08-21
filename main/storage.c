@@ -56,6 +56,14 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         settings->limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG;
     }
 
+    if (settings->home_c_deg < settings->limit_min_c_deg || settings->home_c_deg > settings->limit_max_c_deg) {
+        settings->home_c_deg = (settings->limit_min_c_deg + settings->limit_max_c_deg) / 2.0f;
+    }
+
+    if (settings->home_a_deg < settings->limit_min_a_deg || settings->home_a_deg > settings->limit_max_a_deg) {
+        settings->home_a_deg = (settings->limit_min_a_deg + settings->limit_max_a_deg) / 2.0f;
+    }
+
     return ESP_OK;
 }
 

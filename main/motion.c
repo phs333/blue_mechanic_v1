@@ -14,7 +14,6 @@
 static float get_deg_per_step(app_context_t *ctx, char axis);
 static float get_step_size(app_context_t *ctx, char axis);
 static size_t axis_to_index(char axis);
-static float normalize_angle_deg(float angle);
 static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps,
                                               float speed_override, float accel_override);
 static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps,
@@ -238,18 +237,32 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
     char axis_upper = (char)toupper((unsigned char)axis);
     gpio_num_t dir_pin;
     bool invert;
-    float target_deg;
+    float target_deg = 0.0f;
+    float min_limit_deg = 0.0f;
+    float max_limit_deg = 360.0f;
 
     if (axis_upper == 'C' || axis_upper == 'X') {
         dir_pin = DIR_C;
         invert = ctx->state.inverter[AXIS_C_ID];
         target_deg = ctx->settings.home_c_deg;
+        min_limit_deg = ctx->settings.limit_min_c_deg;
+        max_limit_deg = ctx->settings.limit_max_c_deg;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
         dir_pin = DIR_A;
         invert = ctx->state.inverter[AXIS_A_ID];
         target_deg = ctx->settings.home_a_deg;
+        min_limit_deg = ctx->settings.limit_min_a_deg;
+        max_limit_deg = ctx->settings.limit_max_a_deg;
     } else {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    // Ensure target_deg is strictly clamped within configured NVS limits
+    if (target_deg < min_limit_deg) {
+        target_deg = min_limit_deg;
+    }
+    if (target_deg > max_limit_deg) {
+        target_deg = max_limit_deg;
     }
 
     if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
@@ -259,7 +272,7 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
     gpio_num_t step_pin = (axis_upper == 'C' || axis_upper == 'X') ? STEP_C : STEP_A;
     hardware_rmt_release_pin(step_pin);
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < 5; ++attempt) {
         float actual_deg = 0.0f;
         esp_err_t err = hardware_read_axis_encoder(axis_upper, &actual_deg);
         if (err != ESP_OK) {
@@ -268,7 +281,8 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
             return err;
         }
 
-        float error_deg = normalize_angle_deg(target_deg - actual_deg);
+        // Direct difference without wrapping into unpermitted ranges
+        float error_deg = target_deg - actual_deg;
         if (fabsf(error_deg) <= 0.3f) {
             break;
         }
@@ -279,7 +293,20 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
             break;
         }
 
-        gpio_set_level(dir_pin, ((error_deg > 0.0f) ^ invert) ? 1 : 0);
+        // Directional bounds check
+        bool moving_positive = (error_deg > 0.0f);
+        if (moving_positive && actual_deg >= max_limit_deg) {
+            break;
+        }
+        if (!moving_positive && actual_deg <= min_limit_deg) {
+            break;
+        }
+
+        bool dir_level = moving_positive;
+        if (invert) {
+            dir_level = !dir_level;
+        }
+        gpio_set_level(dir_pin, dir_level ? 1 : 0);
         esp_rom_delay_us(5);
         for (int32_t s = 0; s < steps_to_move; s++) {
             hardware_step_pulse(step_pin, 800);
@@ -492,16 +519,7 @@ static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requ
     return ESP_ERR_INVALID_ARG;
 }
 
-static float normalize_angle_deg(float angle)
-{
-    while (angle > 180.0f) {
-        angle -= 360.0f;
-    }
-    while (angle < -180.0f) {
-        angle += 360.0f;
-    }
-    return angle;
-}
+
 
 int32_t motion_plan_limited_steps_direct(float actual_deg, float min_limit_deg, float max_limit_deg,
                                          float deg_per_step, int32_t requested_steps)

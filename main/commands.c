@@ -282,6 +282,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             ctx->settings.home_a_deg = current_deg;
         }
 
+        float min_lim = (axis == 'C') ? ctx->settings.limit_min_c_deg : ctx->settings.limit_min_a_deg;
+        float max_lim = (axis == 'C') ? ctx->settings.limit_max_c_deg : ctx->settings.limit_max_a_deg;
+        if (current_deg < min_lim || current_deg > max_lim) {
+            printf("AVISO: Posicao Home %.2f deg esta fora dos limites [%.2f, %.2f] deg de %c!\n",
+                   current_deg, min_lim, max_lim, axis);
+        }
+
         err = storage_save_settings(&ctx->settings);
         if (err == ESP_OK) {
             printf("Home %c gravado em %.2f deg.\n", axis, current_deg);

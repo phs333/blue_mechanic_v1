@@ -50,7 +50,7 @@ static esp_err_t init_gpio_matrix(void);
 static esp_err_t init_i2c_buses(void);
 static esp_err_t init_led_pwm(app_context_t *ctx);
 static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg);
-static uint32_t laser_level_to_duty(uint8_t level);
+static uint32_t laser_level_to_duty(uint16_t level);
 
 static inline void one_wire_drive_low(void)
 {
@@ -136,6 +136,64 @@ esp_err_t hardware_init(app_context_t *ctx)
     return ESP_OK;
 }
 
+
+/**
+ * Temporarily release a STEP pin from RMT control so legacy bit-bang
+ * code (homing, Z per-step loop) can use gpio_set_level().
+ * Must be paired with hardware_rmt_reacquire_pin() when done.
+ */
+void hardware_rmt_release_pin(gpio_num_t step_pin)
+{
+    size_t idx = 0;
+    if (step_pin == STEP_C) idx = 0;
+    else if (step_pin == STEP_A) idx = 1;
+    else if (step_pin == STEP_Z) idx = 2;
+    else return;
+
+    if (s_rmt_chan[idx] != NULL) {
+        rmt_disable(s_rmt_chan[idx]);
+        rmt_del_channel(s_rmt_chan[idx]);
+        s_rmt_chan[idx] = NULL;
+    }
+
+    // Reclaim the GPIO for direct control
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << step_pin),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+    gpio_set_level(step_pin, 0);
+}
+
+/**
+ * Re-create the RMT TX channel for a STEP pin after bit-bang is done.
+ */
+void hardware_rmt_reacquire_pin(gpio_num_t step_pin)
+{
+    size_t idx = 0;
+    if (step_pin == STEP_C) idx = 0;
+    else if (step_pin == STEP_A) idx = 1;
+    else if (step_pin == STEP_Z) idx = 2;
+    else return;
+
+    if (s_rmt_chan[idx] != NULL) {
+        return; // already acquired
+    }
+
+    rmt_tx_channel_config_t tx_chan_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = step_pin,
+        .mem_block_symbols = 48,
+        .resolution_hz = 1000000,
+        .trans_queue_depth = 10,
+    };
+    if (rmt_new_tx_channel(&tx_chan_config, &s_rmt_chan[idx]) == ESP_OK) {
+        rmt_enable(s_rmt_chan[idx]);
+    }
+}
 
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us)
 {
@@ -258,40 +316,50 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (start_freq_hz < 50U) {
-        start_freq_hz = 50U;
+    if (target_freq_hz < 100U) target_freq_hz = 100U;
+    if (target_freq_hz > 60000U) target_freq_hz = 60000U;
+
+    // Adaptive start frequency: healthy pull-in rate (300~800Hz) to avoid sluggish start
+    if (start_freq_hz < 300U) {
+        start_freq_hz = (target_freq_hz > 600U) ? (target_freq_hz / 3U) : 300U;
     }
-    if (target_freq_hz < 50U) {
-        target_freq_hz = 50U;
-    }
-    if (target_freq_hz > 60000U) {
-        target_freq_hz = 60000U;
+    if (start_freq_hz >= target_freq_hz) {
+        start_freq_hz = (target_freq_hz > 150U) ? (target_freq_hz / 2U) : (target_freq_hz - 10U);
     }
 
     uint32_t accel_steps = ramp_steps;
     uint32_t decel_steps = ramp_steps;
-    if (accel_steps * 2U > total_steps) {
-        accel_steps = total_steps / 2U;
-        decel_steps = total_steps - accel_steps;
-    }
-    uint32_t cruise_steps = total_steps - accel_steps - decel_steps;
 
-    if (accel_steps > 0) {
-        if (target_freq_hz <= start_freq_hz) {
-            start_freq_hz = (target_freq_hz > 100U) ? (target_freq_hz / 2U) : 50U;
+    // For short moves (like JOGs <= 24 steps), run directly with uniform speed
+    bool use_ramp = (total_steps > 24U) && (accel_steps >= 2U) && (target_freq_hz > (start_freq_hz + 30U));
+
+    if (use_ramp) {
+        if (accel_steps * 2U > total_steps) {
+            accel_steps = total_steps / 4U;
+            if (accel_steps < 2U) accel_steps = 2U;
+            decel_steps = accel_steps;
+        }
+        if (accel_steps * 2U > total_steps) {
+            accel_steps = total_steps / 2U;
+            decel_steps = total_steps - accel_steps;
         }
         if ((target_freq_hz - start_freq_hz) < accel_steps) {
             accel_steps = target_freq_hz - start_freq_hz;
-            decel_steps = accel_steps;
-            cruise_steps = total_steps - accel_steps - decel_steps;
+            if (accel_steps < 2U) {
+                use_ramp = false;
+            } else {
+                decel_steps = accel_steps;
+            }
         }
     }
+
+    uint32_t cruise_steps = use_ramp ? (total_steps - accel_steps - decel_steps) : total_steps;
 
     rmt_transmit_config_t tx_config = {
         .loop_count = 0,
     };
 
-    if (accel_steps > 0 && target_freq_hz > start_freq_hz) {
+    if (use_ramp) {
         stepper_motor_curve_encoder_config_t accel_cfg = {
             .resolution = 1000000,
             .sample_points = accel_steps,
@@ -329,7 +397,7 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         tx_config.loop_count = 0;
         esp_err_t err = rmt_transmit(chan, accel_encoder, &accel_steps, sizeof(accel_steps), &tx_config);
 
-        // Transmit Uniform Cruise phase (loop_count represents number of repetitions)
+        // Transmit Uniform Cruise phase
         if (err == ESP_OK && cruise_steps > 0) {
             tx_config.loop_count = (cruise_steps > 0) ? (cruise_steps - 1) : 0;
             err = rmt_transmit(chan, uniform_encoder, &target_freq_hz, sizeof(target_freq_hz), &tx_config);
@@ -391,71 +459,95 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     stepper_motor_uniform_encoder_config_t uniform_cfg = { .resolution = 1000000 };
 
     // Axis C params
-    uint32_t accel_c = ramp_c, decel_c = ramp_c, cruise_c = 0;
+    uint32_t accel_c = ramp_c, decel_c = ramp_c, cruise_c = steps_c;
+    bool use_ramp_c = false;
     if (steps_c > 0) {
-        if (start_freq_c < 50U) start_freq_c = 50U;
-        if (target_freq_c < 50U) target_freq_c = 50U;
+        if (target_freq_c < 100U) target_freq_c = 100U;
         if (target_freq_c > 60000U) target_freq_c = 60000U;
-        if (accel_c * 2U > steps_c) {
-            accel_c = steps_c / 2U;
-            decel_c = steps_c - accel_c;
+        if (start_freq_c < 300U) start_freq_c = (target_freq_c > 600U) ? (target_freq_c / 3U) : 300U;
+        if (start_freq_c >= target_freq_c) start_freq_c = target_freq_c / 2U;
+
+        use_ramp_c = (steps_c > 24U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 30U));
+        if (use_ramp_c) {
+            if (accel_c * 2U > steps_c) {
+                accel_c = steps_c / 4U;
+                if (accel_c < 2U) accel_c = 2U;
+                decel_c = accel_c;
+            }
+            if (accel_c * 2U > steps_c) {
+                accel_c = steps_c / 2U;
+                decel_c = steps_c - accel_c;
+            }
+            if ((target_freq_c - start_freq_c) < accel_c) {
+                accel_c = target_freq_c - start_freq_c;
+                if (accel_c < 2U) use_ramp_c = false;
+                else decel_c = accel_c;
+            }
         }
-        cruise_c = steps_c - accel_c - decel_c;
-        if (target_freq_c <= start_freq_c) {
-            start_freq_c = (target_freq_c > 100U) ? (target_freq_c / 2U) : 50U;
-        }
-        if ((target_freq_c - start_freq_c) < accel_c) {
-            accel_c = target_freq_c - start_freq_c;
-            decel_c = accel_c;
-            cruise_c = steps_c - accel_c - decel_c;
-        }
+        cruise_c = use_ramp_c ? (steps_c - accel_c - decel_c) : steps_c;
     }
 
     // Axis A params
-    uint32_t accel_a = ramp_a, decel_a = ramp_a, cruise_a = 0;
+    uint32_t accel_a = ramp_a, decel_a = ramp_a, cruise_a = steps_a;
+    bool use_ramp_a = false;
     if (steps_a > 0) {
-        if (start_freq_a < 50U) start_freq_a = 50U;
-        if (target_freq_a < 50U) target_freq_a = 50U;
+        if (target_freq_a < 100U) target_freq_a = 100U;
         if (target_freq_a > 60000U) target_freq_a = 60000U;
-        if (accel_a * 2U > steps_a) {
-            accel_a = steps_a / 2U;
-            decel_a = steps_a - accel_a;
+        if (start_freq_a < 300U) start_freq_a = (target_freq_a > 600U) ? (target_freq_a / 3U) : 300U;
+        if (start_freq_a >= target_freq_a) start_freq_a = target_freq_a / 2U;
+
+        use_ramp_a = (steps_a > 24U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 30U));
+        if (use_ramp_a) {
+            if (accel_a * 2U > steps_a) {
+                accel_a = steps_a / 4U;
+                if (accel_a < 2U) accel_a = 2U;
+                decel_a = accel_a;
+            }
+            if (accel_a * 2U > steps_a) {
+                accel_a = steps_a / 2U;
+                decel_a = steps_a - accel_a;
+            }
+            if ((target_freq_a - start_freq_a) < accel_a) {
+                accel_a = target_freq_a - start_freq_a;
+                if (accel_a < 2U) use_ramp_a = false;
+                else decel_a = accel_a;
+            }
         }
-        cruise_a = steps_a - accel_a - decel_a;
-        if (target_freq_a <= start_freq_a) {
-            start_freq_a = (target_freq_a > 100U) ? (target_freq_a / 2U) : 50U;
-        }
-        if ((target_freq_a - start_freq_a) < accel_a) {
-            accel_a = target_freq_a - start_freq_a;
-            decel_a = accel_a;
-            cruise_a = steps_a - accel_a - decel_a;
-        }
+        cruise_a = use_ramp_a ? (steps_a - accel_a - decel_a) : steps_a;
     }
 
     // Axis Z params
-    uint32_t accel_z = ramp_z, decel_z = ramp_z, cruise_z = 0;
+    uint32_t accel_z = ramp_z, decel_z = ramp_z, cruise_z = steps_z;
+    bool use_ramp_z = false;
     if (steps_z > 0) {
-        if (start_freq_z < 50U) start_freq_z = 50U;
-        if (target_freq_z < 50U) target_freq_z = 50U;
+        if (target_freq_z < 100U) target_freq_z = 100U;
         if (target_freq_z > 60000U) target_freq_z = 60000U;
-        if (accel_z * 2U > steps_z) {
-            accel_z = steps_z / 2U;
-            decel_z = steps_z - accel_z;
+        if (start_freq_z < 200U) start_freq_z = (target_freq_z > 400U) ? (target_freq_z / 2U) : 200U;
+        if (start_freq_z >= target_freq_z) start_freq_z = target_freq_z / 2U;
+
+        use_ramp_z = (steps_z > 24U) && (accel_z >= 2U) && (target_freq_z > (start_freq_z + 30U));
+        if (use_ramp_z) {
+            if (accel_z * 2U > steps_z) {
+                accel_z = steps_z / 4U;
+                if (accel_z < 2U) accel_z = 2U;
+                decel_z = accel_z;
+            }
+            if (accel_z * 2U > steps_z) {
+                accel_z = steps_z / 2U;
+                decel_z = steps_z - accel_z;
+            }
+            if ((target_freq_z - start_freq_z) < accel_z) {
+                accel_z = target_freq_z - start_freq_z;
+                if (accel_z < 2U) use_ramp_z = false;
+                else decel_z = accel_z;
+            }
         }
-        cruise_z = steps_z - accel_z - decel_z;
-        if (target_freq_z <= start_freq_z) {
-            start_freq_z = (target_freq_z > 100U) ? (target_freq_z / 2U) : 50U;
-        }
-        if ((target_freq_z - start_freq_z) < accel_z) {
-            accel_z = target_freq_z - start_freq_z;
-            decel_z = accel_z;
-            cruise_z = steps_z - accel_z - decel_z;
-        }
+        cruise_z = use_ramp_z ? (steps_z - accel_z - decel_z) : steps_z;
     }
 
     // Build encoders for Axis C
     if (steps_c > 0) {
-        if (accel_c > 0 && target_freq_c > start_freq_c) {
+        if (use_ramp_c) {
             stepper_motor_curve_encoder_config_t ac_cfg = {
                 .resolution = 1000000, .sample_points = accel_c,
                 .start_freq_hz = start_freq_c, .end_freq_hz = target_freq_c
@@ -472,7 +564,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
 
     // Build encoders for Axis A
     if (steps_a > 0) {
-        if (accel_a > 0 && target_freq_a > start_freq_a) {
+        if (use_ramp_a) {
             stepper_motor_curve_encoder_config_t aa_cfg = {
                 .resolution = 1000000, .sample_points = accel_a,
                 .start_freq_hz = start_freq_a, .end_freq_hz = target_freq_a
@@ -489,7 +581,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
 
     // Build encoders for Axis Z
     if (steps_z > 0) {
-        if (accel_z > 0 && target_freq_z > start_freq_z) {
+        if (use_ramp_z) {
             stepper_motor_curve_encoder_config_t az_cfg = {
                 .resolution = 1000000, .sample_points = accel_z,
                 .start_freq_hz = start_freq_z, .end_freq_hz = target_freq_z
@@ -507,60 +599,48 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     // Transmit Axis C queue in parallel
     rmt_transmit_config_t tx_c = { .loop_count = 0 };
     if (steps_c > 0) {
-        if (accel_c > 0 && accel_enc_c) {
+        if (use_ramp_c && accel_enc_c) {
             rmt_transmit(chan_c, accel_enc_c, &accel_c, sizeof(accel_c), &tx_c);
         }
         if (cruise_c > 0 && unif_enc_c) {
             tx_c.loop_count = (cruise_c > 0) ? (cruise_c - 1) : 0;
             rmt_transmit(chan_c, unif_enc_c, &target_freq_c, sizeof(target_freq_c), &tx_c);
         }
-        if (decel_c > 0 && decel_enc_c) {
+        if (use_ramp_c && decel_enc_c) {
             tx_c.loop_count = 0;
             rmt_transmit(chan_c, decel_enc_c, &decel_c, sizeof(decel_c), &tx_c);
-        }
-        if (accel_c == 0 && unif_enc_c) {
-            tx_c.loop_count = (steps_c > 0) ? (steps_c - 1) : 0;
-            rmt_transmit(chan_c, unif_enc_c, &target_freq_c, sizeof(target_freq_c), &tx_c);
         }
     }
 
     // Transmit Axis A queue in parallel
     rmt_transmit_config_t tx_a = { .loop_count = 0 };
     if (steps_a > 0) {
-        if (accel_a > 0 && accel_enc_a) {
+        if (use_ramp_a && accel_enc_a) {
             rmt_transmit(chan_a, accel_enc_a, &accel_a, sizeof(accel_a), &tx_a);
         }
         if (cruise_a > 0 && unif_enc_a) {
             tx_a.loop_count = (cruise_a > 0) ? (cruise_a - 1) : 0;
             rmt_transmit(chan_a, unif_enc_a, &target_freq_a, sizeof(target_freq_a), &tx_a);
         }
-        if (decel_a > 0 && decel_enc_a) {
+        if (use_ramp_a && decel_enc_a) {
             tx_a.loop_count = 0;
             rmt_transmit(chan_a, decel_enc_a, &decel_a, sizeof(decel_a), &tx_a);
-        }
-        if (accel_a == 0 && unif_enc_a) {
-            tx_a.loop_count = (steps_a > 0) ? (steps_a - 1) : 0;
-            rmt_transmit(chan_a, unif_enc_a, &target_freq_a, sizeof(target_freq_a), &tx_a);
         }
     }
 
     // Transmit Axis Z queue in parallel
     rmt_transmit_config_t tx_z = { .loop_count = 0 };
     if (steps_z > 0) {
-        if (accel_z > 0 && accel_enc_z) {
+        if (use_ramp_z && accel_enc_z) {
             rmt_transmit(chan_z, accel_enc_z, &accel_z, sizeof(accel_z), &tx_z);
         }
         if (cruise_z > 0 && unif_enc_z) {
             tx_z.loop_count = (cruise_z > 0) ? (cruise_z - 1) : 0;
             rmt_transmit(chan_z, unif_enc_z, &target_freq_z, sizeof(target_freq_z), &tx_z);
         }
-        if (decel_z > 0 && decel_enc_z) {
+        if (use_ramp_z && decel_enc_z) {
             tx_z.loop_count = 0;
             rmt_transmit(chan_z, decel_enc_z, &decel_z, sizeof(decel_z), &tx_z);
-        }
-        if (accel_z == 0 && unif_enc_z) {
-            tx_z.loop_count = (steps_z > 0) ? (steps_z - 1) : 0;
-            rmt_transmit(chan_z, unif_enc_z, &target_freq_z, sizeof(target_freq_z), &tx_z);
         }
     }
 
@@ -609,7 +689,7 @@ void hardware_set_fan_output(app_context_t *ctx, bool on)
     }
 }
 
-esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint8_t level)
+esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint16_t level)
 {
     ESP_RETURN_ON_FALSE(laser_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Laser invalido");
 
@@ -629,21 +709,15 @@ esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint8
     return ESP_OK;
 }
 
-static uint32_t laser_level_to_duty(uint8_t level)
+static uint32_t laser_level_to_duty(uint16_t level)
 {
     if (level == 0U) {
         return 0U;
     }
-
-    const uint32_t min_duty = (LASER_PWM_MAX_DUTY * LASER_PWM_MIN_ACTIVE_LEVEL_8BIT) / 255U;
-    const uint32_t max_duty = (LASER_PWM_MAX_DUTY * LASER_PWM_MAX_USEFUL_LEVEL_8BIT) / 255U;
-    if (max_duty <= min_duty) {
-        return max_duty;
+    if (level > LASER_PWM_MAX_LEVEL) {
+        level = LASER_PWM_MAX_LEVEL;
     }
-
-    // Spread the full logical range over the laser's measured useful window.
-    const uint32_t span = max_duty - min_duty;
-    return min_duty + ((span * (uint32_t)(level - 1U)) + 127U) / 254U;
+    return (uint32_t)level;
 }
 
 bool hardware_is_z_switch_pressed(void)
@@ -717,10 +791,13 @@ esp_err_t hardware_read_temperature_c(float *temp_c)
 
 static esp_err_t init_gpio_matrix(void)
 {
+    // STEP pins are NOT included here — they are owned exclusively by the RMT
+    // peripheral.  Configuring them as GPIO_MODE_OUTPUT would override the RMT
+    // connection in the IO MUX and the motor would never receive pulses.
     const uint64_t outputs =
-        (1ULL << STEP_X) | (1ULL << DIR_X) |
-        (1ULL << STEP_Y) | (1ULL << DIR_Y) |
-        (1ULL << STEP_Z) | (1ULL << DIR_Z) |
+        (1ULL << DIR_X) |
+        (1ULL << DIR_Y) |
+        (1ULL << DIR_Z) |
         (1ULL << EN_PIN) | (1ULL << FAN_PIN);
 
     gpio_config_t output_conf = {
@@ -750,9 +827,7 @@ static esp_err_t init_gpio_matrix(void)
     };
     ESP_RETURN_ON_ERROR(gpio_config(&temp_conf), APP_TAG, "Falha ao configurar DS18B20");
 
-    gpio_set_level(STEP_X, 0);
-    gpio_set_level(STEP_Y, 0);
-    gpio_set_level(STEP_Z, 0);
+    // STEP pins are controlled by RMT — do NOT set their level here.
     gpio_set_level(DIR_X, 0);
     gpio_set_level(DIR_Y, 0);
     gpio_set_level(DIR_Z, Z_DIR_UP);
@@ -791,7 +866,7 @@ static esp_err_t init_i2c_buses(void)
         i2c_device_config_t device_config = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = ENCODER_ADDR,
-            .scl_speed_hz = 400000,
+            .scl_speed_hz = 100000,
             .scl_wait_us = 0,
             .flags = {
                 .disable_ack_check = 0,
@@ -809,7 +884,7 @@ static esp_err_t init_led_pwm(app_context_t *ctx)
 {
     ledc_timer_config_t timer_config = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_13_BIT,
+        .duty_resolution = LEDC_TIMER_12_BIT,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = LASER_PWM_FREQ_HZ,
         .clk_cfg = LEDC_AUTO_CLK,
@@ -845,24 +920,27 @@ static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(ENCODER_I2C_TIMEOUT_MS)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    uint8_t reg = ENCODER_REG_ANGLE;
+    uint8_t reg = ENCODER_REG_RAW_ANGLE;
     uint8_t raw_data[2] = {0};
-    esp_err_t err = i2c_master_transmit_receive(k_encoder_devices[encoder_index], &reg, sizeof(reg), raw_data, sizeof(raw_data), ENCODER_I2C_TIMEOUT_MS);
+    esp_err_t last_err = ESP_FAIL;
 
-    xSemaphoreGive(s_i2c_mutex);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(ENCODER_I2C_TIMEOUT_MS)) == pdTRUE) {
+            last_err = i2c_master_transmit_receive(
+                k_encoder_devices[encoder_index], &reg, sizeof(reg),
+                raw_data, sizeof(raw_data), ENCODER_I2C_TIMEOUT_MS);
+            xSemaphoreGive(s_i2c_mutex);
 
-    if (err != ESP_OK) {
-        return err;
+            if (last_err == ESP_OK) {
+                uint16_t raw = ((uint16_t)raw_data[0] << 8) | raw_data[1];
+                raw &= 0x0FFF;
+                *angle_deg = ((float)raw * 360.0f) / 4096.0f;
+                return ESP_OK;
+            }
+        }
+        esp_rom_delay_us(200);
     }
-
-    uint16_t raw = ((uint16_t)raw_data[0] << 8) | raw_data[1];
-    raw &= 0x0FFF;
-    *angle_deg = ((float)raw * 360.0f) / 4096.0f;
-    return ESP_OK;
+    return last_err;
 }
 
 void hardware_deinit(void)

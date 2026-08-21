@@ -35,6 +35,7 @@ class CanClient(BaseClient):
         self.node_id = 1
         self.cmd_base_id = 0x200
         self.status_base_id = 0x280
+        self.pos_base_id = 0x290
         self.event_base_id = 0x300
         self.seq_counter = 1
 
@@ -49,13 +50,14 @@ class CanClient(BaseClient):
 
     def connect(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
                 node_id: int = 1, cmd_base: int = 0x200, status_base: int = 0x280, 
-                event_base: int = 0x300, interface: str = "pcan", **kwargs) -> bool:
+                pos_base: int = 0x290, event_base: int = 0x300, interface: str = "pcan", **kwargs) -> bool:
         self.disconnect()
         self.channel = channel
         self.bitrate = bitrate
         self.node_id = node_id
         self.cmd_base_id = cmd_base
         self.status_base_id = status_base
+        self.pos_base_id = pos_base
         self.event_base_id = event_base
         self.interface = interface
 
@@ -112,7 +114,6 @@ class CanClient(BaseClient):
 
     def send_frame(self, arbitration_id: int, data: bytearray or bytes, desc: str = "") -> bool:
         if not self.is_connected or not self.bus:
-            self.state.error_occurred.emit("Não conectado ao barramento CAN")
             return False
             
         msg = can.Message(
@@ -123,7 +124,8 @@ class CanClient(BaseClient):
         )
         try:
             with self.lock:
-                self.bus.send(msg)
+                if self.bus:
+                    self.bus.send(msg, timeout=0.05)
             self.state.telemetry.tx_frames += 1
             
             # Emit for sniffer
@@ -136,8 +138,14 @@ class CanClient(BaseClient):
                 "desc": desc
             })
             return True
-        except Exception as e:
-            self.state.error_occurred.emit(f"Erro ao transmitir frame CAN: {e}")
+        except can.CanOperationError:
+            self.state.telemetry.error_count += 1
+            return False
+        except can.CanError:
+            self.state.telemetry.error_count += 1
+            return False
+        except Exception:
+            self.state.telemetry.error_count += 1
             return False
 
     def send_raw(self, cmd: str) -> bool:
@@ -158,19 +166,23 @@ class CanClient(BaseClient):
         while not self.stop_event.is_set():
             if self.is_connected:
                 self.request_status()
-            time.sleep(1.0) # Poll status every 1 second
+            time.sleep(0.5) # Poll status every 500ms
 
     def _rx_loop(self):
         while not self.stop_event.is_set():
             if not self.bus:
                 break
             try:
-                msg = self.bus.recv(timeout=0.1)
+                msg = self.bus.recv(timeout=0.05)
                 if msg is not None:
                     self.state.telemetry.rx_frames += 1
                     self._process_rx_frame(msg)
-            except Exception as e:
-                time.sleep(0.02)
+            except can.CanOperationError:
+                time.sleep(0.05)
+            except can.CanError:
+                time.sleep(0.05)
+            except Exception:
+                time.sleep(0.05)
                 
         self.is_connected = False
         self.state.set_connection_status(False, "PeakCAN")
@@ -181,6 +193,7 @@ class CanClient(BaseClient):
         dlc = len(data)
         
         status_id = self.status_base_id + self.node_id
+        pos_id = self.pos_base_id + self.node_id
         event_id = self.event_base_id + self.node_id
         
         desc = "Frame Desconhecido"
@@ -190,11 +203,9 @@ class CanClient(BaseClient):
             if dlc >= 8 and data[0] == CanEvent.STATUS:
                 node = data[1]
                 flags = data[2]
-                laser1 = data[3]
-                laser2 = data[4]
-                fan_byte = data[5]
-                temp_val = struct.unpack('b', bytes([data[6]]))[0] # signed int8
-                speed_lvl = data[7]
+                laser1 = (data[3] & 0xFF) | ((data[4] & 0xFF) << 8)
+                laser2 = (data[5] & 0xFF) | ((data[6] & 0xFF) << 8)
+                fan_byte = data[7]
                 
                 drivers_en = bool(flags & STATUS_FLAG_DRIVERS_ENABLED)
                 z_locked = bool(flags & STATUS_FLAG_Z_BLOQUEADO)
@@ -206,13 +217,16 @@ class CanClient(BaseClient):
                 fan_on = bool(fan_byte & 0x01)
                 fan_mode_val = (fan_byte >> 1) & 0x07
                 fan_mode = FanMode(fan_mode_val) if fan_mode_val in [0, 1, 2] else FanMode.MANUAL_OFF
+                speed_lvl = (fan_byte >> 4) & 0x0F
+                
+                # Preserve existing temperature if already valid
+                current_temp_valid = temp_ok or self.state.telemetry.temp_valid
                 
                 self.state.update_telemetry(
                     drivers_enabled=drivers_en,
                     z_bloqueado=z_locked,
                     alarme_z_ativo=alarm_on,
-                    temp_valid=temp_ok,
-                    temperature_c=float(temp_val),
+                    temp_valid=current_temp_valid,
                     tmc_uart_ready=tmc_ready,
                     can_online=can_on,
                     laser1_level=laser1,
@@ -221,7 +235,28 @@ class CanClient(BaseClient):
                     fan_mode=fan_mode,
                     speed_level=speed_lvl
                 )
-                desc = f"STATUS (Node {node}): Drivers={'ON' if drivers_en else 'OFF'} Temp={temp_val}°C L1={laser1} L2={laser2}"
+                desc = f"STATUS (Node {node}): Drivers={'ON' if drivers_en else 'OFF'} L1={laser1} L2={laser2}"
+                
+        elif frame_id == pos_id:
+            # POS_TELEMETRY: Centidegrees C, Centidegrees A, steps Z, Decicelsius Temp
+            if dlc >= 8:
+                pos_c = struct.unpack('<h', bytes(data[0:2]))[0] / 100.0
+                pos_a = struct.unpack('<h', bytes(data[2:4]))[0] / 100.0
+                pos_z = struct.unpack('<h', bytes(data[4:6]))[0]
+                temp_deci = struct.unpack('<h', bytes(data[6:8]))[0]
+                temp_c = temp_deci / 10.0
+                valid_temp = (-40.0 <= temp_c <= 125.0 and temp_deci != 0)
+                
+                self.state.update_telemetry(
+                    pos_c_deg=pos_c,
+                    pos_a_deg=pos_a,
+                    pos_z_steps=pos_z,
+                    pos_c_valid=True,
+                    pos_a_valid=True,
+                    temperature_c=temp_c,
+                    temp_valid=valid_temp
+                )
+                desc = f"POS TELEMETRY: C={pos_c:.2f}° A={pos_a:.2f}° Z={pos_z} Temp={temp_c:.1f}°C"
                 
         elif frame_id == event_id:
             if dlc > 0:
@@ -327,17 +362,21 @@ class CanClient(BaseClient):
         
         # 32-bit signed int, little endian
         steps_bytes = struct.pack('<i', int(steps))
-        payload = bytearray([CanOpcode.MOVE, ord(axis[0].upper())])
+        opcode = CanOpcode.MOVE_FORCE if force_no_encoder else CanOpcode.MOVE
+        payload = bytearray([opcode, ord(axis[0].upper())])
         payload.extend(steps_bytes)
         payload.append(seq)
         
-        return self.send_frame(target_id, bytes(payload), f"MOVE {axis.upper()} {steps} steps")
+        desc = f"{'MOVE_F' if force_no_encoder else 'MOVE'} {axis.upper()} {steps} steps"
+        return self.send_frame(target_id, bytes(payload), desc)
 
     def set_laser(self, laser_index: int, level: int) -> bool:
         target_id = self.cmd_base_id + self.node_id
         seq = self._next_seq()
-        level = max(0, min(255, level))
-        payload = bytes([CanOpcode.LASER, laser_index, level, seq])
+        level = max(0, min(4095, int(level)))
+        lvl_low = level & 0xFF
+        lvl_high = (level >> 8) & 0xFF
+        payload = bytes([CanOpcode.LASER, laser_index, lvl_low, lvl_high, seq])
         return self.send_frame(target_id, payload, f"LASER {laser_index} -> {level}")
 
     def set_fan(self, mode: int) -> bool:

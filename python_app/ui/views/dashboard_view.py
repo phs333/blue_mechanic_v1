@@ -152,8 +152,8 @@ class DashboardView(QWidget):
         # Connect reactive state updates
         self.state.telemetry_updated.connect(self.update_telemetry)
         
-    def _on_jog(self, axis: str, steps: int):
-        self.comm.move_axis(axis, steps)
+    def _on_jog(self, axis: str, steps: int, force: bool = False):
+        self.comm.move_axis(axis, steps, force_no_encoder=force)
 
     def _toggle_drivers(self):
         new_state = not self.state.telemetry.drivers_enabled

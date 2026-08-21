@@ -11,6 +11,7 @@ typedef enum {
     CAN_OP_SPEED = 0x11,
     CAN_OP_MOVE = 0x20,
     CAN_OP_HOME = 0x21,
+    CAN_OP_MOVE_FORCE = 0x22,
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
 } can_opcode_t;

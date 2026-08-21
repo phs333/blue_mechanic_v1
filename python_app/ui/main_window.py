@@ -315,3 +315,7 @@ class MainWindow(QMainWindow):
         if self.last_heartbeat_time > 0 and (time.time() - self.last_heartbeat_time > 2.5):
             self.lbl_status_hb.setText(f"💓 Heartbeat: Sem sinal ({int(time.time() - self.last_heartbeat_time)}s)")
             self.lbl_status_hb.setStyleSheet("color: #f87171; font-size: 11px; margin-right: 15px;")
+
+        # Periodically refresh live hardware position and telemetry for Serial/COM
+        if self.comm.is_connected and self.comm.backend == "COM":
+            self.comm.request_status()

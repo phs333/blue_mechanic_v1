@@ -1,28 +1,31 @@
 """
 Jog Pad Widget for Interactive Motion Control.
 Features directional cross-pad for Axis C (Base Rotativa) and Axis A (Pivot dos Lasers),
-vertical up/down for Axis Z (Atuador Linear), customizable step sizes, and direction inversion.
+vertical elevator for Axis Z (Atuador Linear), quick-select step pills, and force mode toggle.
 """
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QComboBox, QCheckBox
+    QCheckBox, QButtonGroup
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from python_app.core.protocol_defs import GRAUS_POR_PASSO_CA
 
 class JogPad(QFrame):
-    # Emits (axis: 'C'|'A'|'Z', steps: int)
-    jog_requested = pyqtSignal(str, int)
+    # Emits (axis: 'C'|'A'|'Z', steps: int, force_no_encoder: bool)
+    jog_requested = pyqtSignal(str, int, bool)
     home_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setProperty("class", "card")
         
+        self.current_step_deg = 15.0
+        self.current_step_z_steps = 400
+        
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(14, 12, 14, 12)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(16, 14, 16, 14)
+        main_layout.setSpacing(12)
         
         # Header
         title_layout = QHBoxLayout()
@@ -30,33 +33,60 @@ class JogPad(QFrame):
         title.setProperty("class", "section-title")
         title_layout.addWidget(title)
         title_layout.addStretch()
+        
+        self.chk_force = QCheckBox("🔓 Forçar sem correção (MOVE_F)")
+        self.chk_force.setToolTip("Movimenta em malha aberta direta sem checagem de limites de encoder")
+        self.chk_force.setStyleSheet("color: #f59e0b; font-size: 11px; font-weight: 600;")
+        title_layout.addWidget(self.chk_force)
+        
         main_layout.addLayout(title_layout)
         
-        # Step Size Selector Row
-        step_layout = QHBoxLayout()
-        step_layout.setSpacing(10)
+        # Quick Step Pills for Axis C and A
+        ca_pill_layout = QHBoxLayout()
+        ca_pill_layout.setSpacing(6)
+        lbl_ca = QLabel("Passo C/A:")
+        lbl_ca.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 11px;")
+        ca_pill_layout.addWidget(lbl_ca)
         
-        step_layout.addWidget(QLabel("Passo C/A:"))
-        self.combo_ca_step = QComboBox()
-        self.combo_ca_step.addItems(["0.5°", "1.0°", "5.0°", "15.0°", "45.0°", "90.0°", "180.0°", "360.0°"])
-        self.combo_ca_step.setCurrentText("15.0°")
-        step_layout.addWidget(self.combo_ca_step)
+        self.ca_step_group = QButtonGroup(self)
+        self.ca_pills = {}
+        for deg in [0.5, 1.0, 5.0, 15.0, 45.0, 90.0]:
+            btn = QPushButton(f"{deg:g}°")
+            btn.setProperty("class", "step-pill-active" if deg == 15.0 else "step-pill")
+            btn.clicked.connect(lambda checked, d=deg: self._set_ca_step(d))
+            self.ca_step_group.addButton(btn)
+            self.ca_pills[deg] = btn
+            ca_pill_layout.addWidget(btn)
+            
+        ca_pill_layout.addStretch()
+        main_layout.addLayout(ca_pill_layout)
         
-        step_layout.addWidget(QLabel("Passo Z:"))
-        self.combo_z_step = QComboBox()
-        self.combo_z_step.addItems([
-            "10 passos (0.1 mm)",
-            "50 passos (0.5 mm)",
-            "100 passos (1.0 mm)",
-            "400 passos (4.0 mm)",
-            "1000 passos (10.0 mm)",
-            "2000 passos (20.0 mm)"
-        ])
-        self.combo_z_step.setCurrentIndex(3) # 400 steps default
-        step_layout.addWidget(self.combo_z_step)
+        # Quick Step Pills for Axis Z
+        z_pill_layout = QHBoxLayout()
+        z_pill_layout.setSpacing(6)
+        lbl_z = QLabel("Passo Z:")
+        lbl_z.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 11px;")
+        z_pill_layout.addWidget(lbl_z)
         
-        step_layout.addStretch()
-        main_layout.addLayout(step_layout)
+        self.z_step_group = QButtonGroup(self)
+        self.z_pills = {}
+        z_presets = [
+            (50, "0.5 mm"),
+            (100, "1.0 mm"),
+            (400, "4.0 mm"),
+            (1000, "10 mm"),
+            (2000, "20 mm")
+        ]
+        for st, lbl in z_presets:
+            btn = QPushButton(lbl)
+            btn.setProperty("class", "step-pill-active" if st == 400 else "step-pill")
+            btn.clicked.connect(lambda checked, s=st: self._set_z_step(s))
+            self.z_step_group.addButton(btn)
+            self.z_pills[st] = btn
+            z_pill_layout.addWidget(btn)
+            
+        z_pill_layout.addStretch()
+        main_layout.addLayout(z_pill_layout)
         
         # Software Direction Inversion Row (Jog DIR)
         inv_row = QHBoxLayout()
@@ -80,9 +110,9 @@ class JogPad(QFrame):
         inv_row.addStretch()
         main_layout.addLayout(inv_row)
         
-        # Grid layout for Pads
+        # Controls Group (Cross Pad for C/A + Vertical Pad for Z)
         controls_layout = QHBoxLayout()
-        controls_layout.setSpacing(20)
+        controls_layout.setSpacing(24)
         
         # --- C/A Cross Pad ---
         ca_group = QVBoxLayout()
@@ -92,9 +122,9 @@ class JogPad(QFrame):
         ca_group.addWidget(ca_title)
         
         ca_grid = QGridLayout()
-        ca_grid.setSpacing(6)
+        ca_grid.setSpacing(8)
         
-        self.btn_a_pos = QPushButton("⟳ A+ (Pivot Horário)")
+        self.btn_a_pos = QPushButton("▲ A+ (Pivot Horário)")
         self.btn_a_pos.setProperty("class", "jog-btn")
         self.btn_a_pos.setToolTip("Girar Pivot dos Lasers no sentido horário (+)")
         self.btn_a_pos.clicked.connect(lambda: self._on_jog_ca('A', 1))
@@ -106,7 +136,7 @@ class JogPad(QFrame):
         self.btn_c_neg.clicked.connect(lambda: self._on_jog_ca('C', -1))
         ca_grid.addWidget(self.btn_c_neg, 1, 0)
         
-        self.btn_home_ca = QPushButton("🏠 Home C+A")
+        self.btn_home_ca = QPushButton("🎯 Home C+A")
         self.btn_home_ca.setProperty("class", "btn-primary")
         self.btn_home_ca.setToolTip("Alinhar eixos C e A com as posições de Home")
         self.btn_home_ca.clicked.connect(lambda: self.home_requested.emit("CA"))
@@ -118,7 +148,7 @@ class JogPad(QFrame):
         self.btn_c_pos.clicked.connect(lambda: self._on_jog_ca('C', 1))
         ca_grid.addWidget(self.btn_c_pos, 1, 2)
         
-        self.btn_a_neg = QPushButton("⟲ A- (Pivot Anti-horário)")
+        self.btn_a_neg = QPushButton("▼ A- (Pivot Anti-horário)")
         self.btn_a_neg.setProperty("class", "jog-btn")
         self.btn_a_neg.setToolTip("Girar Pivot dos Lasers no sentido anti-horário (-)")
         self.btn_a_neg.clicked.connect(lambda: self._on_jog_ca('A', -1))
@@ -127,63 +157,65 @@ class JogPad(QFrame):
         ca_group.addLayout(ca_grid)
         controls_layout.addLayout(ca_group, 3)
         
-        # --- Z Axis Vertical Pad ---
+        # --- Z Vertical Column ---
         z_group = QVBoxLayout()
         z_title = QLabel("Eixo Z (Atuador Linear)")
-        z_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        z_title.setStyleSheet("color: #10b981; font-weight: 700; font-size: 12px;")
         z_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         z_group.addWidget(z_title)
         
-        z_vbox = QVBoxLayout()
-        z_vbox.setSpacing(8)
+        z_grid = QVBoxLayout()
+        z_grid.setSpacing(8)
         
-        self.btn_z_up = QPushButton("⬆ Subir Z")
+        self.btn_z_up = QPushButton("⬆ Z+ (Subir)")
         self.btn_z_up.setProperty("class", "jog-btn")
-        self.btn_z_up.setToolTip("Mover atuador vertical Z para cima (+)")
+        self.btn_z_up.setToolTip("Subir eixo Z")
         self.btn_z_up.clicked.connect(lambda: self._on_jog_z(1))
-        z_vbox.addWidget(self.btn_z_up)
+        z_grid.addWidget(self.btn_z_up)
         
-        self.btn_home_z = QPushButton("🏠 Home Z")
-        self.btn_home_z.setProperty("class", "btn-primary")
-        self.btn_home_z.setToolTip("Retornar eixo Z ao sensor fim de curso")
+        self.btn_home_z = QPushButton("🏁 Homing Z")
+        self.btn_home_z.setProperty("class", "btn-success")
+        self.btn_home_z.setToolTip("Executar Homing no switch fim de curso Z")
         self.btn_home_z.clicked.connect(lambda: self.home_requested.emit("Z"))
-        z_vbox.addWidget(self.btn_home_z)
+        z_grid.addWidget(self.btn_home_z)
         
-        self.btn_z_down = QPushButton("⬇ Descer Z")
+        self.btn_z_down = QPushButton("⬇ Z- (Descer)")
         self.btn_z_down.setProperty("class", "jog-btn")
-        self.btn_z_down.setToolTip("Mover atuador vertical Z para baixo (-)")
+        self.btn_z_down.setToolTip("Descer eixo Z")
         self.btn_z_down.clicked.connect(lambda: self._on_jog_z(-1))
-        z_vbox.addWidget(self.btn_z_down)
+        z_grid.addWidget(self.btn_z_down)
         
-        z_group.addLayout(z_vbox)
+        z_group.addLayout(z_grid)
         controls_layout.addLayout(z_group, 2)
         
         main_layout.addLayout(controls_layout)
 
-    def _get_ca_step_deg(self) -> float:
-        text = self.combo_ca_step.currentText().split("°")[0].strip()
-        try:
-            return float(text)
-        except ValueError:
-            return 15.0
+    def _set_ca_step(self, deg: float):
+        self.current_step_deg = deg
+        for d, btn in self.ca_pills.items():
+            btn.setProperty("class", "step-pill-active" if d == deg else "step-pill")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
-    def _get_z_step_steps(self) -> int:
-        idx = self.combo_z_step.currentIndex()
-        values = [10, 50, 100, 400, 1000, 2000]
-        return values[idx] if idx < len(values) else 400
+    def _set_z_step(self, steps: int):
+        self.current_step_z_steps = steps
+        for s, btn in self.z_pills.items():
+            btn.setProperty("class", "step-pill-active" if s == steps else "step-pill")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
-    def _on_jog_ca(self, axis: str, direction: int):
+    def _on_jog_ca(self, axis: str, direction_multiplier: int):
+        steps = int(round(self.current_step_deg / GRAUS_POR_PASSO_CA))
         if axis == 'C' and self.chk_inv_c.isChecked():
-            direction *= -1
+            direction_multiplier *= -1
         elif axis == 'A' and self.chk_inv_a.isChecked():
-            direction *= -1
+            direction_multiplier *= -1
             
-        deg = self._get_ca_step_deg()
-        steps = int(round((deg / GRAUS_POR_PASSO_CA) * direction))
-        self.jog_requested.emit(axis, steps)
+        force = self.chk_force.isChecked()
+        self.jog_requested.emit(axis, steps * direction_multiplier, force)
 
-    def _on_jog_z(self, direction: int):
+    def _on_jog_z(self, direction_multiplier: int):
         if self.chk_inv_z.isChecked():
-            direction *= -1
-        steps = self._get_z_step_steps() * direction
-        self.jog_requested.emit('Z', steps)
+            direction_multiplier *= -1
+        force = self.chk_force.isChecked()
+        self.jog_requested.emit('Z', self.current_step_z_steps * direction_multiplier, force)

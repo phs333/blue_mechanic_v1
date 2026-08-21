@@ -72,22 +72,25 @@ static void thermal_task(void *arg) {
   while (true) {
     float temp_c = 0.0f;
     esp_err_t err = hardware_read_temperature_c(&temp_c);
-    if (err == ESP_OK) {
-      ctx->state.last_temp_c = temp_c;
-      ctx->state.temp_valid = true;
-
-      if (ctx->state.fan_mode == FAN_MODE_AUTO) {
-        if (!ctx->state.fan_output_on && temp_c >= FAN_AUTO_ON_TEMP_C) {
-          hardware_set_fan_output(ctx, true);
-        } else if (ctx->state.fan_output_on && temp_c <= FAN_AUTO_OFF_TEMP_C) {
-          hardware_set_fan_output(ctx, false);
-        }
+    if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (err == ESP_OK) {
+        ctx->state.last_temp_c = temp_c;
+        ctx->state.temp_valid = true;
+      } else {
+        ctx->state.temp_valid = false;
       }
-    } else {
-      ctx->state.temp_valid = false;
+      xSemaphoreGive(ctx->state_mutex);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    if (err == ESP_OK && ctx->state.fan_mode == FAN_MODE_AUTO) {
+      if (!ctx->state.fan_output_on && temp_c >= FAN_AUTO_ON_TEMP_C) {
+        hardware_set_fan_output(ctx, true);
+      } else if (ctx->state.fan_output_on && temp_c <= FAN_AUTO_OFF_TEMP_C) {
+        hardware_set_fan_output(ctx, false);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 

@@ -1,7 +1,7 @@
 """
 Laser Power Controller Widget.
-Linear 0..255 PWM control (0% to 100%), with percentage and 8-bit readout,
-ON/OFF toggle, and quick presets.
+0% to 100% control mapped to physical PWM duty (0/4095, 46..300/4095).
+Slider and SpinBox increment 1 in 1 (0% to 100%).
 """
 
 from PyQt6.QtWidgets import (
@@ -11,13 +11,14 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from python_app.core.protocol_defs import laser_level_to_percent, percent_to_laser_level
 
 class LaserSlider(QFrame):
-    # Emits (laser_index: 1|2, level_8bit: 0..255)
+    # Emits (laser_index: 1|2, raw_level_12bit: 0..4095)
     laser_level_changed = pyqtSignal(int, int)
 
     def __init__(self, laser_index: int, title: str = "", parent=None):
         super().__init__(parent)
         self.laser_index = laser_index
-        self.current_level = 0
+        self.current_percent = 0
+        self.current_raw_level = 0
         self.setProperty("class", "metric-card")
         self._block_signals = False
         
@@ -25,7 +26,7 @@ class LaserSlider(QFrame):
         main_layout.setContentsMargins(14, 12, 14, 12)
         main_layout.setSpacing(10)
         
-        # Header (Title & Badges)
+        # Header (Title & Status)
         header_layout = QHBoxLayout()
         default_title = "Laser Esquerdo" if laser_index == 1 else "Laser Direito"
         self.lbl_title = QLabel(title or default_title)
@@ -34,27 +35,31 @@ class LaserSlider(QFrame):
         
         header_layout.addStretch()
         
-        self.lbl_status = QLabel("0% (0/255)")
+        self.lbl_status = QLabel("0% (0/4095)")
         self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 13px;")
         header_layout.addWidget(self.lbl_status)
         
         main_layout.addLayout(header_layout)
         
-        # Slider & Spinbox Row (0..255)
+        # Slider & Spinbox Row (0% .. 100%, passo de 1 em 1)
         slider_layout = QHBoxLayout()
         slider_layout.setSpacing(12)
         
         self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, 255)
+        self.slider.setRange(0, 100)
         self.slider.setValue(0)
-        self.slider.setToolTip("Ajuste de potência do laser (0 a 255)")
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(10)
+        self.slider.setToolTip("Ajuste de potência do laser de 0% a 100% (Passo de 1%)")
         self.slider.valueChanged.connect(self._on_slider_change)
         slider_layout.addWidget(self.slider, 4)
         
         self.spin_val = QSpinBox()
-        self.spin_val.setRange(0, 255)
+        self.spin_val.setRange(0, 100)
         self.spin_val.setValue(0)
-        self.spin_val.setSuffix(" / 255")
+        self.spin_val.setSingleStep(1)
+        self.spin_val.setSuffix(" %")
+        self.spin_val.setToolTip("Digite a porcentagem desejada (0% a 100%)")
         self.spin_val.valueChanged.connect(self._on_spin_change)
         slider_layout.addWidget(self.spin_val, 1)
         
@@ -66,65 +71,74 @@ class LaserSlider(QFrame):
         
         self.btn_off = QPushButton("DESLIGAR")
         self.btn_off.setProperty("class", "btn-danger")
-        self.btn_off.setToolTip("Desligar laser (0/255)")
-        self.btn_off.clicked.connect(lambda: self.set_level(0))
+        self.btn_off.setToolTip("Desligar laser (0%)")
+        self.btn_off.clicked.connect(lambda: self.set_percent(0))
         preset_layout.addWidget(self.btn_off)
         
-        for pct in [25, 50, 75, 100]:
+        for pct in [10, 25, 50, 75, 100]:
             btn = QPushButton(f"{pct}%")
-            btn.setToolTip(f"Definir {pct}% de potência ({percent_to_laser_level(pct)}/255)")
+            raw_lvl = percent_to_laser_level(pct)
+            btn.setToolTip(f"Definir {pct}% ({raw_lvl}/4095)")
             btn.clicked.connect(lambda checked, p=pct: self.set_percent(p))
             preset_layout.addWidget(btn)
             
         main_layout.addLayout(preset_layout)
 
-    def _update_ui_state(self, level: int):
-        self.current_level = level
-        pct = laser_level_to_percent(level)
-        self.lbl_status.setText(f"{pct}% ({level}/255)")
-        if level > 0:
+    def _update_display(self, percent: int, raw_level: int):
+        self.current_percent = percent
+        self.current_raw_level = raw_level
+        self.lbl_status.setText(f"{percent}% ({raw_level}/4095)")
+        if percent > 0:
             self.lbl_status.setStyleSheet("color: #f87171; font-weight: 700; font-size: 13px;")
         else:
             self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 13px;")
 
-    def _on_slider_change(self, val: int):
+    def _on_slider_change(self, percent: int):
         if self._block_signals:
             return
+        raw_level = percent_to_laser_level(percent)
         self._block_signals = True
-        self.spin_val.setValue(val)
-        self._update_ui_state(val)
+        self.spin_val.setValue(percent)
+        self._update_display(percent, raw_level)
         self._block_signals = False
-        self.laser_level_changed.emit(self.laser_index, val)
+        self.laser_level_changed.emit(self.laser_index, raw_level)
 
-    def _on_spin_change(self, val: int):
+    def _on_spin_change(self, percent: int):
         if self._block_signals:
             return
+        raw_level = percent_to_laser_level(percent)
         self._block_signals = True
-        self.slider.setValue(val)
-        self._update_ui_state(val)
+        self.slider.setValue(percent)
+        self._update_display(percent, raw_level)
         self._block_signals = False
-        self.laser_level_changed.emit(self.laser_index, val)
+        self.laser_level_changed.emit(self.laser_index, raw_level)
 
-    def set_level(self, level: int, notify: bool = True):
-        level = max(0, min(255, level))
+    def set_percent(self, pct: int, notify: bool = True):
+        pct = max(0, min(100, int(pct)))
+        raw_level = percent_to_laser_level(pct)
         self._block_signals = True
-        self.slider.setValue(level)
-        self.spin_val.setValue(level)
-        self._update_ui_state(level)
+        self.slider.setValue(pct)
+        self.spin_val.setValue(pct)
+        self._update_display(pct, raw_level)
         self._block_signals = False
         if notify:
-            self.laser_level_changed.emit(self.laser_index, level)
+            self.laser_level_changed.emit(self.laser_index, raw_level)
 
-    def set_percent(self, pct: int):
-        pct = max(0, min(100, pct))
-        level = percent_to_laser_level(pct)
-        self.set_level(level, notify=True)
+    def set_level(self, raw_level: int, notify: bool = True):
+        raw_level = max(0, min(4095, int(raw_level)))
+        pct = laser_level_to_percent(raw_level)
+        self.set_percent(pct, notify=notify)
 
-    def update_from_telemetry(self, level: int):
-        """Update without re-emitting change signal back to hardware."""
-        level = max(0, min(255, level))
+    def update_from_telemetry(self, raw_level: int):
+        """Update from background telemetry without re-emitting command."""
+        raw_level = max(0, min(4095, int(raw_level)))
+        if self.slider.isSliderDown() or self.spin_val.hasFocus():
+            return  # Do not override while user is actively sliding or typing
+        if self.current_raw_level == raw_level:
+            return  # Value unchanged
+        pct = laser_level_to_percent(raw_level)
         self._block_signals = True
-        self.slider.setValue(level)
-        self.spin_val.setValue(level)
-        self._update_ui_state(level)
+        self.slider.setValue(pct)
+        self.spin_val.setValue(pct)
+        self._update_display(pct, raw_level)
         self._block_signals = False

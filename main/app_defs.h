@@ -53,13 +53,14 @@
 // =================================================================
 // --- CONFIGURACAO ---
 // =================================================================
-#define BM_ENABLE_CAN 0
+#define BM_ENABLE_CAN 1
 #define BM_ENABLE_TMC_UART 0
 
 #define LASER_PWM_FREQ_HZ 5000
-#define LASER_PWM_MAX_DUTY ((1U << 13) - 1U)
-#define LASER_PWM_MIN_ACTIVE_LEVEL_8BIT 15U
-#define LASER_PWM_MAX_USEFUL_LEVEL_8BIT 255U
+#define LASER_PWM_MAX_DUTY ((1U << 12) - 1U)
+#define LASER_PWM_MAX_LEVEL 4095U
+#define LASER_MIN_USEFUL_DUTY 46U
+#define LASER_MAX_USEFUL_DUTY 300U
 
 #define Z_DIR_UP 0
 #define Z_DIR_DOWN 1
@@ -87,6 +88,7 @@
 #define INVERTER_Y INVERTER_A
 
 #define ENCODER_ADDR 0x36
+#define ENCODER_REG_RAW_ANGLE 0x0C
 #define ENCODER_REG_ANGLE 0x0E
 
 #define SETTINGS_NAMESPACE "cinetica"
@@ -200,7 +202,7 @@ typedef struct {
     volatile bool drivers_enabled;
     volatile bool fan_output_on;
     volatile fan_mode_t fan_mode;
-    volatile uint8_t laser_level[2];
+    volatile uint16_t laser_level[2];
     volatile uint32_t speed_delay_us[AXIS_COUNT];
     volatile float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     volatile float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z

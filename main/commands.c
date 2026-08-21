@@ -16,9 +16,9 @@
 
 static esp_err_t persist_settings(app_context_t *ctx);
 static bool parse_u32_token(const char *text, uint32_t *value);
-static bool parse_laser_level_token(const char *text, uint8_t *level);
-static uint8_t percent_to_laser_level(uint32_t percent);
-static uint32_t laser_level_to_percent(uint8_t level);
+static bool parse_laser_level_token(const char *text, uint16_t *level);
+static uint16_t percent_to_laser_level(uint32_t percent);
+static uint32_t laser_level_to_percent(uint16_t level);
 static void trim_ascii(char *text);
 static void to_upper_ascii(char *text);
 
@@ -61,7 +61,7 @@ void commands_print_help(void)
     puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("MOVE_F C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("MOVE_SYNC C <steps_c> A <steps_a> Z <steps_z> [S<speed>] [F<accel>]");
-    puts("LASER 1|2 ON|OFF|0..100%|0..255");
+    puts("LASER 1|2 ON|OFF|0..100%|0..4095");
     puts("FAN 0|1|AUTO");
     puts("TEMP");
     puts("DRIVER STATUS");
@@ -113,12 +113,12 @@ void commands_print_status(app_context_t *ctx)
     printf("Alarme Z: %s\n", ctx->state.alarme_z_ativo ? "ON" : "OFF");
     printf("Estado Z: %s\n", ctx->state.z_bloqueado ? "BLOQUEADO" : "LIVRE");
     printf("Drivers: %s\n", ctx->state.drivers_enabled ? "ENERGIZADOS" : "DESLIGADOS");
-    printf("Laser 1: %" PRIu32 "%% (%u/255)\n",
+    printf("Laser 1: %" PRIu32 "%% (%u/4095)\n",
            laser_level_to_percent(ctx->state.laser_level[0]),
-           ctx->state.laser_level[0]);
-    printf("Laser 2: %" PRIu32 "%% (%u/255)\n",
+           (unsigned)ctx->state.laser_level[0]);
+    printf("Laser 2: %" PRIu32 "%% (%u/4095)\n",
            laser_level_to_percent(ctx->state.laser_level[1]),
-           ctx->state.laser_level[1]);
+           (unsigned)ctx->state.laser_level[1]);
 
     const char *fan_mode = "MANUAL OFF";
     if (ctx->state.fan_mode == FAN_MODE_MANUAL_ON) {
@@ -554,17 +554,17 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             return;
         }
 
-        uint8_t level = 0;
+        uint16_t level = 0;
         to_upper_ascii(laser_value);
         if (!parse_laser_level_token(laser_value, &level)) {
-            puts("Valor de laser invalido. Use ON, OFF, 0..100% ou 0..255.");
+            puts("Valor de laser invalido. Use ON, OFF, 0..100% ou 0..4095.");
             return;
         }
 
         esp_err_t err = hardware_set_laser_level(ctx, (size_t)(laser_number - 1), level);
         if (err == ESP_OK) {
-            printf("Laser %d ajustado para %" PRIu32 "%% (%u/255).\n",
-                   laser_number, laser_level_to_percent(level), level);
+            printf("Laser %d ajustado para %" PRIu32 "%% (%u/4095).\n",
+                   laser_number, laser_level_to_percent(level), (unsigned)level);
         } else {
             printf("ERRO ao ajustar laser %d: %s\n", laser_number, esp_err_to_name(err));
         }
@@ -1053,14 +1053,14 @@ static bool parse_u32_token(const char *text, uint32_t *value)
     return true;
 }
 
-static bool parse_laser_level_token(const char *text, uint8_t *level)
+static bool parse_laser_level_token(const char *text, uint16_t *level)
 {
     if (text == NULL || level == NULL) {
         return false;
     }
 
     if (strcmp(text, "ON") == 0) {
-        *level = 255U;
+        *level = (uint16_t)LASER_PWM_MAX_LEVEL;
         return true;
     }
 
@@ -1089,25 +1089,40 @@ static bool parse_laser_level_token(const char *text, uint8_t *level)
     }
 
     uint32_t numeric = 0;
-    if (!parse_u32_token(text, &numeric) || numeric > 255U) {
+    if (!parse_u32_token(text, &numeric) || numeric > (uint32_t)LASER_PWM_MAX_LEVEL) {
         return false;
     }
 
-    *level = (uint8_t)numeric;
+    *level = (uint16_t)numeric;
     return true;
 }
 
-static uint8_t percent_to_laser_level(uint32_t percent)
+static uint16_t percent_to_laser_level(uint32_t percent)
 {
-    if (percent >= 100U) {
-        return 255U;
+    if (percent == 0U) {
+        return 0U;
     }
-    return (uint8_t)((percent * 255U + 50U) / 100U);
+    if (percent == 1U) {
+        return (uint16_t)LASER_MIN_USEFUL_DUTY;
+    }
+    if (percent >= 100U) {
+        return (uint16_t)LASER_MAX_USEFUL_DUTY;
+    }
+    return (uint16_t)(LASER_MIN_USEFUL_DUTY + ((percent - 1U) * (LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY) + 49U) / 99U);
 }
 
-static uint32_t laser_level_to_percent(uint8_t level)
+static uint32_t laser_level_to_percent(uint16_t level)
 {
-    return ((uint32_t)level * 100U + 127U) / 255U;
+    if (level == 0U) {
+        return 0U;
+    }
+    if (level <= LASER_MIN_USEFUL_DUTY) {
+        return 1U;
+    }
+    if (level >= LASER_MAX_USEFUL_DUTY) {
+        return 100U;
+    }
+    return 1U + ((uint32_t)(level - LASER_MIN_USEFUL_DUTY) * 99U + (LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY) / 2U) / (LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY);
 }
 
 static void trim_ascii(char *text)

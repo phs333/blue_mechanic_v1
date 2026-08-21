@@ -243,8 +243,8 @@ class MotionView(QWidget):
         
         self.state.telemetry_updated.connect(self.update_telemetry)
 
-    def _on_jog(self, axis: str, steps: int):
-        self.comm.move_axis(axis, steps)
+    def _on_jog(self, axis: str, steps: int, force: bool = False):
+        self.comm.move_axis(axis, steps, force_no_encoder=force)
 
     def _execute_direct_move(self):
         axis_idx = self.combo_axis.currentIndex()

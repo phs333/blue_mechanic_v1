@@ -181,19 +181,19 @@ class SerialClient(BaseClient):
         if m:
             self.state.update_telemetry(drivers_enabled=(m.group(1).upper() == "ENERGIZADOS"))
 
-        # Laser 1 / Laser Esquerdo: 50% (128/255)
-        m = re.search(r'Laser\s*(?:1|Esquerdo)?:.*\((\d+)/255\)', line, re.IGNORECASE)
-        if m:
+        # Laser 1 / Laser Esquerdo: 50% (2048/4095)
+        m1 = re.search(r'Laser\s+(?:1|Esquerdo)[:\s].*\((\d+)/(?:4095|255)\)', line, re.IGNORECASE)
+        if m1:
             try:
-                self.state.update_telemetry(laser1_level=int(m.group(1)))
+                self.state.update_telemetry(laser1_level=int(m1.group(1)))
             except ValueError:
                 pass
 
-        # Laser 2 / Laser Direito: 50% (128/255)
-        m = re.search(r'Laser\s*(?:2|Direito)?:.*\((\d+)/255\)', line, re.IGNORECASE)
-        if m:
+        # Laser 2 / Laser Direito: 50% (2048/4095)
+        m2 = re.search(r'Laser\s+(?:2|Direito)[:\s].*\((\d+)/(?:4095|255)\)', line, re.IGNORECASE)
+        if m2:
             try:
-                self.state.update_telemetry(laser2_level=int(m.group(1)))
+                self.state.update_telemetry(laser2_level=int(m2.group(1)))
             except ValueError:
                 pass
 
@@ -394,7 +394,7 @@ class SerialClient(BaseClient):
         return self.send_raw(cmd)
 
     def set_laser(self, laser_index: int, level: int) -> bool:
-        level = max(0, min(255, level))
+        level = max(0, min(4095, level))
         return self.send_raw(f"LASER {laser_index} {level}")
 
     def set_fan(self, mode: int) -> bool:

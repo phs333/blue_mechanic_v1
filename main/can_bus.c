@@ -92,19 +92,17 @@ esp_err_t can_bus_apply_settings(app_context_t *ctx)
 esp_err_t can_bus_send_status(app_context_t *ctx)
 {
     uint8_t payload[8];
-    int temp = 0;
     bool drivers_enabled = false;
     bool z_bloqueado = false;
     bool alarme_z_ativo = false;
     bool temp_valid = false;
     bool tmc_uart_ready = false;
     bool can_online = false;
-    uint8_t laser_level[2] = {0, 0};
+    uint16_t laser_level[2] = {0, 0};
     bool fan_output_on = false;
     fan_mode_t fan_mode = FAN_MODE_MANUAL_OFF;
 
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        temp = (int)ctx->state.last_temp_c;
         drivers_enabled = ctx->state.drivers_enabled;
         z_bloqueado = ctx->state.z_bloqueado;
         alarme_z_ativo = ctx->state.alarme_z_ativo;
@@ -118,11 +116,7 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
         xSemaphoreGive(ctx->state_mutex);
     }
 
-    if (temp > 127) {
-        temp = 127;
-    } else if (temp < -128) {
-        temp = -128;
-    }
+    uint8_t speed_lvl = speed_level_from_delay(ctx->state.speed_delay_us[AXIS_C_ID]);
 
     payload[0] = CAN_EVT_STATUS;
     payload[1] = ctx->settings.node_id;
@@ -133,13 +127,36 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
         (temp_valid ? 0x08U : 0x00U) |
         (tmc_uart_ready ? 0x10U : 0x00U) |
         (can_online ? 0x20U : 0x00U);
-    payload[3] = laser_level[0];
-    payload[4] = laser_level[1];
-    payload[5] = (uint8_t)((fan_output_on ? 0x01U : 0x00U) | ((uint8_t)fan_mode << 1));
-    payload[6] = (uint8_t)(int8_t)temp;
-    payload[7] = speed_level_from_delay(ctx->state.speed_delay_us[AXIS_X_ID]);
+    payload[3] = (uint8_t)(laser_level[0] & 0xFF);
+    payload[4] = (uint8_t)((laser_level[0] >> 8) & 0xFF);
+    payload[5] = (uint8_t)(laser_level[1] & 0xFF);
+    payload[6] = (uint8_t)((laser_level[1] >> 8) & 0xFF);
+    payload[7] = (uint8_t)((fan_output_on ? 0x01U : 0x00U) | ((uint8_t)fan_mode << 1) | ((uint8_t)speed_lvl << 4));
 
-    return can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
+    esp_err_t err1 = can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
+
+    // Read live encoders and temperature for POS_TELEMETRY frame (ID: can_status_base_id + 0x10 + node_id)
+    float cur_c = 0.0f, cur_a = 0.0f;
+    hardware_read_axis_encoder('C', &cur_c);
+    hardware_read_axis_encoder('A', &cur_a);
+    int16_t c_centi = (int16_t)(cur_c * 100.0f);
+    int16_t a_centi = (int16_t)(cur_a * 100.0f);
+    int16_t z_pos = (int16_t)ctx->state.atual_z;
+    int16_t temp_deci = (int16_t)(ctx->state.last_temp_c * 10.0f);
+
+    uint8_t payload_pos[8];
+    payload_pos[0] = (uint8_t)(c_centi & 0xFF);
+    payload_pos[1] = (uint8_t)((c_centi >> 8) & 0xFF);
+    payload_pos[2] = (uint8_t)(a_centi & 0xFF);
+    payload_pos[3] = (uint8_t)((a_centi >> 8) & 0xFF);
+    payload_pos[4] = (uint8_t)(z_pos & 0xFF);
+    payload_pos[5] = (uint8_t)((z_pos >> 8) & 0xFF);
+    payload_pos[6] = (uint8_t)(temp_deci & 0xFF);
+    payload_pos[7] = (uint8_t)((temp_deci >> 8) & 0xFF);
+
+    esp_err_t err2 = can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + 0x10U + ctx->settings.node_id), payload_pos, sizeof(payload_pos), can_online);
+
+    return (err1 == ESP_OK) ? err2 : err1;
 }
 
 void can_bus_print_status(const app_context_t *ctx)
@@ -363,44 +380,10 @@ static uint8_t speed_level_from_delay(uint32_t delay_us)
 
 static bool check_cmd_seq(app_context_t *ctx, uint8_t opcode, const uint8_t *buf, size_t len)
 {
-    size_t expected_len = 0;
-    switch (opcode) {
-    case CAN_OP_PING:
-        expected_len = 3;
-        break;
-    case CAN_OP_STATUS_REQUEST:
-        expected_len = 1;
-        break;
-    case CAN_OP_ENABLE:
-        expected_len = 2;
-        break;
-    case CAN_OP_SPEED:
-        expected_len = 2;
-        break;
-    case CAN_OP_MOVE:
-        expected_len = 6;
-        break;
-    case CAN_OP_HOME:
-        expected_len = 2;
-        break;
-    case CAN_OP_LASER:
-        expected_len = 3;
-        break;
-    case CAN_OP_FAN:
-        expected_len = 2;
-        break;
-    default:
-        return true;
-    }
-
-    if (len > expected_len) {
-        uint32_t seq = buf[expected_len];
-        if (seq <= ctx->state.last_cmd_seq) {
-            ESP_LOGW(APP_TAG, "CAN comando duplicado ignorado: opcode=0x%02X seq=%" PRIu32, opcode, seq);
-            return false;
-        }
-        ctx->state.last_cmd_seq = seq;
-    }
+    (void)ctx;
+    (void)opcode;
+    (void)buf;
+    (void)len;
     return true;
 }
 
@@ -429,10 +412,6 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
     switch (buf[0]) {
     case CAN_OP_PING:
         if (len >= 3U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, CAN_EVT_PONG, buf[1], buf[2]);
         } else {
@@ -447,10 +426,6 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_ENABLE:
         if (len >= 2U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             hardware_set_driver_enable(ctx, buf[1] != 0U);
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, CAN_EVT_ACK, CAN_OP_ENABLE, 0);
@@ -461,10 +436,6 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_SPEED:
         if (len >= 2U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             uint32_t delay_us = 0;
             switch (buf[1]) {
             case 1:
@@ -505,10 +476,6 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_MOVE:
         if (len >= 6U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             int32_t steps = (int32_t)((uint32_t)buf[2] |
                                       ((uint32_t)buf[3] << 8) |
                                       ((uint32_t)buf[4] << 16) |
@@ -521,12 +488,22 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         }
         break;
 
+    case CAN_OP_MOVE_FORCE:
+        if (len >= 6U) {
+            int32_t steps = (int32_t)((uint32_t)buf[2] |
+                                      ((uint32_t)buf[3] << 8) |
+                                      ((uint32_t)buf[4] << 16) |
+                                      ((uint32_t)buf[5] << 24));
+            xSemaphoreGive(ctx->state_mutex);
+            err = motion_post_move_axis_force(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE_FORCE);
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_MOVE_FORCE, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+        }
+        break;
+
     case CAN_OP_HOME:
         if (len >= 2U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             char axis = (char)buf[1];
             xSemaphoreGive(ctx->state_mutex);
             if (axis == 'C' || axis == 'c' || axis == 'A' || axis == 'a' ||
@@ -545,11 +522,14 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_LASER:
         if (len >= 3U && buf[1] >= 1U && buf[1] <= 2U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
+            uint16_t lvl = 0;
+            if (len >= 4U) {
+                lvl = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+            } else {
+                lvl = (uint16_t)buf[2];
             }
-            err = hardware_set_laser_level(ctx, (size_t)(buf[1] - 1U), buf[2]);
+            ESP_LOGI(APP_TAG, "CAN comando LASER %u -> level=%u (12-bit)", (unsigned)buf[1], (unsigned)lvl);
+            err = hardware_set_laser_level(ctx, (size_t)(buf[1] - 1U), lvl);
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER, (uint8_t)err);
         } else {
@@ -601,7 +581,7 @@ static twai_timing_basic_config_t can_get_bit_timing_config(uint32_t bitrate)
 {
     twai_timing_basic_config_t timing = {
         .bitrate = bitrate,
-        .sp_permill = 880,
+        .sp_permill = 800,
         .ssp_permill = 0,
     };
     return timing;

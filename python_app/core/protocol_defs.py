@@ -15,6 +15,7 @@ DEFAULT_BAUDRATE = 115200
 DEFAULT_NODE_ID = 1
 DEFAULT_CAN_COMMAND_BASE_ID = 0x200
 DEFAULT_CAN_STATUS_BASE_ID = 0x280
+DEFAULT_CAN_POS_BASE_ID = 0x290
 DEFAULT_CAN_EVENT_BASE_ID = 0x300
 DEFAULT_CAN_BITRATE = 500000
 
@@ -48,6 +49,7 @@ class CanOpcode(IntEnum):
     SPEED = 0x11
     MOVE = 0x20
     HOME = 0x21
+    MOVE_FORCE = 0x22
     LASER = 0x30
     FAN = 0x31
 
@@ -110,12 +112,25 @@ def delay_to_speed_level(delay_us: int) -> int:
 def speed_level_to_delay(level: int) -> int:
     return SPEED_LEVEL_DELAYS.get(level, 400)
 
+LASER_MIN_USEFUL_DUTY = 46
+LASER_MAX_USEFUL_DUTY = 300
+
 def laser_level_to_percent(level: int) -> int:
-    level = max(0, min(255, level))
-    return int((level * 100 + 127) // 255)
+    level = max(0, min(4095, int(level)))
+    if level <= 0:
+        return 0
+    if level <= LASER_MIN_USEFUL_DUTY:
+        return 1
+    if level >= LASER_MAX_USEFUL_DUTY:
+        return 100
+    return int(round(1.0 + ((level - LASER_MIN_USEFUL_DUTY) / float(LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY)) * 99.0))
 
 def percent_to_laser_level(percent: int) -> int:
-    percent = max(0, min(100, percent))
+    percent = max(0, min(100, int(percent)))
+    if percent <= 0:
+        return 0
+    if percent == 1:
+        return LASER_MIN_USEFUL_DUTY
     if percent >= 100:
-        return 255
-    return int((percent * 255 + 50) // 100)
+        return LASER_MAX_USEFUL_DUTY
+    return int(round(LASER_MIN_USEFUL_DUTY + ((percent - 1) / 99.0) * (LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY)))

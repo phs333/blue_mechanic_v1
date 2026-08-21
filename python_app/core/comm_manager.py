@@ -74,6 +74,10 @@ class CommManager(QObject):
     def is_connected(self) -> bool:
         return self.active_client is not None and self.active_client.is_connected
 
+    @property
+    def backend(self) -> str:
+        return self.backend_type
+
     # Forwarding high-level commands
     def send_raw(self, cmd: str) -> bool:
         if self.active_client:

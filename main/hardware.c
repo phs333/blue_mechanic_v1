@@ -30,7 +30,7 @@ static esp_err_t init_rmt_channels(void)
         rmt_tx_channel_config_t tx_chan_config = {
             .clk_src = RMT_CLK_SRC_DEFAULT,
             .gpio_num = step_pins[i],
-            .mem_block_symbols = 64,
+            .mem_block_symbols = 48,
             .resolution_hz = 1000000,
             .trans_queue_depth = 10,
         };

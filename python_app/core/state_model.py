@@ -177,7 +177,7 @@ class DeviceState(QObject):
     def update_parameters(self, **kwargs):
         changed = False
         for key, value in kwargs.items():
-            if hasattr(self.parameters, key):
+            if hasattr(self.parameters, key) and getattr(self.parameters, key) != value:
                 setattr(self.parameters, key, value)
                 changed = True
         if changed:

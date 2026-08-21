@@ -134,21 +134,31 @@ class SerialClient(BaseClient):
 
     def _parse_response_line(self, line: str):
         """Parse status lines printed by Blue Mechanic V1 ESP32 firmware."""
-        # Eixo C (Base): 45.20 deg / Eixo X: 45.20 deg
-        m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
+        # Eixo C (Base): 45.20 deg (Limites: [10.00, 190.00] deg)
+        m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)(?:\s*\(Limites:\s*\[([\d\.\-]+),\s*([\d\.\-]+)\]\s*deg\))?', line, re.IGNORECASE)
         if m_c:
             try:
                 self.state.update_telemetry(pos_c_deg=float(m_c.group(1)), pos_c_valid=True)
+                if m_c.group(2) and m_c.group(3):
+                    self.state.update_parameters(
+                        limit_min_deg_c=float(m_c.group(2)),
+                        limit_max_deg_c=float(m_c.group(3))
+                    )
             except ValueError:
                 pass
         elif re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):
             self.state.update_telemetry(pos_c_valid=False)
 
-        # Eixo A (Pivot): 12.30 deg / Eixo Y: 12.30 deg
-        m_a = re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
+        # Eixo A (Pivot): 12.30 deg (Limites: [10.00, 190.00] deg)
+        m_a = re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)(?:\s*\(Limites:\s*\[([\d\.\-]+),\s*([\d\.\-]+)\]\s*deg\))?', line, re.IGNORECASE)
         if m_a:
             try:
                 self.state.update_telemetry(pos_a_deg=float(m_a.group(1)), pos_a_valid=True)
+                if m_a.group(2) and m_a.group(3):
+                    self.state.update_parameters(
+                        limit_min_deg_a=float(m_a.group(2)),
+                        limit_max_deg_a=float(m_a.group(3))
+                    )
             except ValueError:
                 pass
         elif re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):

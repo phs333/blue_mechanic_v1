@@ -557,65 +557,82 @@ class ParametersView(QWidget):
         for w in widgets:
             w.blockSignals(True)
 
+        def set_spin(w, val):
+            if not w.hasFocus() and w.value() != val:
+                w.setValue(val)
+
+        def set_combo(w, text):
+            if not w.hasFocus() and w.currentText() != text:
+                w.setCurrentText(text)
+
+        def set_chk(w, checked):
+            if not w.hasFocus() and w.isChecked() != checked:
+                w.setChecked(checked)
+
+        def set_txt(w, text):
+            if not w.hasFocus() and w.text() != text:
+                w.setText(text)
+
         if len(p.steps_per_rev) >= 3:
-            self.spin_steps_c.setValue(p.steps_per_rev[0])
-            self.spin_steps_a.setValue(p.steps_per_rev[1])
-            self.spin_steps_z.setValue(p.steps_per_rev[2])
+            set_spin(self.spin_steps_c, p.steps_per_rev[0])
+            set_spin(self.spin_steps_a, p.steps_per_rev[1])
+            set_spin(self.spin_steps_z, p.steps_per_rev[2])
 
         if len(p.speed) >= 3:
-            self.spin_speed_c.setValue(p.speed[0])
-            self.spin_speed_a.setValue(p.speed[1])
-            self.spin_speed_z.setValue(p.speed[2])
+            set_spin(self.spin_speed_c, p.speed[0])
+            set_spin(self.spin_speed_a, p.speed[1])
+            set_spin(self.spin_speed_z, p.speed[2])
 
         if len(p.accel) >= 3:
-            self.spin_accel_c.setValue(p.accel[0])
-            self.spin_accel_a.setValue(p.accel[1])
-            self.spin_accel_z.setValue(p.accel[2])
+            set_spin(self.spin_accel_c, p.accel[0])
+            set_spin(self.spin_accel_a, p.accel[1])
+            set_spin(self.spin_accel_z, p.accel[2])
 
         if len(p.inverter) >= 3:
-            self.chk_inv_hw_c.setChecked(p.inverter[0])
-            self.chk_inv_hw_a.setChecked(p.inverter[1])
-            self.chk_inv_hw_z.setChecked(p.inverter[2])
+            set_chk(self.chk_inv_hw_c, p.inverter[0])
+            set_chk(self.chk_inv_hw_a, p.inverter[1])
+            set_chk(self.chk_inv_hw_z, p.inverter[2])
 
-        self.spin_pulley_z.setValue(p.z_pulley_teeth if p.z_pulley_teeth > 0 else 16)
-        self.spin_max_z.setValue(p.max_passos_z)
-        self.combo_driver_mode.setCurrentIndex(1 if p.driver_bus_mode == 1 else 0)
+        set_spin(self.spin_pulley_z, p.z_pulley_teeth if p.z_pulley_teeth > 0 else 16)
+        set_spin(self.spin_max_z, p.max_passos_z)
+        if not self.combo_driver_mode.hasFocus():
+            self.combo_driver_mode.setCurrentIndex(1 if p.driver_bus_mode == 1 else 0)
 
-        self.spin_limit_min_c.setValue(p.limit_min_deg_c)
-        self.spin_limit_max_c.setValue(p.limit_max_deg_c)
-        self.spin_limit_min_a.setValue(p.limit_min_deg_a)
-        self.spin_limit_max_a.setValue(p.limit_max_deg_a)
+        set_spin(self.spin_limit_min_c, p.limit_min_deg_c)
+        set_spin(self.spin_limit_max_c, p.limit_max_deg_c)
+        set_spin(self.spin_limit_min_a, p.limit_min_deg_a)
+        set_spin(self.spin_limit_max_a, p.limit_max_deg_a)
 
         if len(p.tmc_slave_addr) >= 3:
-            self.spin_tmc_addr_c.setValue(p.tmc_slave_addr[0])
-            self.spin_tmc_addr_a.setValue(p.tmc_slave_addr[1])
-            self.spin_tmc_addr_z.setValue(p.tmc_slave_addr[2])
+            set_spin(self.spin_tmc_addr_c, p.tmc_slave_addr[0])
+            set_spin(self.spin_tmc_addr_a, p.tmc_slave_addr[1])
+            set_spin(self.spin_tmc_addr_z, p.tmc_slave_addr[2])
 
         if len(p.tmc_irun_ma) >= 3:
-            self.spin_tmc_irun_c.setValue(p.tmc_irun_ma[0])
-            self.spin_tmc_irun_a.setValue(p.tmc_irun_ma[1])
-            self.spin_tmc_irun_z.setValue(p.tmc_irun_ma[2])
+            set_spin(self.spin_tmc_irun_c, p.tmc_irun_ma[0])
+            set_spin(self.spin_tmc_irun_a, p.tmc_irun_ma[1])
+            set_spin(self.spin_tmc_irun_z, p.tmc_irun_ma[2])
 
         if len(p.tmc_ihold_ma) >= 3:
-            self.spin_tmc_ihold_c.setValue(p.tmc_ihold_ma[0])
-            self.spin_tmc_ihold_a.setValue(p.tmc_ihold_ma[1])
-            self.spin_tmc_ihold_z.setValue(p.tmc_ihold_ma[2])
+            set_spin(self.spin_tmc_ihold_c, p.tmc_ihold_ma[0])
+            set_spin(self.spin_tmc_ihold_a, p.tmc_ihold_ma[1])
+            set_spin(self.spin_tmc_ihold_z, p.tmc_ihold_ma[2])
 
         if len(p.tmc_microsteps) >= 3:
-            self.combo_tmc_usteps_c.setCurrentText(str(p.tmc_microsteps[0]))
-            self.combo_tmc_usteps_a.setCurrentText(str(p.tmc_microsteps[1]))
-            self.combo_tmc_usteps_z.setCurrentText(str(p.tmc_microsteps[2]))
+            set_combo(self.combo_tmc_usteps_c, str(p.tmc_microsteps[0]))
+            set_combo(self.combo_tmc_usteps_a, str(p.tmc_microsteps[1]))
+            set_combo(self.combo_tmc_usteps_z, str(p.tmc_microsteps[2]))
 
         if len(p.tmc_spreadcycle) >= 3:
-            self.chk_tmc_sc_c.setChecked(p.tmc_spreadcycle[0])
-            self.chk_tmc_sc_a.setChecked(p.tmc_spreadcycle[1])
-            self.chk_tmc_sc_z.setChecked(p.tmc_spreadcycle[2])
+            set_chk(self.chk_tmc_sc_c, p.tmc_spreadcycle[0])
+            set_chk(self.chk_tmc_sc_a, p.tmc_spreadcycle[1])
+            set_chk(self.chk_tmc_sc_z, p.tmc_spreadcycle[2])
 
-        self.spin_node_id.setValue(p.node_id)
-        self.combo_can_bitrate.setCurrentText(str(p.can_bitrate))
-        self.txt_base_cmd.setText(f"0x{p.can_command_base_id:03X}")
-        self.txt_base_status.setText(f"0x{p.can_status_base_id:03X}")
-        self.txt_base_event.setText(f"0x{p.can_event_base_id:03X}")
+        set_spin(self.spin_node_id, p.node_id)
+        set_combo(self.combo_can_bitrate, str(p.can_bitrate))
+        set_txt(self.txt_base_cmd, f"0x{p.can_command_base_id:03X}")
+        set_txt(self.txt_base_status, f"0x{p.can_status_base_id:03X}")
+        set_txt(self.txt_base_event, f"0x{p.can_event_base_id:03X}")
 
         for w in widgets:
             w.blockSignals(False)

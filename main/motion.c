@@ -521,38 +521,58 @@ static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requ
 
 
 
-int32_t motion_plan_limited_steps_direct(float actual_deg, float min_limit_deg, float max_limit_deg,
-                                         float deg_per_step, int32_t requested_steps)
+static float normalize_angle_deg(float angle)
 {
-    if (requested_steps == 0 || !isfinite(actual_deg) || !isfinite(min_limit_deg) ||
-        !isfinite(max_limit_deg) || !isfinite(deg_per_step) || deg_per_step <= 0.0f ||
-        max_limit_deg <= min_limit_deg) {
+    while (angle > 180.0f) {
+        angle -= 360.0f;
+    }
+    while (angle < -180.0f) {
+        angle += 360.0f;
+    }
+    return angle;
+}
+
+int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
+                                  float min_limit_deg, float max_limit_deg,
+                                  float deg_per_step, int32_t requested_steps)
+{
+    if (requested_steps == 0 || !isfinite(actual_deg) || !isfinite(home_deg) ||
+        !isfinite(min_limit_deg) || !isfinite(max_limit_deg) || !isfinite(deg_per_step) ||
+        deg_per_step <= 0.0f || max_limit_deg <= min_limit_deg) {
         return 0;
     }
+
+    // Normalized angular offsets relative to home (-180 to +180 deg)
+    float current_offset_deg = normalize_angle_deg(actual_deg - home_deg);
+    float max_offset_deg = normalize_angle_deg(max_limit_deg - home_deg);
+    float min_offset_deg = normalize_angle_deg(min_limit_deg - home_deg);
+
+    if (max_offset_deg <= 0.0f) max_offset_deg = 90.0f;
+    if (min_offset_deg >= 0.0f) min_offset_deg = -90.0f;
 
     bool moving_positive = (requested_steps > 0);
     float permitted_delta_deg = 0.0f;
 
     if (moving_positive) {
-        if (actual_deg >= max_limit_deg) {
+        if (current_offset_deg >= max_offset_deg) {
             return 0;
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
-        float target_deg = actual_deg + requested_delta_deg;
-        if (target_deg > max_limit_deg) {
-            target_deg = max_limit_deg;
+        float target_offset_deg = current_offset_deg + requested_delta_deg;
+        if (target_offset_deg > max_offset_deg) {
+            target_offset_deg = max_offset_deg;
         }
-        permitted_delta_deg = target_deg - actual_deg;
+        permitted_delta_deg = target_offset_deg - current_offset_deg;
     } else {
-        if (actual_deg <= min_limit_deg) {
+        if (current_offset_deg <= min_offset_deg) {
             return 0;
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
-        float target_deg = actual_deg + requested_delta_deg;
-        if (target_deg < min_limit_deg) {
-            target_deg = min_limit_deg;
+        float target_offset_deg = current_offset_deg + requested_delta_deg;
+        if (target_offset_deg < min_offset_deg) {
+            target_offset_deg = min_offset_deg;
         }
-        permitted_delta_deg = target_deg - actual_deg;
+        permitted_delta_deg = target_offset_deg - current_offset_deg;
     }
 
     int32_t permitted_steps = (int32_t)floorf(fabsf(permitted_delta_deg) / deg_per_step);
@@ -563,33 +583,26 @@ int32_t motion_plan_limited_steps_direct(float actual_deg, float min_limit_deg, 
     return (requested_steps > 0) ? permitted_steps : -permitted_steps;
 }
 
-int32_t motion_plan_limited_steps(float actual_deg, float home_deg, float limit_span_deg,
-                                  float deg_per_step, int32_t requested_steps)
-{
-    float min_limit = home_deg - limit_span_deg;
-    float max_limit = home_deg + limit_span_deg;
-    if (min_limit < 0.0f) min_limit = 0.0f;
-    if (max_limit > 360.0f) max_limit = 360.0f;
-    return motion_plan_limited_steps_direct(actual_deg, min_limit, max_limit, deg_per_step, requested_steps);
-}
-
 static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps,
                                               float speed_override, float accel_override)
 {
     char axis_upper = (char)toupper((unsigned char)axis);
     gpio_num_t dir_pin;
     bool invert;
+    float home_deg = 0.0f;
     float min_limit_deg = 0.0f;
     float max_limit_deg = 360.0f;
 
     if (axis_upper == 'C' || axis_upper == 'X') {
         dir_pin = DIR_C;
         invert = ctx->state.inverter[AXIS_C_ID];
+        home_deg = ctx->settings.home_c_deg;
         min_limit_deg = ctx->settings.limit_min_c_deg;
         max_limit_deg = ctx->settings.limit_max_c_deg;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
         dir_pin = DIR_A;
         invert = ctx->state.inverter[AXIS_A_ID];
+        home_deg = ctx->settings.home_a_deg;
         min_limit_deg = ctx->settings.limit_min_a_deg;
         max_limit_deg = ctx->settings.limit_max_a_deg;
     } else {
@@ -605,8 +618,8 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
 
     float deg_per_step = get_deg_per_step(ctx, axis_upper);
-    int32_t planned_steps = motion_plan_limited_steps_direct(actual_deg, min_limit_deg, max_limit_deg,
-                                                             deg_per_step, requested_steps);
+    int32_t planned_steps = motion_plan_limited_steps(actual_deg, home_deg, min_limit_deg, max_limit_deg,
+                                                      deg_per_step, requested_steps);
     if (planned_steps == 0) {
         ESP_LOGW(APP_TAG,
                  "MOVE %c bloqueado pelo limite: pedido=%ld pos=%.2f limites=[%.2f, %.2f]",

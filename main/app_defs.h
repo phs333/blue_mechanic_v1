@@ -83,7 +83,7 @@
 #define DEFAULT_Z_PULLEY_TEETH 16U
 
 #define INVERTER_C false
-#define INVERTER_A false
+#define INVERTER_A true
 #define INVERTER_X INVERTER_C
 #define INVERTER_Y INVERTER_A
 
@@ -93,7 +93,7 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 8U
+#define SETTINGS_VERSION 9U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
@@ -197,6 +197,7 @@ typedef struct {
     float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     uint16_t z_pulley_teeth;       // número de dentes da polia GT2 no motor Z (ex: 16, 20)
+    uint8_t inverter[AXIS_COUNT];  // inversão de direção persistida por eixo (C, A, Z)
     union {
         struct {
             float limit_min_c_deg;
@@ -292,6 +293,7 @@ typedef struct {
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH, \
+        .inverter = {INVERTER_C, INVERTER_A, false}, \
         .limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG, \
         .limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG, \
         .limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG, \

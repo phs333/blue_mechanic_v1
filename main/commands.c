@@ -243,11 +243,12 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strncmp(cmd, "DRIVER INVERT ", 14) == 0) {
-        char raw_axis = cmd[14];
+    if (strncmp(cmd, "DRIVER INVERT ", 14) == 0 || strncmp(cmd, "INVERT ", 7) == 0) {
+        const char *p = (strncmp(cmd, "DRIVER INVERT ", 14) == 0) ? (cmd + 14) : (cmd + 7);
+        char raw_axis = '\0';
         char state_str[8] = {0};
-        if (sscanf(cmd + 14, "%c %7s", &raw_axis, state_str) != 2) {
-            puts("Uso: DRIVER INVERT C|A|Z ON|OFF");
+        if (sscanf(p, " %c %7s", &raw_axis, state_str) != 2) {
+            puts("Uso: INVERT C|A|Z 0|1|ON|OFF");
             return;
         }
         size_t axis_index = 0;
@@ -256,9 +257,15 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
             return;
         }
-        bool enable = (strcmp(state_str, "ON") == 0);
+        bool enable = (strcmp(state_str, "ON") == 0 || strcmp(state_str, "1") == 0);
         ctx->state.inverter[axis_index] = enable;
-        printf("Inversao %c %s.\n", axis, enable ? "ATIVADA" : "DESATIVADA");
+        ctx->settings.inverter[axis_index] = enable;
+        esp_err_t err = storage_save_settings(&ctx->settings);
+        if (err == ESP_OK) {
+            printf("Inversao de direcao %c %s (salvo na NVS).\n", axis, enable ? "ATIVADA" : "DESATIVADA");
+        } else {
+            printf("Inversao %c %s, mas erro ao salvar NVS: %s\n", axis, enable ? "ATIVADA" : "DESATIVADA", esp_err_to_name(err));
+        }
         return;
     }
 

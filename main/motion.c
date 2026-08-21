@@ -532,6 +532,8 @@ static float normalize_angle_deg(float angle)
     return angle;
 }
 
+#define PLANNER_LIMIT_MARGIN_DEG 0.6f
+
 int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
                                   float min_limit_deg, float max_limit_deg,
                                   float deg_per_step, int32_t requested_steps)
@@ -550,27 +552,41 @@ int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
     if (max_offset_deg <= 0.0f) max_offset_deg = 90.0f;
     if (min_offset_deg >= 0.0f) min_offset_deg = -90.0f;
 
+    // Safety margin to ensure physical motor deceleration and mechanical tolerances stay within boundary
+    float safe_max_offset = max_offset_deg - PLANNER_LIMIT_MARGIN_DEG;
+    float safe_min_offset = min_offset_deg + PLANNER_LIMIT_MARGIN_DEG;
+    if (safe_max_offset <= safe_min_offset) {
+        safe_max_offset = max_offset_deg;
+        safe_min_offset = min_offset_deg;
+    }
+
     bool moving_positive = (requested_steps > 0);
     float permitted_delta_deg = 0.0f;
 
     if (moving_positive) {
-        if (current_offset_deg >= max_offset_deg) {
+        if (current_offset_deg >= safe_max_offset) {
             return 0;
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
         float target_offset_deg = current_offset_deg + requested_delta_deg;
-        if (target_offset_deg > max_offset_deg) {
-            target_offset_deg = max_offset_deg;
+        if (target_offset_deg > safe_max_offset) {
+            target_offset_deg = safe_max_offset;
+        }
+        if (target_offset_deg <= current_offset_deg) {
+            return 0;
         }
         permitted_delta_deg = target_offset_deg - current_offset_deg;
     } else {
-        if (current_offset_deg <= min_offset_deg) {
+        if (current_offset_deg <= safe_min_offset) {
             return 0;
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
         float target_offset_deg = current_offset_deg + requested_delta_deg;
-        if (target_offset_deg < min_offset_deg) {
-            target_offset_deg = min_offset_deg;
+        if (target_offset_deg < safe_min_offset) {
+            target_offset_deg = safe_min_offset;
+        }
+        if (target_offset_deg >= current_offset_deg) {
+            return 0;
         }
         permitted_delta_deg = target_offset_deg - current_offset_deg;
     }

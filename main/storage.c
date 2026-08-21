@@ -46,6 +46,16 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         settings->z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH;
     }
 
+    if (settings->limit_max_c_deg <= settings->limit_min_c_deg || settings->limit_min_c_deg < 0.0f || settings->limit_max_c_deg > 360.0f) {
+        settings->limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG;
+        settings->limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG;
+    }
+
+    if (settings->limit_max_a_deg <= settings->limit_min_a_deg || settings->limit_min_a_deg < 0.0f || settings->limit_max_a_deg > 360.0f) {
+        settings->limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG;
+        settings->limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG;
+    }
+
     return ESP_OK;
 }
 

@@ -16,7 +16,7 @@ import random
 from typing import Optional
 from .base_client import BaseClient
 from .state_model import DeviceState
-from .protocol_defs import FanMode, CanEvent, CanOpcode, PASSOS_POR_MM_Z
+from .protocol_defs import FanMode, calc_ca_degrees_per_step, calc_z_mm_per_step
 
 class SimulatorClient(BaseClient):
     def __init__(self, state: DeviceState):
@@ -184,8 +184,13 @@ class SimulatorClient(BaseClient):
         return True
 
     def request_status(self) -> bool:
-        teeth = self.state.parameters.z_pulley_teeth or 16
-        mm_step = (teeth * 2.0) / 3200.0
+        params = self.state.parameters
+        teeth = params.z_pulley_teeth or 16
+        mm_step = calc_z_mm_per_step(
+            teeth,
+            params.steps_per_rev[2],
+            params.tmc_microsteps[2],
+        )
         pos_mm = self.sim_z_steps * mm_step
         max_mm = self.max_z_steps * mm_step
         self.state.raw_message_received.emit("RX", 
@@ -241,16 +246,30 @@ class SimulatorClient(BaseClient):
         self.state.raw_message_received.emit("RX", f"Home {axis} gravado.")
         return True
 
+    def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
+        axis = axis.upper()
+        if axis in ["C", "X"]:
+            self.state.update_parameters(limit_min_deg_c=min_deg, limit_max_deg_c=max_deg)
+        elif axis in ["A", "Y"]:
+            self.state.update_parameters(limit_min_deg_a=min_deg, limit_max_deg_a=max_deg)
+        self.state.raw_message_received.emit("RX", f"LIMIT {axis} gravado: min={min_deg:.2f} max={max_deg:.2f} deg.")
+        return True
+
     def move_axis(self, axis: str, steps: int, speed: Optional[float] = None, accel: Optional[float] = None, force_no_encoder: bool = False) -> bool:
         axis = axis.upper()
         if not self.drivers_en:
             self.set_driver_enabled(True)
-            
+
+        params = self.state.parameters
         if axis in ["C", "X"]:
-            deg_delta = steps * (360.0 / 3200.0)
+            deg_delta = steps * calc_ca_degrees_per_step(
+                params.steps_per_rev[0], params.tmc_microsteps[0]
+            )
             self.target_c_deg = max(-90.0, min(90.0, self.target_c_deg + deg_delta))
         elif axis in ["A", "Y"]:
-            deg_delta = steps * (360.0 / 3200.0)
+            deg_delta = steps * calc_ca_degrees_per_step(
+                params.steps_per_rev[1], params.tmc_microsteps[1]
+            )
             self.target_a_deg = max(-90.0, min(90.0, self.target_a_deg + deg_delta))
         elif axis == "Z":
             if self.z_locked:
@@ -292,9 +311,19 @@ class SimulatorClient(BaseClient):
         return True
 
     def set_axis_speed(self, axis: str, speed: float) -> bool:
+        axis = axis.upper()
+        index = 0 if axis in ('C', 'X') else (1 if axis in ('A', 'Y') else 2)
+        values = list(self.state.parameters.speed)
+        values[index] = float(speed)
+        self.state.update_parameters(speed=values)
         return True
 
     def set_axis_accel(self, axis: str, accel: float) -> bool:
+        axis = axis.upper()
+        index = 0 if axis in ('C', 'X') else (1 if axis in ('A', 'Y') else 2)
+        values = list(self.state.parameters.accel)
+        values[index] = float(accel)
+        self.state.update_parameters(accel=values)
         return True
 
     def set_z_pulley_teeth(self, teeth: int) -> bool:

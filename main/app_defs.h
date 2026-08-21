@@ -93,10 +93,14 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 7U
+#define SETTINGS_VERSION 8U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
+#define DEFAULT_LIMIT_MIN_C_DEG 10.0f
+#define DEFAULT_LIMIT_MAX_C_DEG 190.0f
+#define DEFAULT_LIMIT_MIN_A_DEG 10.0f
+#define DEFAULT_LIMIT_MAX_A_DEG 190.0f
 #define DEFAULT_MAX_Z_STEPS 20000
 #define DEFAULT_Z_PULLEY_TEETH 16U // Polia padrão GT2 16 dentes no motor Z
 
@@ -193,6 +197,20 @@ typedef struct {
     float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     uint16_t z_pulley_teeth;       // número de dentes da polia GT2 no motor Z (ex: 16, 20)
+    union {
+        struct {
+            float limit_min_c_deg;
+            float limit_max_c_deg;
+            float limit_min_a_deg;
+            float limit_max_a_deg;
+        };
+        struct {
+            float limit_min_x_deg;
+            float limit_max_x_deg;
+            float limit_min_y_deg;
+            float limit_max_y_deg;
+        };
+    };
 } persisted_settings_t;
 
 typedef struct {
@@ -273,7 +291,11 @@ typedef struct {
         .accel = {1800.0f, 1800.0f, 300.0f}, \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
-        .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH \
+        .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH, \
+        .limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG, \
+        .limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG, \
+        .limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG, \
+        .limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \

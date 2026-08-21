@@ -7,7 +7,7 @@ background reception, status polling, and event parsing.
 import threading
 import time
 import struct
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Union
 import can
 
 from .base_client import BaseClient
@@ -17,7 +17,6 @@ from .protocol_defs import (
     STATUS_FLAG_DRIVERS_ENABLED, STATUS_FLAG_Z_BLOQUEADO,
     STATUS_FLAG_ALARME_Z_ATIVO, STATUS_FLAG_TEMP_VALID,
     STATUS_FLAG_TMC_UART_READY, STATUS_FLAG_CAN_ONLINE,
-    speed_level_to_delay, delay_to_speed_level
 )
 
 class CanClient(BaseClient):
@@ -50,14 +49,14 @@ class CanClient(BaseClient):
 
     def connect(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
                 node_id: int = 1, cmd_base: int = 0x200, status_base: int = 0x280, 
-                pos_base: int = 0x290, event_base: int = 0x300, interface: str = "pcan", **kwargs) -> bool:
+                pos_base: Optional[int] = None, event_base: int = 0x300, interface: str = "pcan", **kwargs) -> bool:
         self.disconnect()
         self.channel = channel
         self.bitrate = bitrate
         self.node_id = node_id
         self.cmd_base_id = cmd_base
         self.status_base_id = status_base
-        self.pos_base_id = pos_base
+        self.pos_base_id = status_base + 0x10 if pos_base is None else pos_base
         self.event_base_id = event_base
         self.interface = interface
 
@@ -110,9 +109,14 @@ class CanClient(BaseClient):
             
         self.is_connected = False
         self.state.set_connection_status(False, "PeakCAN")
-        self.state.update_telemetry(can_online=False)
+        self.state.update_telemetry(
+            can_online=False,
+            pos_c_valid=False,
+            pos_a_valid=False,
+            temp_valid=False,
+        )
 
-    def send_frame(self, arbitration_id: int, data: bytearray or bytes, desc: str = "") -> bool:
+    def send_frame(self, arbitration_id: int, data: Union[bytearray, bytes], desc: str = "") -> bool:
         if not self.is_connected or not self.bus:
             return False
             
@@ -166,7 +170,7 @@ class CanClient(BaseClient):
         while not self.stop_event.is_set():
             if self.is_connected:
                 self.request_status()
-            time.sleep(0.5) # Poll status every 500ms
+            self.stop_event.wait(0.5)  # Poll status every 500ms
 
     def _rx_loop(self):
         while not self.stop_event.is_set():
@@ -219,14 +223,11 @@ class CanClient(BaseClient):
                 fan_mode = FanMode(fan_mode_val) if fan_mode_val in [0, 1, 2] else FanMode.MANUAL_OFF
                 speed_lvl = (fan_byte >> 4) & 0x0F
                 
-                # Preserve existing temperature if already valid
-                current_temp_valid = temp_ok or self.state.telemetry.temp_valid
-                
                 self.state.update_telemetry(
                     drivers_enabled=drivers_en,
                     z_bloqueado=z_locked,
                     alarme_z_ativo=alarm_on,
-                    temp_valid=current_temp_valid,
+                    temp_valid=self.state.telemetry.temp_valid if temp_ok else False,
                     tmc_uart_ready=tmc_ready,
                     can_online=can_on,
                     laser1_level=laser1,
@@ -238,25 +239,36 @@ class CanClient(BaseClient):
                 desc = f"STATUS (Node {node}): Drivers={'ON' if drivers_en else 'OFF'} L1={laser1} L2={laser2}"
                 
         elif frame_id == pos_id:
-            # POS_TELEMETRY: Centidegrees C, Centidegrees A, steps Z, Decicelsius Temp
+            # POS_TELEMETRY: unsigned centidegrees C/A, unsigned Z steps,
+            # signed decicelsius. UINT16_MAX / INT16_MIN are invalid sentinels.
             if dlc >= 8:
-                pos_c = struct.unpack('<h', bytes(data[0:2]))[0] / 100.0
-                pos_a = struct.unpack('<h', bytes(data[2:4]))[0] / 100.0
-                pos_z = struct.unpack('<h', bytes(data[4:6]))[0]
+                pos_c_raw = struct.unpack('<H', bytes(data[0:2]))[0]
+                pos_a_raw = struct.unpack('<H', bytes(data[2:4]))[0]
+                pos_z = struct.unpack('<H', bytes(data[4:6]))[0]
                 temp_deci = struct.unpack('<h', bytes(data[6:8]))[0]
-                temp_c = temp_deci / 10.0
-                valid_temp = (-40.0 <= temp_c <= 125.0 and temp_deci != 0)
-                
-                self.state.update_telemetry(
-                    pos_c_deg=pos_c,
-                    pos_a_deg=pos_a,
+                pos_c_valid = pos_c_raw != 0xFFFF and pos_c_raw <= 36000
+                pos_a_valid = pos_a_raw != 0xFFFF and pos_a_raw <= 36000
+                temp_valid = temp_deci != -32768
+                temp_c = temp_deci / 10.0 if temp_valid else self.state.telemetry.temperature_c
+                temp_valid = temp_valid and -55.0 <= temp_c <= 125.0
+
+                updates = dict(
                     pos_z_steps=pos_z,
-                    pos_c_valid=True,
-                    pos_a_valid=True,
+                    pos_c_valid=pos_c_valid,
+                    pos_a_valid=pos_a_valid,
                     temperature_c=temp_c,
-                    temp_valid=valid_temp
+                    temp_valid=temp_valid,
                 )
-                desc = f"POS TELEMETRY: C={pos_c:.2f}° A={pos_a:.2f}° Z={pos_z} Temp={temp_c:.1f}°C"
+                if pos_c_valid:
+                    updates["pos_c_deg"] = pos_c_raw / 100.0
+                if pos_a_valid:
+                    updates["pos_a_deg"] = pos_a_raw / 100.0
+                self.state.update_telemetry(**updates)
+
+                c_text = f"{pos_c_raw / 100.0:.2f}°" if pos_c_valid else "N/A"
+                a_text = f"{pos_a_raw / 100.0:.2f}°" if pos_a_valid else "N/A"
+                temp_text = f"{temp_c:.1f}°C" if temp_valid else "N/A"
+                desc = f"POS TELEMETRY: C={c_text} A={a_text} Z={pos_z} Temp={temp_text}"
                 
         elif frame_id == event_id:
             if dlc > 0:
@@ -334,9 +346,7 @@ class CanClient(BaseClient):
         return self.send_frame(target_id, payload, f"ENABLE {'ON' if enable else 'OFF'}")
 
     def set_alarm_z(self, enable: bool) -> bool:
-        # Fallback to serial / or inform CAN does not have direct alarm switch opcode
-        self.state.update_telemetry(alarme_z_ativo=enable)
-        return True
+        return self._unsupported("Configuração do alarme Z via CAN")
 
     def home_axis(self, axis: str) -> bool:
         axis = axis.upper()
@@ -352,22 +362,45 @@ class CanClient(BaseClient):
         return self.send_frame(target_id, payload, f"HOME {axis}")
 
     def set_home(self, axis: str) -> bool:
-        # SETHOME is configured via parameters in firmware; inform user
-        self.state.raw_message_received.emit("INFO", f"SETHOME via CAN deve ser acionado no firmware.")
+        return self._unsupported("SETHOME via CAN")
+
+    def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
+        ax = axis.lower()
+        if ax in ['c', 'x']:
+            self.state.parameters.limit_min_deg_c = min_deg
+            self.state.parameters.limit_max_deg_c = max_deg
+        elif ax in ['a', 'y']:
+            self.state.parameters.limit_min_deg_a = min_deg
+            self.state.parameters.limit_max_deg_a = max_deg
+        self.state.parameters_updated.emit(self.state.parameters)
         return True
 
     def move_axis(self, axis: str, steps: int, speed: Optional[float] = None, accel: Optional[float] = None, force_no_encoder: bool = False) -> bool:
         target_id = self.cmd_base_id + self.node_id
+        axis_char = self._canonical_axis(axis)
+
+        if (speed is not None and speed > 0) or (accel is not None and accel > 0):
+            speed_value = float(speed) if speed is not None and speed > 0 else 0.0
+            accel_value = int(round(accel)) if accel is not None and accel > 0 else 0
+            accel_value = max(0, min(65535, accel_value))
+            profile = bytearray([CanOpcode.MOVE_PROFILE, ord(axis_char)])
+            profile.extend(struct.pack('<fH', speed_value, accel_value))
+            if not self.send_frame(
+                target_id,
+                bytes(profile),
+                f"MOVE_PROFILE {axis_char} S={speed_value:g} F={accel_value or 'default'}",
+            ):
+                return False
+
         seq = self._next_seq()
-        
         # 32-bit signed int, little endian
         steps_bytes = struct.pack('<i', int(steps))
         opcode = CanOpcode.MOVE_FORCE if force_no_encoder else CanOpcode.MOVE
-        payload = bytearray([opcode, ord(axis[0].upper())])
+        payload = bytearray([opcode, ord(axis_char)])
         payload.extend(steps_bytes)
         payload.append(seq)
         
-        desc = f"{'MOVE_F' if force_no_encoder else 'MOVE'} {axis.upper()} {steps} steps"
+        desc = f"{'MOVE_F' if force_no_encoder else 'MOVE'} {axis_char} {steps} steps"
         return self.send_frame(target_id, bytes(payload), desc)
 
     def set_laser(self, laser_index: int, level: int) -> bool:
@@ -395,13 +428,43 @@ class CanClient(BaseClient):
         return self.send_frame(target_id, payload, f"SPEED -> Level {level}")
 
     def set_axis_speed(self, axis: str, speed: float) -> bool:
-        # Approximate to speed level in CAN
-        return self.set_speed_level(3)
+        axis_char = self._canonical_axis(axis)
+        target_id = self.cmd_base_id + self.node_id
+        payload = bytearray([CanOpcode.AXIS_SPEED, ord(axis_char)])
+        payload.extend(struct.pack('<f', float(speed)))
+        payload.append(self._next_seq())
+        sent = self.send_frame(target_id, bytes(payload), f"SPEED {axis_char} {speed:g}")
+        if sent:
+            index = 'CAZ'.index(axis_char)
+            values = list(self.state.parameters.speed)
+            values[index] = float(speed)
+            self.state.update_parameters(speed=values)
+        return sent
 
     def set_axis_accel(self, axis: str, accel: float) -> bool:
-        return True
+        axis_char = self._canonical_axis(axis)
+        target_id = self.cmd_base_id + self.node_id
+        payload = bytearray([CanOpcode.AXIS_ACCEL, ord(axis_char)])
+        payload.extend(struct.pack('<f', float(accel)))
+        payload.append(self._next_seq())
+        sent = self.send_frame(target_id, bytes(payload), f"ACCEL {axis_char} {accel:g}")
+        if sent:
+            index = 'CAZ'.index(axis_char)
+            values = list(self.state.parameters.accel)
+            values[index] = float(accel)
+            self.state.update_parameters(accel=values)
+        return sent
+
+    @staticmethod
+    def _canonical_axis(axis: str) -> str:
+        token = axis.strip().upper()[:1]
+        if token in ('C', 'X'):
+            return 'C'
+        if token in ('A', 'Y'):
+            return 'A'
+        if token == 'Z':
+            return 'Z'
+        raise ValueError(f"Eixo inválido: {axis!r}")
 
     def set_z_pulley_teeth(self, teeth: int) -> bool:
-        teeth = max(6, min(200, int(teeth)))
-        self.state.update_parameters(z_pulley_teeth=teeth)
-        return True
+        return self._unsupported("Configuração da polia Z via CAN")

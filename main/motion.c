@@ -15,9 +15,13 @@ static float get_deg_per_step(app_context_t *ctx, char axis);
 static float get_step_size(app_context_t *ctx, char axis);
 static size_t axis_to_index(char axis);
 static float normalize_angle_deg(float angle);
-static esp_err_t compute_axis_deviation(app_context_t *ctx, char axis, float *deviation_deg);
-static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps);
-static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps);
+static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps,
+                                              float speed_override, float accel_override);
+static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps,
+                                           float speed_override, float accel_override);
+static void compute_axis_rmt_profile(float step_size, float speed, float accel,
+                                     uint32_t *start_freq_hz, uint32_t *target_freq_hz,
+                                     uint32_t *ramp_steps);
 
 static float get_deg_per_step(app_context_t *ctx, char axis)
 {
@@ -67,14 +71,16 @@ static float get_step_size(app_context_t *ctx, char axis)
     return (float)(teeth * Z_BELT_PITCH_MM) / (spr * (float)msteps);
 }
 
-static uint32_t compute_ramp_steps(app_context_t *ctx, char axis, uint32_t start_delay, uint32_t end_delay, uint32_t total_steps)
+static uint32_t compute_ramp_steps(app_context_t *ctx, char axis, uint32_t start_delay,
+                                   uint32_t end_delay, uint32_t total_steps,
+                                   float accel_override)
 {
     if (total_steps == 0) {
         return 0;
     }
 
     size_t axis_index = axis_to_index(axis);
-    float accel = ctx->settings.accel[axis_index];
+    float accel = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[axis_index];
     if (accel <= 0.0f) {
         return 0;
     }
@@ -182,6 +188,46 @@ uint32_t motion_speed_to_delay_us(app_context_t *ctx, char axis, float speed)
     }
 
     return (uint32_t)delay_us;
+}
+
+float motion_delay_us_to_speed(app_context_t *ctx, char axis, uint32_t delay_us)
+{
+    if (ctx == NULL || delay_us == 0U) {
+        return 0.0f;
+    }
+    return (1000000.0f * get_step_size(ctx, axis)) / (2.0f * (float)delay_us);
+}
+
+static void compute_axis_rmt_profile(float step_size, float speed, float accel,
+                                     uint32_t *start_freq_hz, uint32_t *target_freq_hz,
+                                     uint32_t *ramp_steps)
+{
+    float safe_step_size = (isfinite(step_size) && step_size > 0.0f) ? step_size : 1.0f;
+    float safe_speed = (isfinite(speed) && speed > 0.0f) ? speed : safe_step_size;
+    float safe_accel = (isfinite(accel) && accel > 0.0f) ? accel : safe_step_size;
+
+    uint32_t target = (uint32_t)fmaxf(1.0f, floorf((safe_speed / safe_step_size) + 0.5f));
+    uint32_t start = target;
+    if (target > 1U) {
+        start = target / 3U;
+        if (start == 0U) {
+            start = 1U;
+        }
+    }
+
+    uint32_t ramp = 0U;
+    if (target > start) {
+        float accel_steps_per_s2 = safe_accel / safe_step_size;
+        float ramp_f = ((float)target * (float)target - (float)start * (float)start) /
+                       (2.0f * accel_steps_per_s2);
+        if (isfinite(ramp_f) && ramp_f > 0.0f) {
+            ramp = (uint32_t)fmaxf(1.0f, floorf(ramp_f + 0.5f));
+        }
+    }
+
+    *start_freq_hz = start;
+    *target_freq_hz = target;
+    *ramp_steps = ramp;
 }
 
 
@@ -356,18 +402,11 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
              speed_val = 1.0f;
          }
 
-         uint32_t target_freq_hz = (uint32_t)(speed_val / step_size + 0.5f);
-         uint32_t start_freq_hz = (target_freq_hz > 600U) ? (target_freq_hz / 3U) : 300U;
-         if (start_freq_hz >= target_freq_hz) {
-             start_freq_hz = (target_freq_hz > 150U) ? (target_freq_hz / 2U) : 100U;
-         }
-
-         float accel_steps_per_s2 = accel_val / step_size;
-         float ramp_f = ((float)target_freq_hz * (float)target_freq_hz - (float)start_freq_hz * (float)start_freq_hz) / (2.0f * accel_steps_per_s2);
-         uint32_t ramp_steps = (uint32_t)(ramp_f + 0.5f);
-         if (ramp_steps < 1U) {
-             ramp_steps = 1U;
-         }
+         uint32_t start_freq_hz = 0U;
+         uint32_t target_freq_hz = 0U;
+         uint32_t ramp_steps = 0U;
+         compute_axis_rmt_profile(step_size, speed_val, accel_val,
+                                  &start_freq_hz, &target_freq_hz, &ramp_steps);
 
          uint32_t abs_steps = (uint32_t)labs(requested_steps);
          esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, abs_steps, start_freq_hz, target_freq_hz, ramp_steps);
@@ -409,11 +448,8 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
             target_delay = motion_speed_to_delay_us(ctx, 'Z', speed_override);
         }
         uint32_t start_delay = (target_delay > 2000) ? target_delay : 2000;
-        float save_accel = ctx->settings.accel[AXIS_Z_ID];
-        if (accel_override > 0.0f) {
-            ctx->settings.accel[AXIS_Z_ID] = accel_override;
-        }
-        uint32_t z_ramp = compute_ramp_steps(ctx, 'Z', start_delay, target_delay, (uint32_t)steps);
+        uint32_t z_ramp = compute_ramp_steps(ctx, 'Z', start_delay, target_delay,
+                                             (uint32_t)steps, accel_override);
 
         for (int32_t i = 0; i < steps; ++i) {
             if (!move_up) {
@@ -432,9 +468,6 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
             hardware_step_pulse(STEP_Z, delay);
         }
 
-        if (accel_override > 0.0f) {
-            ctx->settings.accel[AXIS_Z_ID] = save_accel;
-        }
         hardware_rmt_reacquire_pin(STEP_Z);
         xSemaphoreGive(ctx->motion_mutex);
         return ESP_OK;
@@ -443,16 +476,18 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
     return ESP_ERR_INVALID_ARG;
 }
 
-static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requested_steps)
+static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requested_steps,
+                                     float speed_override, float accel_override)
 {
     ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
     char axis_upper = (char)toupper((unsigned char)axis);
     if (axis_upper == 'C' || axis_upper == 'X' || axis_upper == 'A' || axis_upper == 'Y') {
-        return do_motion_move_axis_relative(ctx, axis_upper, requested_steps);
+        return do_motion_move_axis_relative(ctx, axis_upper, requested_steps,
+                                            speed_override, accel_override);
     }
     if (axis_upper == 'Z') {
-        return do_motion_move_z_relative(ctx, requested_steps);
+        return do_motion_move_z_relative(ctx, requested_steps, speed_override, accel_override);
     }
     return ESP_ERR_INVALID_ARG;
 }
@@ -468,44 +503,77 @@ static float normalize_angle_deg(float angle)
     return angle;
 }
 
-static esp_err_t compute_axis_deviation(app_context_t *ctx, char axis, float *deviation_deg)
+int32_t motion_plan_limited_steps_direct(float actual_deg, float min_limit_deg, float max_limit_deg,
+                                         float deg_per_step, int32_t requested_steps)
 {
-    float actual_deg = 0.0f;
-    ESP_RETURN_ON_FALSE(deviation_deg != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "deviation_deg nulo");
-    ESP_RETURN_ON_ERROR(hardware_read_axis_encoder(axis, &actual_deg), APP_TAG, "Falha ao ler encoder");
-
-    float home_deg = 0.0f;
-    char axis_upper = (char)toupper((unsigned char)axis);
-    if (axis_upper == 'C' || axis_upper == 'X') {
-        home_deg = ctx->settings.home_c_deg;
-    } else if (axis_upper == 'A' || axis_upper == 'Y') {
-        home_deg = ctx->settings.home_a_deg;
-    } else {
-        return ESP_ERR_INVALID_ARG;
+    if (requested_steps == 0 || !isfinite(actual_deg) || !isfinite(min_limit_deg) ||
+        !isfinite(max_limit_deg) || !isfinite(deg_per_step) || deg_per_step <= 0.0f ||
+        max_limit_deg <= min_limit_deg) {
+        return 0;
     }
 
-    *deviation_deg = normalize_angle_deg(actual_deg - home_deg);
-    return ESP_OK;
+    bool moving_positive = (requested_steps > 0);
+    float permitted_delta_deg = 0.0f;
+
+    if (moving_positive) {
+        if (actual_deg >= max_limit_deg) {
+            return 0;
+        }
+        float requested_delta_deg = (float)requested_steps * deg_per_step;
+        float target_deg = actual_deg + requested_delta_deg;
+        if (target_deg > max_limit_deg) {
+            target_deg = max_limit_deg;
+        }
+        permitted_delta_deg = target_deg - actual_deg;
+    } else {
+        if (actual_deg <= min_limit_deg) {
+            return 0;
+        }
+        float requested_delta_deg = (float)requested_steps * deg_per_step;
+        float target_deg = actual_deg + requested_delta_deg;
+        if (target_deg < min_limit_deg) {
+            target_deg = min_limit_deg;
+        }
+        permitted_delta_deg = target_deg - actual_deg;
+    }
+
+    int32_t permitted_steps = (int32_t)floorf(fabsf(permitted_delta_deg) / deg_per_step);
+    int64_t requested_magnitude = (requested_steps < 0) ? -(int64_t)requested_steps : (int64_t)requested_steps;
+    if ((int64_t)permitted_steps > requested_magnitude) {
+        permitted_steps = (int32_t)requested_magnitude;
+    }
+    return (requested_steps > 0) ? permitted_steps : -permitted_steps;
 }
 
-static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps)
+int32_t motion_plan_limited_steps(float actual_deg, float home_deg, float limit_span_deg,
+                                  float deg_per_step, int32_t requested_steps)
+{
+    float min_limit = home_deg - limit_span_deg;
+    float max_limit = home_deg + limit_span_deg;
+    if (min_limit < 0.0f) min_limit = 0.0f;
+    if (max_limit > 360.0f) max_limit = 360.0f;
+    return motion_plan_limited_steps_direct(actual_deg, min_limit, max_limit, deg_per_step, requested_steps);
+}
+
+static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps,
+                                              float speed_override, float accel_override)
 {
     char axis_upper = (char)toupper((unsigned char)axis);
     gpio_num_t dir_pin;
     bool invert;
-    float reduction;
-    float home_deg = 0.0f;
+    float min_limit_deg = 0.0f;
+    float max_limit_deg = 360.0f;
 
     if (axis_upper == 'C' || axis_upper == 'X') {
         dir_pin = DIR_C;
         invert = ctx->state.inverter[AXIS_C_ID];
-        reduction = REDUCAO_C;
-        home_deg = ctx->settings.home_c_deg;
+        min_limit_deg = ctx->settings.limit_min_c_deg;
+        max_limit_deg = ctx->settings.limit_max_c_deg;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
         dir_pin = DIR_A;
         invert = ctx->state.inverter[AXIS_A_ID];
-        reduction = REDUCAO_A;
-        home_deg = ctx->settings.home_a_deg;
+        min_limit_deg = ctx->settings.limit_min_a_deg;
+        max_limit_deg = ctx->settings.limit_max_a_deg;
     } else {
         return ESP_ERR_INVALID_ARG;
     }
@@ -513,56 +581,23 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     float actual_deg = 0.0f;
     esp_err_t enc_err = hardware_read_axis_encoder(axis_upper, &actual_deg);
     if (enc_err != ESP_OK) {
-        ESP_LOGW(APP_TAG, "MOVE %c: Encoder indisponivel (%s). Movendo em malha aberta.",
+        ESP_LOGE(APP_TAG, "MOVE %c rejeitado: encoder indisponivel (%s). Use MOVE_F somente se a malha aberta for intencional.",
                  axis_upper, esp_err_to_name(enc_err));
-        return do_motion_move_axis_force(ctx, axis_upper, requested_steps, -1.0f, -1.0f);
+        return enc_err;
     }
 
-    bool moving_positive = (requested_steps > 0);
     float deg_per_step = get_deg_per_step(ctx, axis_upper);
-    float span_deg = LIMITE_GRAUS_CA * reduction; // 90.0 deg
-    float min_limit_deg = home_deg - span_deg;
-    float max_limit_deg = home_deg + span_deg;
-    if (min_limit_deg < 0.0f) min_limit_deg = 0.0f;
-    if (max_limit_deg > 360.0f) max_limit_deg = 360.0f;
-
-    float permitted_move_deg = 0.0f;
-
-    // Check directional limits based on direct absolute encoder degree
-    if (moving_positive) {
-        if (actual_deg >= max_limit_deg) {
-            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo atingiu o limite maximo (%.2f >= %.2f deg | Home=%.2f)",
-                     axis_upper, actual_deg, max_limit_deg, home_deg);
-            return ESP_OK;
-        }
-        float requested_move_deg = fabsf((float)requested_steps) * deg_per_step;
-        float target_deg = actual_deg + requested_move_deg;
-        if (target_deg > max_limit_deg) {
-            target_deg = max_limit_deg;
-        }
-        permitted_move_deg = target_deg - actual_deg;
-    } else {
-        if (actual_deg <= min_limit_deg) {
-            ESP_LOGW(APP_TAG, "MOVE %c bloqueado: eixo atingiu o limite minimo (%.2f <= %.2f deg | Home=%.2f)",
-                     axis_upper, actual_deg, min_limit_deg, home_deg);
-            return ESP_OK;
-        }
-        float requested_move_deg = fabsf((float)requested_steps) * deg_per_step;
-        float target_deg = actual_deg - requested_move_deg;
-        if (target_deg < min_limit_deg) {
-            target_deg = min_limit_deg;
-        }
-        permitted_move_deg = actual_deg - target_deg;
-    }
-
-    if (permitted_move_deg < deg_per_step) {
+    int32_t planned_steps = motion_plan_limited_steps_direct(actual_deg, min_limit_deg, max_limit_deg,
+                                                             deg_per_step, requested_steps);
+    if (planned_steps == 0) {
+        ESP_LOGW(APP_TAG,
+                 "MOVE %c bloqueado pelo limite: pedido=%ld pos=%.2f limites=[%.2f, %.2f]",
+                 axis_upper, (long)requested_steps, actual_deg, min_limit_deg, max_limit_deg);
         return ESP_OK;
     }
-
-    int32_t steps_to_execute = (int32_t)floorf(permitted_move_deg / deg_per_step);
-    if (steps_to_execute <= 0) {
-        return ESP_OK;
-    }
+    bool moving_positive = planned_steps > 0;
+    uint32_t steps_to_execute = (uint32_t)labs(planned_steps);
+    float permitted_move_deg = (float)planned_steps * deg_per_step;
 
     if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -574,42 +609,37 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     }
     gpio_set_level(dir_pin, dir_level ? 1 : 0);
     esp_rom_delay_us(5);
-    ESP_LOGI(APP_TAG, "MOVE %c steps=%d (exec=%ld) dir_pin=%d invert=%d permitted_deg=%.2f pos_deg=%.2f limits=[%.2f, %.2f]",
-             axis_upper, (int)requested_steps, (long)steps_to_execute,
+    ESP_LOGI(APP_TAG, "MOVE %c pedido=%ld exec=%ld dir_pin=%d invert=%d delta=%.2f pos=%.2f limites=[%.2f, %.2f]",
+             axis_upper, (long)requested_steps, (long)planned_steps,
              (int)(dir_level ? 1 : 0),
              (int)invert, permitted_move_deg, actual_deg, min_limit_deg, max_limit_deg);
     size_t axis_idx = axis_to_index(axis_upper);
     float step_size = get_step_size(ctx, axis_upper);
-    float accel_val = ctx->settings.accel[axis_idx];
+    float accel_val = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[axis_idx];
     if (accel_val < 10.0f) {
         accel_val = 10.0f;
     }
-    float speed_val = 1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[axis_idx]) * step_size;
+    float speed_val = (speed_override > 0.0f) ? speed_override :
+                      (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[axis_idx]) * step_size);
     if (speed_val < 1.0f) {
         speed_val = 1.0f;
     }
 
-    uint32_t target_freq_hz = (uint32_t)(speed_val / step_size + 0.5f);
-    uint32_t start_freq_hz = (target_freq_hz > 600U) ? (target_freq_hz / 3U) : 300U;
-    if (start_freq_hz >= target_freq_hz) {
-        start_freq_hz = (target_freq_hz > 150U) ? (target_freq_hz / 2U) : 100U;
-    }
+    uint32_t start_freq_hz = 0U;
+    uint32_t target_freq_hz = 0U;
+    uint32_t ramp_steps = 0U;
+    compute_axis_rmt_profile(step_size, speed_val, accel_val,
+                             &start_freq_hz, &target_freq_hz, &ramp_steps);
 
-    float accel_steps_per_s2 = accel_val / step_size;
-    float ramp_f = ((float)target_freq_hz * (float)target_freq_hz - (float)start_freq_hz * (float)start_freq_hz) / (2.0f * accel_steps_per_s2);
-    uint32_t ramp_steps = (uint32_t)(ramp_f + 0.5f);
-    if (ramp_steps < 1U) {
-        ramp_steps = 1U;
-    }
-
-    uint32_t abs_steps = (uint32_t)steps_to_execute;
-    esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, abs_steps, start_freq_hz, target_freq_hz, ramp_steps);
+    esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, steps_to_execute,
+                                                     start_freq_hz, target_freq_hz, ramp_steps);
 
     xSemaphoreGive(ctx->motion_mutex);
     return rmt_err;
 }
 
-static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps)
+static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps,
+                                           float speed_override, float accel_override)
 {
     if (ctx->state.z_bloqueado) {
         return ESP_ERR_INVALID_STATE;
@@ -637,6 +667,13 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
              (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),
              (int)Z_DIR_UP, (int)Z_DIR_DOWN);
 
+    uint32_t target_delay = (speed_override > 0.0f) ?
+                            motion_speed_to_delay_us(ctx, 'Z', speed_override) :
+                            ctx->state.speed_delay_us[AXIS_Z_ID];
+    uint32_t start_delay = (target_delay > 2000U) ? target_delay : 2000U;
+    uint32_t z_ramp = compute_ramp_steps(ctx, 'Z', start_delay, target_delay,
+                                         (uint32_t)steps, accel_override);
+
     for (int32_t i = 0; i < steps; ++i) {
         if (!move_up) {
             if (ctx->state.atual_z <= 0 || hardware_is_z_switch_pressed()) {
@@ -650,9 +687,6 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
             }
             ctx->state.atual_z++;
         }
-        uint32_t target_delay = ctx->state.speed_delay_us[AXIS_Z_ID];
-        uint32_t start_delay = (target_delay > 2000) ? target_delay : 2000;
-        uint32_t z_ramp = compute_ramp_steps(ctx, 'Z', start_delay, target_delay, (uint32_t)steps);
         uint32_t delay = hardware_compute_step_delay(start_delay, target_delay, (uint32_t)i, (uint32_t)steps, z_ramp);
         hardware_step_pulse(STEP_Z, delay);
         if ((i & 0xFFFU) == 0U) {
@@ -771,7 +805,8 @@ static void motion_task(void *arg)
             ESP_LOGI(APP_TAG, "motion_task recebeu cmd type=%d axis=%c steps=%d opcode=0x%02X", (int)cmd.type, cmd.axis, (int)cmd.steps, cmd.opcode);
             switch (cmd.type) {
             case MOTION_CMD_MOVE_REL:
-                err = do_motion_move_axis(ctx, cmd.axis, cmd.steps);
+                err = do_motion_move_axis(ctx, cmd.axis, cmd.steps,
+                                          cmd.speed_override, cmd.accel_override);
                 break;
             case MOTION_CMD_MOVE_FORCE:
                 err = do_motion_move_axis_force(ctx, cmd.axis, cmd.steps, cmd.speed_override, cmd.accel_override);
@@ -819,6 +854,10 @@ static esp_err_t validate_motion_enqueue_request(app_context_t *ctx, char axis, 
 
     char axis_upper = (char)toupper((unsigned char)axis);
     if (axis_upper != 'C' && axis_upper != 'X' && axis_upper != 'A' && axis_upper != 'Y' && axis_upper != 'Z') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (steps == INT32_MIN) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -889,11 +928,36 @@ esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t ste
 
 esp_err_t motion_post_move_axis_with_params(app_context_t *ctx, char axis, int32_t steps, float speed, float accel, uint8_t sender_id, uint8_t opcode)
 {
-    ESP_RETURN_ON_ERROR(validate_motion_enqueue_request(ctx, axis, steps), APP_TAG, "movimento parametrizado rejeitado");
+    return motion_post_move_axis_profile(ctx, axis, steps, speed, accel, true,
+                                         sender_id, opcode);
+}
+
+esp_err_t motion_post_move_axis_profile(app_context_t *ctx, char axis, int32_t steps,
+                                        float speed, float accel, bool force_no_encoder,
+                                        uint8_t sender_id, uint8_t opcode)
+{
+    ESP_RETURN_ON_ERROR(validate_motion_enqueue_request(ctx, axis, steps), APP_TAG,
+                        "movimento parametrizado rejeitado");
+    ESP_RETURN_ON_FALSE((speed < 0.0f || isfinite(speed)) && (accel < 0.0f || isfinite(accel)),
+                        ESP_ERR_INVALID_ARG, APP_TAG, "perfil de movimento invalido");
+
+    char axis_upper = (char)toupper((unsigned char)axis);
+    if (speed > 0.0f) {
+        bool speed_valid = (axis_upper == 'Z') ?
+                           (speed >= SPEED_MIN_MM_S_Z && speed <= SPEED_MAX_MM_S_Z) :
+                           (speed >= SPEED_MIN_DEG_S_CA && speed <= SPEED_MAX_DEG_S_CA);
+        ESP_RETURN_ON_FALSE(speed_valid, ESP_ERR_INVALID_ARG, APP_TAG, "velocidade fora da faixa");
+    }
+    if (accel > 0.0f) {
+        bool accel_valid = (axis_upper == 'Z') ?
+                           (accel >= ACCEL_MIN_MM_S2_Z && accel <= ACCEL_MAX_MM_S2_Z) :
+                           (accel >= ACCEL_MIN_DEG_S2_CA && accel <= ACCEL_MAX_DEG_S2_CA);
+        ESP_RETURN_ON_FALSE(accel_valid, ESP_ERR_INVALID_ARG, APP_TAG, "aceleracao fora da faixa");
+    }
 
     motion_cmd_t cmd = {
-        .type = MOTION_CMD_MOVE_FORCE,
-        .axis = (char)toupper((unsigned char)axis),
+        .type = force_no_encoder ? MOTION_CMD_MOVE_FORCE : MOTION_CMD_MOVE_REL,
+        .axis = axis_upper,
         .steps = steps,
         .sender_node_id = sender_id,
         .opcode = opcode,
@@ -935,5 +999,3 @@ esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t ste
     };
     return enqueue_motion_cmd(ctx, &cmd);
 }
-
-

@@ -9,19 +9,21 @@ from PyQt6.QtWidgets import (
     QCheckBox, QButtonGroup
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from python_app.core.protocol_defs import GRAUS_POR_PASSO_CA
+from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm
+from python_app.core.state_model import DeviceState
 
 class JogPad(QFrame):
     # Emits (axis: 'C'|'A'|'Z', steps: int, force_no_encoder: bool)
     jog_requested = pyqtSignal(str, int, bool)
     home_requested = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, state: DeviceState, parent=None):
         super().__init__(parent)
+        self.state = state
         self.setProperty("class", "card")
         
         self.current_step_deg = 15.0
-        self.current_step_z_steps = 400
+        self.current_step_z_mm = 4.0
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 14, 16, 14)
@@ -70,19 +72,14 @@ class JogPad(QFrame):
         
         self.z_step_group = QButtonGroup(self)
         self.z_pills = {}
-        z_presets = [
-            (50, "0.5 mm"),
-            (100, "1.0 mm"),
-            (400, "4.0 mm"),
-            (1000, "10 mm"),
-            (2000, "20 mm")
-        ]
-        for st, lbl in z_presets:
+        z_presets = [0.5, 1.0, 4.0, 10.0, 20.0]
+        for mm in z_presets:
+            lbl = f"{mm:g} mm"
             btn = QPushButton(lbl)
-            btn.setProperty("class", "step-pill-active" if st == 400 else "step-pill")
-            btn.clicked.connect(lambda checked, s=st: self._set_z_step(s))
+            btn.setProperty("class", "step-pill-active" if mm == 4.0 else "step-pill")
+            btn.clicked.connect(lambda checked, value=mm: self._set_z_step(value))
             self.z_step_group.addButton(btn)
-            self.z_pills[st] = btn
+            self.z_pills[mm] = btn
             z_pill_layout.addWidget(btn)
             
         z_pill_layout.addStretch()
@@ -197,15 +194,21 @@ class JogPad(QFrame):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
-    def _set_z_step(self, steps: int):
-        self.current_step_z_steps = steps
-        for s, btn in self.z_pills.items():
-            btn.setProperty("class", "step-pill-active" if s == steps else "step-pill")
+    def _set_z_step(self, mm: float):
+        self.current_step_z_mm = mm
+        for value, btn in self.z_pills.items():
+            btn.setProperty("class", "step-pill-active" if value == mm else "step-pill")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
     def _on_jog_ca(self, axis: str, direction_multiplier: int):
-        steps = int(round(self.current_step_deg / GRAUS_POR_PASSO_CA))
+        axis_index = 0 if axis == 'C' else 1
+        params = self.state.parameters
+        steps = calc_ca_steps_for_degrees(
+            self.current_step_deg,
+            params.steps_per_rev[axis_index],
+            params.tmc_microsteps[axis_index],
+        )
         if axis == 'C' and self.chk_inv_c.isChecked():
             direction_multiplier *= -1
         elif axis == 'A' and self.chk_inv_a.isChecked():
@@ -218,4 +221,11 @@ class JogPad(QFrame):
         if self.chk_inv_z.isChecked():
             direction_multiplier *= -1
         force = self.chk_force.isChecked()
-        self.jog_requested.emit('Z', self.current_step_z_steps * direction_multiplier, force)
+        params = self.state.parameters
+        steps = calc_z_steps_for_mm(
+            self.current_step_z_mm,
+            params.z_pulley_teeth,
+            params.steps_per_rev[2],
+            params.tmc_microsteps[2],
+        )
+        self.jog_requested.emit('Z', steps * direction_multiplier, force)

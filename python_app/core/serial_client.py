@@ -256,12 +256,24 @@ class SerialClient(BaseClient):
         m_cfg_spd = re.search(r'CONFIG SPEED C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_spd:
             c, a, z = float(m_cfg_spd.group(1)), float(m_cfg_spd.group(2)), float(m_cfg_spd.group(3))
+            self.state.parameters.speed = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_spd_max = re.search(r'CONFIG SPEED_MAX C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_spd_max:
+            c, a, z = float(m_cfg_spd_max.group(1)), float(m_cfg_spd_max.group(2)), float(m_cfg_spd_max.group(3))
             self.state.parameters.speed_max = [c, a, z]
             self.state.parameters_updated.emit(self.state.parameters)
 
         m_cfg_acc = re.search(r'CONFIG ACCEL C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_acc:
             c, a, z = float(m_cfg_acc.group(1)), float(m_cfg_acc.group(2)), float(m_cfg_acc.group(3))
+            self.state.parameters.accel = [c, a, z]
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_acc_max = re.search(r'CONFIG ACCEL_MAX C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_acc_max:
+            c, a, z = float(m_cfg_acc_max.group(1)), float(m_cfg_acc_max.group(2)), float(m_cfg_acc_max.group(3))
             self.state.parameters.accel_max = [c, a, z]
             self.state.parameters_updated.emit(self.state.parameters)
 
@@ -278,6 +290,27 @@ class SerialClient(BaseClient):
             self.state.parameters.z_pulley_teeth = teeth
             self.state.parameters.max_passos_z = max_z
             self.state.telemetry.max_z_steps = max_z
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_cfg_lim = re.search(r'CONFIG LIMITS C=([\d\.\-]+)\.\.([\d\.\-]+)\s+A=([\d\.\-]+)\.\.([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_lim:
+            self.state.parameters.limit_min_deg_c = float(m_cfg_lim.group(1))
+            self.state.parameters.limit_max_deg_c = float(m_cfg_lim.group(2))
+            self.state.parameters.limit_min_deg_a = float(m_cfg_lim.group(3))
+            self.state.parameters.limit_max_deg_a = float(m_cfg_lim.group(4))
+            self.state.parameters_updated.emit(self.state.parameters)
+
+        m_lim_resp = re.search(r'LIMIT\s+([CA])\s+gravado:\s+min=([\d\.\-]+)\s+max=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_lim_resp:
+            ax = m_lim_resp.group(1).upper()
+            mn = float(m_lim_resp.group(2))
+            mx = float(m_lim_resp.group(3))
+            if ax == 'C':
+                self.state.parameters.limit_min_deg_c = mn
+                self.state.parameters.limit_max_deg_c = mx
+            else:
+                self.state.parameters.limit_min_deg_a = mn
+                self.state.parameters.limit_max_deg_a = mx
             self.state.parameters_updated.emit(self.state.parameters)
 
         m_cfg_mode = re.search(r'CONFIG DRIVER_BUS_MODE=(\d+)', line, re.IGNORECASE)
@@ -375,6 +408,9 @@ class SerialClient(BaseClient):
 
     def set_home(self, axis: str) -> bool:
         return self.send_raw(f"SETHOME {axis.upper()}")
+
+    def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
+        return self.send_raw(f"LIMIT {axis.upper()} {min_deg:.2f} {max_deg:.2f}")
 
     def move_axis(self, axis: str, steps: int, speed: Optional[float] = None, accel: Optional[float] = None, force_no_encoder: bool = False) -> bool:
         cmd_name = "MOVE_F" if force_no_encoder else "MOVE"

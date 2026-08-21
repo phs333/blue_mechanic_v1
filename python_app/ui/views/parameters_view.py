@@ -137,13 +137,16 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_c, 1, 1)
         
         self.spin_speed_c = QDoubleSpinBox()
-        self.spin_speed_c.setRange(1.0, 2000.0)
-        self.spin_speed_c.setValue(360.0)
+        self.spin_speed_c.setRange(0.1, 10000.0)
+        self.spin_speed_c.setDecimals(2)
+        self.spin_speed_c.setValue(140.625)
+        self.spin_speed_c.setSuffix(" °/s")
         kin_grid.addWidget(self.spin_speed_c, 1, 2)
         
         self.spin_accel_c = QDoubleSpinBox()
-        self.spin_accel_c.setRange(10.0, 10000.0)
+        self.spin_accel_c.setRange(1.0, 50000.0)
         self.spin_accel_c.setValue(1800.0)
+        self.spin_accel_c.setSuffix(" °/s²")
         kin_grid.addWidget(self.spin_accel_c, 1, 3)
         
         # Axis A (Pivot dos Lasers)
@@ -155,13 +158,16 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_a, 2, 1)
         
         self.spin_speed_a = QDoubleSpinBox()
-        self.spin_speed_a.setRange(1.0, 2000.0)
-        self.spin_speed_a.setValue(360.0)
+        self.spin_speed_a.setRange(0.1, 10000.0)
+        self.spin_speed_a.setDecimals(2)
+        self.spin_speed_a.setValue(140.625)
+        self.spin_speed_a.setSuffix(" °/s")
         kin_grid.addWidget(self.spin_speed_a, 2, 2)
         
         self.spin_accel_a = QDoubleSpinBox()
-        self.spin_accel_a.setRange(10.0, 10000.0)
+        self.spin_accel_a.setRange(1.0, 50000.0)
         self.spin_accel_a.setValue(1800.0)
+        self.spin_accel_a.setSuffix(" °/s²")
         kin_grid.addWidget(self.spin_accel_a, 2, 3)
         
         # Axis Z (Linear)
@@ -173,13 +179,17 @@ class ParametersView(QWidget):
         kin_grid.addWidget(self.spin_steps_z, 3, 1)
         
         self.spin_speed_z = QDoubleSpinBox()
-        self.spin_speed_z.setRange(0.1, 150.0)
-        self.spin_speed_z.setValue(25.0)
+        self.spin_speed_z.setRange(0.01, 500.0)
+        self.spin_speed_z.setDecimals(2)
+        self.spin_speed_z.setValue(12.5)
+        self.spin_speed_z.setSuffix(" mm/s")
         kin_grid.addWidget(self.spin_speed_z, 3, 2)
         
         self.spin_accel_z = QDoubleSpinBox()
-        self.spin_accel_z.setRange(1.0, 2000.0)
+        self.spin_accel_z.setRange(0.1, 5000.0)
+        self.spin_accel_z.setDecimals(2)
         self.spin_accel_z.setValue(300.0)
+        self.spin_accel_z.setSuffix(" mm/s²")
         kin_grid.addWidget(self.spin_accel_z, 3, 3)
         
         kin_layout.addLayout(kin_grid)
@@ -220,6 +230,68 @@ class ParametersView(QWidget):
         kin_layout.addWidget(z_extra_frame)
         main_layout.addWidget(kin_card)
         
+        # --- Limites Angulares dos Eixos C e A Card ---
+        limits_card = QFrame()
+        limits_card.setProperty("class", "card")
+        limits_layout = QVBoxLayout(limits_card)
+        limits_layout.setContentsMargins(16, 14, 16, 14)
+        limits_layout.setSpacing(12)
+        
+        limits_title = QLabel("3. Limites Angulares de Curso dos Encoders (NVS)")
+        limits_title.setProperty("class", "section-title")
+        limits_layout.addWidget(limits_title)
+        
+        limits_grid = QGridLayout()
+        limits_grid.setSpacing(10)
+        
+        limits_grid.addWidget(QLabel("Eixo"), 0, 0)
+        limits_grid.addWidget(QLabel("Limite Mínimo (°)"), 0, 1)
+        limits_grid.addWidget(QLabel("Limite Máximo (°)"), 0, 2)
+        limits_grid.addWidget(QLabel("Ação"), 0, 3)
+        
+        # Eixo C
+        limits_grid.addWidget(QLabel("Eixo C (Base Rotativa):"), 1, 0)
+        self.spin_limit_min_c = QDoubleSpinBox()
+        self.spin_limit_min_c.setRange(0.0, 360.0)
+        self.spin_limit_min_c.setDecimals(2)
+        self.spin_limit_min_c.setValue(10.0)
+        self.spin_limit_min_c.setSuffix(" °")
+        limits_grid.addWidget(self.spin_limit_min_c, 1, 1)
+        
+        self.spin_limit_max_c = QDoubleSpinBox()
+        self.spin_limit_max_c.setRange(0.0, 360.0)
+        self.spin_limit_max_c.setDecimals(2)
+        self.spin_limit_max_c.setValue(190.0)
+        self.spin_limit_max_c.setSuffix(" °")
+        limits_grid.addWidget(self.spin_limit_max_c, 1, 2)
+        
+        self.btn_save_limit_c = QPushButton("💾 Salvar Limites C")
+        self.btn_save_limit_c.clicked.connect(self._save_limit_c)
+        limits_grid.addWidget(self.btn_save_limit_c, 1, 3)
+        
+        # Eixo A
+        limits_grid.addWidget(QLabel("Eixo A (Pivot Lasers):"), 2, 0)
+        self.spin_limit_min_a = QDoubleSpinBox()
+        self.spin_limit_min_a.setRange(0.0, 360.0)
+        self.spin_limit_min_a.setDecimals(2)
+        self.spin_limit_min_a.setValue(10.0)
+        self.spin_limit_min_a.setSuffix(" °")
+        limits_grid.addWidget(self.spin_limit_min_a, 2, 1)
+        
+        self.spin_limit_max_a = QDoubleSpinBox()
+        self.spin_limit_max_a.setRange(0.0, 360.0)
+        self.spin_limit_max_a.setDecimals(2)
+        self.spin_limit_max_a.setValue(190.0)
+        self.spin_limit_max_a.setSuffix(" °")
+        limits_grid.addWidget(self.spin_limit_max_a, 2, 2)
+        
+        self.btn_save_limit_a = QPushButton("💾 Salvar Limites A")
+        self.btn_save_limit_a.clicked.connect(self._save_limit_a)
+        limits_grid.addWidget(self.btn_save_limit_a, 2, 3)
+        
+        limits_layout.addLayout(limits_grid)
+        main_layout.addWidget(limits_card)
+        
         # --- 2. TMC2209 Driver UART Config Card ---
         tmc_card = QFrame()
         tmc_card.setProperty("class", "card")
@@ -227,7 +299,7 @@ class ParametersView(QWidget):
         tmc_layout.setContentsMargins(16, 14, 16, 14)
         tmc_layout.setSpacing(12)
         
-        tmc_title = QLabel("3. Configuração Avançada dos Drivers TMC2209")
+        tmc_title = QLabel("4. Configuração Avançada dos Drivers TMC2209")
         tmc_title.setProperty("class", "section-title")
         tmc_layout.addWidget(tmc_title)
         
@@ -479,7 +551,8 @@ class ParametersView(QWidget):
             self.spin_tmc_ihold_c, self.spin_tmc_ihold_a, self.spin_tmc_ihold_z,
             self.combo_tmc_usteps_c, self.combo_tmc_usteps_a, self.combo_tmc_usteps_z,
             self.chk_tmc_sc_c, self.chk_tmc_sc_a, self.chk_tmc_sc_z,
-            self.spin_node_id, self.combo_can_bitrate, self.txt_base_cmd, self.txt_base_status, self.txt_base_event
+            self.spin_node_id, self.combo_can_bitrate, self.txt_base_cmd, self.txt_base_status, self.txt_base_event,
+            self.spin_limit_min_c, self.spin_limit_max_c, self.spin_limit_min_a, self.spin_limit_max_a
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -489,15 +562,15 @@ class ParametersView(QWidget):
             self.spin_steps_a.setValue(p.steps_per_rev[1])
             self.spin_steps_z.setValue(p.steps_per_rev[2])
 
-        if len(p.speed_max) >= 3:
-            self.spin_speed_c.setValue(p.speed_max[0])
-            self.spin_speed_a.setValue(p.speed_max[1])
-            self.spin_speed_z.setValue(p.speed_max[2])
+        if len(p.speed) >= 3:
+            self.spin_speed_c.setValue(p.speed[0])
+            self.spin_speed_a.setValue(p.speed[1])
+            self.spin_speed_z.setValue(p.speed[2])
 
-        if len(p.accel_max) >= 3:
-            self.spin_accel_c.setValue(p.accel_max[0])
-            self.spin_accel_a.setValue(p.accel_max[1])
-            self.spin_accel_z.setValue(p.accel_max[2])
+        if len(p.accel) >= 3:
+            self.spin_accel_c.setValue(p.accel[0])
+            self.spin_accel_a.setValue(p.accel[1])
+            self.spin_accel_z.setValue(p.accel[2])
 
         if len(p.inverter) >= 3:
             self.chk_inv_hw_c.setChecked(p.inverter[0])
@@ -507,6 +580,11 @@ class ParametersView(QWidget):
         self.spin_pulley_z.setValue(p.z_pulley_teeth if p.z_pulley_teeth > 0 else 16)
         self.spin_max_z.setValue(p.max_passos_z)
         self.combo_driver_mode.setCurrentIndex(1 if p.driver_bus_mode == 1 else 0)
+
+        self.spin_limit_min_c.setValue(p.limit_min_deg_c)
+        self.spin_limit_max_c.setValue(p.limit_max_deg_c)
+        self.spin_limit_min_a.setValue(p.limit_min_deg_a)
+        self.spin_limit_max_a.setValue(p.limit_max_deg_a)
 
         if len(p.tmc_slave_addr) >= 3:
             self.spin_tmc_addr_c.setValue(p.tmc_slave_addr[0])
@@ -544,27 +622,54 @@ class ParametersView(QWidget):
 
         self._update_kinematics_preview()
 
+    def _save_limit_c(self):
+        min_v = self.spin_limit_min_c.value()
+        max_v = self.spin_limit_max_c.value()
+        if min_v >= max_v:
+            QMessageBox.warning(self, "Limites Inválidos", "O limite mínimo de C deve ser menor que o máximo.")
+            return
+        if self.comm.set_axis_limits('C', min_v, max_v):
+            QMessageBox.information(self, "Sucesso", f"Limites Eixo C gravados na NVS: [{min_v:.2f}, {max_v:.2f}]°")
+        else:
+            QMessageBox.warning(self, "Erro", "Não foi possível enviar comando LIMIT C.")
+
+    def _save_limit_a(self):
+        min_v = self.spin_limit_min_a.value()
+        max_v = self.spin_limit_max_a.value()
+        if min_v >= max_v:
+            QMessageBox.warning(self, "Limites Inválidos", "O limite mínimo de A deve ser menor que o máximo.")
+            return
+        if self.comm.set_axis_limits('A', min_v, max_v):
+            QMessageBox.information(self, "Sucesso", f"Limites Eixo A gravados na NVS: [{min_v:.2f}, {max_v:.2f}]°")
+        else:
+            QMessageBox.warning(self, "Erro", "Não foi possível enviar comando LIMIT A.")
+
     def _apply_tmc_settings(self):
         client = self.comm.active_client
         if client:
             target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
             # Always ensure UART is active to write TMC registers
-            client.set_driver_mode("UART")
-            client.apply_driver_settings()
-            
-            client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6)
-            client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6)
-            client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6)
-            client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked())
-            client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked())
-            client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked())
-            client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText()))
-            client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText()))
-            client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText()))
-            
+            results = [
+                client.set_driver_mode("UART"),
+                client.apply_driver_settings(),
+                client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
+                client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
+                client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
+                client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
+                client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
+                client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
+                client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
+                client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
+                client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
+            ]
+
             # Restore and apply configured driver mode
-            client.set_driver_mode(target_mode)
-            client.apply_driver_settings()
+            results.extend([
+                client.set_driver_mode(target_mode),
+                client.apply_driver_settings(),
+            ])
+            return all(results)
+        return False
 
     def _apply_can_settings(self):
         try:
@@ -574,42 +679,67 @@ class ParametersView(QWidget):
             status_base = int(self.txt_base_status.text(), 16)
             event_base = int(self.txt_base_event.text(), 16)
             if hasattr(self.comm.active_client, 'configure_can'):
-                self.comm.active_client.configure_can(node_id, bitrate, cmd_base, status_base, event_base)
+                return self.comm.active_client.configure_can(node_id, bitrate, cmd_base, status_base, event_base)
         except ValueError as e:
             QMessageBox.warning(self, "Valor Inválido", f"Formato hexadecimal incorreto nas bases CAN: {e}")
+        return False
 
     def _apply_all_parameters(self):
         client = self.comm.active_client
         if client:
             # 1. Steps
-            client.set_steps_per_rev('C', self.spin_steps_c.value())
-            client.set_steps_per_rev('A', self.spin_steps_a.value())
-            client.set_steps_per_rev('Z', self.spin_steps_z.value())
+            results = [
+                client.set_steps_per_rev('C', self.spin_steps_c.value()),
+                client.set_steps_per_rev('A', self.spin_steps_a.value()),
+                client.set_steps_per_rev('Z', self.spin_steps_z.value()),
+            ]
             
             # 2. Speeds & Accel
-            client.set_axis_speed('C', self.spin_speed_c.value())
-            client.set_axis_speed('A', self.spin_speed_a.value())
-            client.set_axis_speed('Z', self.spin_speed_z.value())
-            client.set_axis_accel('C', self.spin_accel_c.value())
-            client.set_axis_accel('A', self.spin_accel_a.value())
-            client.set_axis_accel('Z', self.spin_accel_z.value())
+            results.extend([
+                client.set_axis_speed('C', self.spin_speed_c.value()),
+                client.set_axis_speed('A', self.spin_speed_a.value()),
+                client.set_axis_speed('Z', self.spin_speed_z.value()),
+                client.set_axis_accel('C', self.spin_accel_c.value()),
+                client.set_axis_accel('A', self.spin_accel_a.value()),
+                client.set_axis_accel('Z', self.spin_accel_z.value()),
+            ])
             
             # 3. Inverts
-            client.set_driver_invert('C', self.chk_inv_hw_c.isChecked())
-            client.set_driver_invert('A', self.chk_inv_hw_a.isChecked())
-            client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked())
+            results.extend([
+                client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
+                client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
+                client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
+            ])
             
             # 4. Pulley Z & Max Z
-            client.set_z_pulley_teeth(self.spin_pulley_z.value())
-            client.set_length_z(self.spin_max_z.value())
+            results.extend([
+                client.set_z_pulley_teeth(self.spin_pulley_z.value()),
+                client.set_length_z(self.spin_max_z.value()),
+            ])
+
+            # 5. Angular Limits C & A
+            results.extend([
+                client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
+                client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
+            ])
             
-            # 5. TMC settings (handles temporary UART mode and restore)
-            self._apply_tmc_settings()
+            # 6. TMC settings (handles temporary UART mode and restore)
+            results.append(self._apply_tmc_settings())
             
-            # 6. CAN settings
-            self._apply_can_settings()
+            # 7. CAN settings
+            results.append(self._apply_can_settings())
             
-            # 7. Refresh and read back
-            self.comm.request_status()
-            
-        QMessageBox.information(self, "Sucesso", "Todas as configurações e parâmetros foram gravados na NVS do hardware!")
+            # 8. Refresh and read back
+            results.append(self.comm.request_status())
+
+            if all(results):
+                QMessageBox.information(self, "Sucesso", "Todas as configurações foram enviadas ao hardware.")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Aplicação Parcial",
+                    "Algumas configurações não são suportadas pela interface ativa ou não puderam ser enviadas. "
+                    "Consulte a barra de status/terminal.",
+                )
+        else:
+            QMessageBox.warning(self, "Sem conexão", "Conecte ao hardware antes de aplicar parâmetros.")

@@ -7,7 +7,7 @@ stacked views, and real-time status bar.
 import time
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QComboBox, QFrame, QStatusBar, QMessageBox
+    QStackedWidget, QComboBox, QFrame, QStatusBar, QMessageBox, QSpinBox
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
@@ -165,16 +165,26 @@ class MainWindow(QMainWindow):
         self.lbl_can_bit = QLabel("Bitrate:", top_bar)
         self.combo_can_bit = QComboBox(top_bar)
         self.combo_can_bit.addItems(["500000", "250000", "125000", "1000000"])
+
+        self.lbl_can_node = QLabel("Node:", top_bar)
+        self.spin_can_node = QSpinBox(top_bar)
+        self.spin_can_node.setRange(1, 127)
+        self.spin_can_node.setValue(self.state.parameters.node_id)
+        self.spin_can_node.setToolTip("Node ID usado para calcular os IDs CAN de comando e telemetria")
         
         top_bar_layout.addWidget(self.lbl_can_chan)
         top_bar_layout.addWidget(self.combo_can_chan)
         top_bar_layout.addWidget(self.lbl_can_bit)
         top_bar_layout.addWidget(self.combo_can_bit)
+        top_bar_layout.addWidget(self.lbl_can_node)
+        top_bar_layout.addWidget(self.spin_can_node)
         
         self.lbl_can_chan.setVisible(False)
         self.combo_can_chan.setVisible(False)
         self.lbl_can_bit.setVisible(False)
         self.combo_can_bit.setVisible(False)
+        self.lbl_can_node.setVisible(False)
+        self.spin_can_node.setVisible(False)
         
         top_bar_layout.addStretch()
         
@@ -227,6 +237,9 @@ class MainWindow(QMainWindow):
         self.state.connection_changed.connect(self._on_connection_changed)
         self.state.heartbeat_received.connect(self._on_heartbeat)
         self.state.error_occurred.connect(self._on_error)
+        self.state.parameters_updated.connect(
+            lambda params: self.spin_can_node.setValue(params.node_id)
+        )
 
     def _set_page(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -253,6 +266,8 @@ class MainWindow(QMainWindow):
         self.combo_can_chan.setVisible(is_can)
         self.lbl_can_bit.setVisible(is_can)
         self.combo_can_bit.setVisible(is_can)
+        self.lbl_can_node.setVisible(is_can)
+        self.spin_can_node.setVisible(is_can)
 
     def _refresh_ports(self):
         self.combo_ports.clear()
@@ -277,7 +292,15 @@ class MainWindow(QMainWindow):
             elif backend_idx == 1: # PeakCAN
                 chan = self.combo_can_chan.currentText()
                 bitrate = int(self.combo_can_bit.currentText())
-                self.comm.connect_can(channel=chan, bitrate=bitrate)
+                params = self.state.parameters
+                self.comm.connect_can(
+                    channel=chan,
+                    bitrate=bitrate,
+                    node_id=self.spin_can_node.value(),
+                    cmd_base=params.can_command_base_id,
+                    status_base=params.can_status_base_id,
+                    event_base=params.can_event_base_id,
+                )
             else: # Simulator
                 self.comm.connect_simulator()
 

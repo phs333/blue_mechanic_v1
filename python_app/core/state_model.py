@@ -94,6 +94,10 @@ class HardwareParameters:
     # Home & Limits
     home_c_deg: float = 0.0  # Base Rotativa
     home_a_deg: float = 0.0  # Pivot dos Lasers
+    limit_min_deg_c: float = 10.0  # Limite angular mínimo Eixo C
+    limit_max_deg_c: float = 190.0 # Limite angular máximo Eixo C
+    limit_min_deg_a: float = 10.0  # Limite angular mínimo Eixo A
+    limit_max_deg_a: float = 190.0 # Limite angular máximo Eixo A
     max_passos_z: int = 20000
     z_pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH  # Dentes da polia GT2 motor Z (ex: 16, 20)
     
@@ -118,9 +122,11 @@ class HardwareParameters:
     steps_per_rev: List[int] = field(default_factory=lambda: [200, 200, 200])
     
     # Speeds & Accelerations
-    speed_max: List[float] = field(default_factory=lambda: [1500.0, 1500.0, 80.0])
-    accel_max: List[float] = field(default_factory=lambda: [5000.0, 5000.0, 1000.0])
-    accel: List[float] = field(default_factory=lambda: [900.0, 900.0, 500.0])
+    # Keep startup values aligned with APP_SETTINGS_DEFAULT_INIT in firmware.
+    speed: List[float] = field(default_factory=lambda: [140.625, 140.625, 12.5])
+    speed_max: List[float] = field(default_factory=lambda: [720.0, 720.0, 60.0])
+    accel_max: List[float] = field(default_factory=lambda: [3600.0, 3600.0, 800.0])
+    accel: List[float] = field(default_factory=lambda: [1800.0, 1800.0, 300.0])
     inverter: List[bool] = field(default_factory=lambda: [False, False, False])
     
     # TMC2209 Settings

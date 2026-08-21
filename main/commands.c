@@ -52,6 +52,8 @@ void commands_print_help(void)
     puts("ALARM ON / ALARM OFF");
     puts("SETHOME C / A (ou X / Y)");
     puts("HOME C / A / Z (ou X / Y / Z)");
+    puts("LIMIT C|A <min_deg> <max_deg> (salva limites na NVS)");
+    puts("LIMITS");
     puts("SET_LENGTH Z <steps>");
     puts("PULLEY Z <dentes> (ex: 16, 20)");
     puts("STEPS C|A|Z <steps_per_rev>");
@@ -91,12 +93,12 @@ void commands_print_status(app_context_t *ctx)
 
     printf("\n=== STATUS ===\n");
     if (err_c == ESP_OK) {
-        printf("Eixo C (Base): %.2f deg\n", encoder_c);
+        printf("Eixo C (Base): %.2f deg (Limites: [%.2f, %.2f] deg)\n", encoder_c, ctx->settings.limit_min_c_deg, ctx->settings.limit_max_c_deg);
     } else {
         printf("Eixo C (Base): erro de leitura (%s)\n", esp_err_to_name(err_c));
     }
     if (err_a == ESP_OK) {
-        printf("Eixo A (Pivot): %.2f deg\n", encoder_a);
+        printf("Eixo A (Pivot): %.2f deg (Limites: [%.2f, %.2f] deg)\n", encoder_a, ctx->settings.limit_min_a_deg, ctx->settings.limit_max_a_deg);
     } else {
         printf("Eixo A (Pivot): erro de leitura (%s)\n", esp_err_to_name(err_a));
     }
@@ -146,6 +148,10 @@ void commands_print_config(const app_context_t *ctx)
            (unsigned long)ctx->settings.steps_per_rev[0],
            (unsigned long)ctx->settings.steps_per_rev[1],
            (unsigned long)ctx->settings.steps_per_rev[2]);
+    printf("CONFIG SPEED C=%.2f A=%.2f Z=%.2f\n",
+           motion_delay_us_to_speed((app_context_t *)ctx, 'C', ctx->settings.speed_delay_us[0]),
+           motion_delay_us_to_speed((app_context_t *)ctx, 'A', ctx->settings.speed_delay_us[1]),
+           motion_delay_us_to_speed((app_context_t *)ctx, 'Z', ctx->settings.speed_delay_us[2]));
     printf("CONFIG SPEED_MAX C=%.2f A=%.2f Z=%.2f\n",
            ctx->settings.speed_max[0], ctx->settings.speed_max[1], ctx->settings.speed_max[2]);
     printf("CONFIG ACCEL_MAX C=%.2f A=%.2f Z=%.2f\n",
@@ -161,6 +167,9 @@ void commands_print_config(const app_context_t *ctx)
            (unsigned long)ctx->settings.max_passos_z);
     printf("CONFIG HOME_DEG C=%.2f A=%.2f\n",
            ctx->settings.home_c_deg, ctx->settings.home_a_deg);
+    printf("CONFIG LIMITS C=%.2f..%.2f A=%.2f..%.2f\n",
+           ctx->settings.limit_min_c_deg, ctx->settings.limit_max_c_deg,
+           ctx->settings.limit_min_a_deg, ctx->settings.limit_max_a_deg);
     printf("CONFIG DRIVER_BUS_MODE=%u\n",
            (unsigned)ctx->settings.driver_bus_mode);
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
@@ -279,6 +288,43 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         } else {
             printf("ERRO ao salvar home %c: %s\n", axis, esp_err_to_name(err));
         }
+        return;
+    }
+
+    if (strncmp(cmd, "LIMIT ", 6) == 0) {
+        char raw_axis = '\0';
+        float min_deg = 0.0f, max_deg = 0.0f;
+        if (sscanf(cmd + 6, "%c %f %f", &raw_axis, &min_deg, &max_deg) == 3) {
+            char axis = '\0';
+            parse_axis_token(raw_axis, NULL, &axis);
+            if (min_deg < 0.0f || max_deg > 360.0f || max_deg <= min_deg) {
+                printf("ERRO: limites invalidos para %c (devem estar entre 0.0 e 360.0 e min < max).\n", axis);
+                return;
+            }
+            if (axis == 'C') {
+                ctx->settings.limit_min_c_deg = min_deg;
+                ctx->settings.limit_max_c_deg = max_deg;
+            } else if (axis == 'A') {
+                ctx->settings.limit_min_a_deg = min_deg;
+                ctx->settings.limit_max_a_deg = max_deg;
+            } else {
+                printf("ERRO: Eixo invalido (%c). Use LIMIT C <min> <max> ou LIMIT A <min> <max>.\n", raw_axis);
+                return;
+            }
+            esp_err_t err = storage_save_settings(&ctx->settings);
+            if (err == ESP_OK) {
+                printf("LIMIT %c gravado: min=%.2f max=%.2f deg (salvo na NVS).\n", axis, min_deg, max_deg);
+            } else {
+                printf("ERRO ao salvar LIMIT %c: %s\n", axis, esp_err_to_name(err));
+            }
+            return;
+        }
+    }
+
+    if (strcmp(cmd, "LIMITS") == 0) {
+        printf("LIMITS C=[%.2f, %.2f] A=[%.2f, %.2f] deg\n",
+               ctx->settings.limit_min_c_deg, ctx->settings.limit_max_c_deg,
+               ctx->settings.limit_min_a_deg, ctx->settings.limit_max_a_deg);
         return;
     }
 
@@ -896,7 +942,14 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 break;
             }
         }
-        esp_err_t err = motion_post_move_axis(ctx, axis, (int32_t)steps, 0, 0);
+        esp_err_t err;
+        if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
+            err = motion_post_move_axis_profile(ctx, axis, (int32_t)steps,
+                                                move_speed_val, move_accel_val,
+                                                false, 0, 0);
+        } else {
+            err = motion_post_move_axis(ctx, axis, (int32_t)steps, 0, 0);
+        }
         if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
             puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
             return;

@@ -109,6 +109,11 @@ class CommManager(QObject):
             return self.active_client.set_home(axis)
         return False
 
+    def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
+        if self.active_client:
+            return self.active_client.set_axis_limits(axis, min_deg, max_deg)
+        return False
+
     def move_axis(self, axis: str, steps: int, speed: Optional[float] = None, accel: Optional[float] = None, force_no_encoder: bool = False) -> bool:
         if self.active_client:
             return self.active_client.move_axis(axis, steps, speed, accel, force_no_encoder)

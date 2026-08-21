@@ -17,6 +17,10 @@
 
 #include "stepper_motor_encoder.h"
 
+#define RMT_MIN_STEP_FREQ_HZ 16U
+#define RMT_MAX_STEP_FREQ_HZ 60000U
+#define RMT_MAX_RAMP_SAMPLES 1024U
+
 static rmt_channel_handle_t s_rmt_chan[AXIS_COUNT] = {NULL, NULL, NULL};
 
 static esp_err_t init_rmt_channels(void)
@@ -51,6 +55,8 @@ static esp_err_t init_i2c_buses(void);
 static esp_err_t init_led_pwm(app_context_t *ctx);
 static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg);
 static uint32_t laser_level_to_duty(uint16_t level);
+static void normalize_rmt_frequencies(uint32_t *start_freq_hz, uint32_t *target_freq_hz,
+                                      uint32_t ramp_threshold_hz, uint32_t start_divisor);
 
 static inline void one_wire_drive_low(void)
 {
@@ -120,6 +126,47 @@ static uint8_t one_wire_read_byte(void)
         value |= (uint8_t)(one_wire_read_bit() << i);
     }
     return value;
+}
+
+static uint8_t ds18b20_crc8(const uint8_t *data, size_t len)
+{
+    uint8_t crc = 0U;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t value = data[i];
+        for (uint8_t bit = 0; bit < 8U; ++bit) {
+            uint8_t mix = (uint8_t)((crc ^ value) & 0x01U);
+            crc >>= 1;
+            if (mix != 0U) {
+                crc ^= 0x8CU;
+            }
+            value >>= 1;
+        }
+    }
+    return crc;
+}
+
+static void normalize_rmt_frequencies(uint32_t *start_freq_hz, uint32_t *target_freq_hz,
+                                      uint32_t ramp_threshold_hz, uint32_t start_divisor)
+{
+    uint32_t target = *target_freq_hz;
+    if (target < RMT_MIN_STEP_FREQ_HZ) {
+        target = RMT_MIN_STEP_FREQ_HZ;
+    } else if (target > RMT_MAX_STEP_FREQ_HZ) {
+        target = RMT_MAX_STEP_FREQ_HZ;
+    }
+
+    uint32_t start = *start_freq_hz;
+    if (target <= ramp_threshold_hz) {
+        start = target;
+    } else if (start < RMT_MIN_STEP_FREQ_HZ || start >= target) {
+        start = target / start_divisor;
+        if (start < RMT_MIN_STEP_FREQ_HZ) {
+            start = RMT_MIN_STEP_FREQ_HZ;
+        }
+    }
+
+    *start_freq_hz = start;
+    *target_freq_hz = target;
 }
 
 esp_err_t hardware_init(app_context_t *ctx)
@@ -324,19 +371,14 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (target_freq_hz < 100U) target_freq_hz = 100U;
-    if (target_freq_hz > 60000U) target_freq_hz = 60000U;
-
-    // Adaptive start frequency: healthy pull-in rate (300~800Hz) to avoid sluggish start
-    if (start_freq_hz < 300U) {
-        start_freq_hz = (target_freq_hz > 600U) ? (target_freq_hz / 3U) : 300U;
-    }
-    if (start_freq_hz >= target_freq_hz) {
-        start_freq_hz = (target_freq_hz > 150U) ? (target_freq_hz / 2U) : (target_freq_hz - 10U);
-    }
+    normalize_rmt_frequencies(&start_freq_hz, &target_freq_hz, 600U, 3U);
 
     uint32_t accel_steps = ramp_steps;
     uint32_t decel_steps = ramp_steps;
+    if (accel_steps > RMT_MAX_RAMP_SAMPLES) {
+        accel_steps = RMT_MAX_RAMP_SAMPLES;
+        decel_steps = RMT_MAX_RAMP_SAMPLES;
+    }
 
     // For short moves (like JOGs <= 24 steps), run directly with uniform speed
     bool use_ramp = (total_steps > 24U) && (accel_steps >= 2U) && (target_freq_hz > (start_freq_hz + 30U));
@@ -468,12 +510,10 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
 
     // Axis C params
     uint32_t accel_c = ramp_c, decel_c = ramp_c, cruise_c = steps_c;
+    if (accel_c > RMT_MAX_RAMP_SAMPLES) accel_c = decel_c = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_c = false;
     if (steps_c > 0) {
-        if (target_freq_c < 100U) target_freq_c = 100U;
-        if (target_freq_c > 60000U) target_freq_c = 60000U;
-        if (start_freq_c < 300U) start_freq_c = (target_freq_c > 600U) ? (target_freq_c / 3U) : 300U;
-        if (start_freq_c >= target_freq_c) start_freq_c = target_freq_c / 2U;
+        normalize_rmt_frequencies(&start_freq_c, &target_freq_c, 600U, 3U);
 
         use_ramp_c = (steps_c > 24U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 30U));
         if (use_ramp_c) {
@@ -497,12 +537,10 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
 
     // Axis A params
     uint32_t accel_a = ramp_a, decel_a = ramp_a, cruise_a = steps_a;
+    if (accel_a > RMT_MAX_RAMP_SAMPLES) accel_a = decel_a = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_a = false;
     if (steps_a > 0) {
-        if (target_freq_a < 100U) target_freq_a = 100U;
-        if (target_freq_a > 60000U) target_freq_a = 60000U;
-        if (start_freq_a < 300U) start_freq_a = (target_freq_a > 600U) ? (target_freq_a / 3U) : 300U;
-        if (start_freq_a >= target_freq_a) start_freq_a = target_freq_a / 2U;
+        normalize_rmt_frequencies(&start_freq_a, &target_freq_a, 600U, 3U);
 
         use_ramp_a = (steps_a > 24U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 30U));
         if (use_ramp_a) {
@@ -526,12 +564,10 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
 
     // Axis Z params
     uint32_t accel_z = ramp_z, decel_z = ramp_z, cruise_z = steps_z;
+    if (accel_z > RMT_MAX_RAMP_SAMPLES) accel_z = decel_z = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_z = false;
     if (steps_z > 0) {
-        if (target_freq_z < 100U) target_freq_z = 100U;
-        if (target_freq_z > 60000U) target_freq_z = 60000U;
-        if (start_freq_z < 200U) start_freq_z = (target_freq_z > 400U) ? (target_freq_z / 2U) : 200U;
-        if (start_freq_z >= target_freq_z) start_freq_z = target_freq_z / 2U;
+        normalize_rmt_frequencies(&start_freq_z, &target_freq_z, 400U, 2U);
 
         use_ramp_z = (steps_z > 24U) && (accel_z >= 2U) && (target_freq_z > (start_freq_z + 30U));
         if (use_ramp_z) {
@@ -787,6 +823,10 @@ esp_err_t hardware_read_temperature_c(float *temp_c)
     uint8_t scratchpad[9];
     for (size_t i = 0; i < sizeof(scratchpad); ++i) {
         scratchpad[i] = one_wire_read_byte();
+    }
+
+    if (ds18b20_crc8(scratchpad, sizeof(scratchpad) - 1U) != scratchpad[8]) {
+        return ESP_ERR_INVALID_CRC;
     }
 
     int16_t raw = (int16_t)(((uint16_t)scratchpad[1] << 8) | scratchpad[0]);

@@ -1,7 +1,10 @@
 #include "can_bus.h"
 
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -19,6 +22,12 @@ typedef struct {
     uint8_t data[TWAI_FRAME_MAX_LEN];
 } can_rx_slot_t;
 
+typedef struct {
+    bool valid;
+    float speed;
+    float accel;
+} can_motion_profile_t;
+
 static volatile app_context_t *s_ctx;
 static twai_node_handle_t s_node;
 static TaskHandle_t s_can_task_handle;
@@ -27,6 +36,7 @@ static SemaphoreHandle_t s_rx_ready_sem;
 static can_rx_slot_t s_rx_pool[CAN_RX_POOL_DEPTH];
 static volatile uint32_t s_rx_write_index;
 static uint32_t s_rx_read_index;
+static can_motion_profile_t s_motion_profiles[AXIS_COUNT];
 
 static bool validate_can_settings(const persisted_settings_t *settings);
 static void prepare_rx_pool_once(void);
@@ -37,6 +47,10 @@ static twai_timing_basic_config_t can_get_bit_timing_config(uint32_t bitrate);
 static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const uint8_t *payload, size_t payload_len, bool can_online);
 esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0, uint8_t arg1);
 static uint8_t speed_level_from_delay(uint32_t delay_us);
+static bool can_parse_axis(uint8_t token, size_t *axis_index, char *canonical_axis);
+static float can_decode_float_le(const uint8_t *data);
+static bool can_speed_is_valid(char axis, float speed);
+static bool can_accel_is_valid(char axis, float accel);
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame);
 static bool can_on_rx_done(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *user_ctx);
 static bool can_on_error(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *user_ctx);
@@ -61,6 +75,7 @@ esp_err_t can_bus_apply_settings(app_context_t *ctx)
     ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
     can_node_stop(ctx);
+    memset(s_motion_profiles, 0, sizeof(s_motion_profiles));
 
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         ctx->state.can_rx_count = 0;
@@ -101,6 +116,8 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     uint16_t laser_level[2] = {0, 0};
     bool fan_output_on = false;
     fan_mode_t fan_mode = FAN_MODE_MANUAL_OFF;
+    float last_temp_c = 0.0f;
+    int32_t current_z = 0;
 
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         drivers_enabled = ctx->state.drivers_enabled;
@@ -113,6 +130,8 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
         laser_level[1] = ctx->state.laser_level[1];
         fan_output_on = ctx->state.fan_output_on;
         fan_mode = ctx->state.fan_mode;
+        last_temp_c = ctx->state.last_temp_c;
+        current_z = ctx->state.atual_z;
         xSemaphoreGive(ctx->state_mutex);
     }
 
@@ -137,12 +156,22 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
 
     // Read live encoders and temperature for POS_TELEMETRY frame (ID: can_status_base_id + 0x10 + node_id)
     float cur_c = 0.0f, cur_a = 0.0f;
-    hardware_read_axis_encoder('C', &cur_c);
-    hardware_read_axis_encoder('A', &cur_a);
-    int16_t c_centi = (int16_t)(cur_c * 100.0f);
-    int16_t a_centi = (int16_t)(cur_a * 100.0f);
-    int16_t z_pos = (int16_t)ctx->state.atual_z;
-    int16_t temp_deci = (int16_t)(ctx->state.last_temp_c * 10.0f);
+    uint16_t c_centi = UINT16_MAX;
+    uint16_t a_centi = UINT16_MAX;
+    if (hardware_read_axis_encoder('C', &cur_c) == ESP_OK && isfinite(cur_c) &&
+        cur_c >= 0.0f && cur_c <= 360.0f) {
+        c_centi = (uint16_t)lroundf(cur_c * 100.0f);
+    }
+    if (hardware_read_axis_encoder('A', &cur_a) == ESP_OK && isfinite(cur_a) &&
+        cur_a >= 0.0f && cur_a <= 360.0f) {
+        a_centi = (uint16_t)lroundf(cur_a * 100.0f);
+    }
+    uint16_t z_pos = (current_z < 0) ? 0U :
+                     (current_z >= (int32_t)UINT16_MAX ? UINT16_MAX - 1U : (uint16_t)current_z);
+    int16_t temp_deci = INT16_MIN;
+    if (temp_valid && isfinite(last_temp_c) && last_temp_c >= -55.0f && last_temp_c <= 125.0f) {
+        temp_deci = (int16_t)lroundf(last_temp_c * 10.0f);
+    }
 
     uint8_t payload_pos[8];
     payload_pos[0] = (uint8_t)(c_centi & 0xFF);
@@ -191,6 +220,7 @@ static bool validate_can_settings(const persisted_settings_t *settings)
     }
     if ((settings->can_command_base_id + 127U) > TWAI_STD_ID_MASK ||
         (settings->can_status_base_id + 127U) > TWAI_STD_ID_MASK ||
+        (settings->can_status_base_id + 0x10U + 127U) > TWAI_STD_ID_MASK ||
         (settings->can_event_base_id + 127U) > TWAI_STD_ID_MASK) {
         ESP_LOGW(APP_TAG, "Bases CAN excedem o range de 11 bits.");
         return false;
@@ -378,13 +408,58 @@ static uint8_t speed_level_from_delay(uint32_t delay_us)
     return 5;
 }
 
-static bool check_cmd_seq(app_context_t *ctx, uint8_t opcode, const uint8_t *buf, size_t len)
+static bool can_parse_axis(uint8_t token, size_t *axis_index, char *canonical_axis)
 {
-    (void)ctx;
-    (void)opcode;
-    (void)buf;
-    (void)len;
-    return true;
+    char axis = (char)token;
+    if (axis == 'C' || axis == 'c' || axis == 'X' || axis == 'x') {
+        *axis_index = AXIS_C_ID;
+        *canonical_axis = 'C';
+        return true;
+    }
+    if (axis == 'A' || axis == 'a' || axis == 'Y' || axis == 'y') {
+        *axis_index = AXIS_A_ID;
+        *canonical_axis = 'A';
+        return true;
+    }
+    if (axis == 'Z' || axis == 'z') {
+        *axis_index = AXIS_Z_ID;
+        *canonical_axis = 'Z';
+        return true;
+    }
+    return false;
+}
+
+static float can_decode_float_le(const uint8_t *data)
+{
+    uint32_t bits = (uint32_t)data[0] |
+                    ((uint32_t)data[1] << 8) |
+                    ((uint32_t)data[2] << 16) |
+                    ((uint32_t)data[3] << 24);
+    float value = 0.0f;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static bool can_speed_is_valid(char axis, float speed)
+{
+    if (!isfinite(speed)) {
+        return false;
+    }
+    if (axis == 'Z') {
+        return speed >= SPEED_MIN_MM_S_Z && speed <= SPEED_MAX_MM_S_Z;
+    }
+    return speed >= SPEED_MIN_DEG_S_CA && speed <= SPEED_MAX_DEG_S_CA;
+}
+
+static bool can_accel_is_valid(char axis, float accel)
+{
+    if (!isfinite(accel)) {
+        return false;
+    }
+    if (axis == 'Z') {
+        return accel >= ACCEL_MIN_MM_S2_Z && accel <= ACCEL_MAX_MM_S2_Z;
+    }
+    return accel >= ACCEL_MIN_DEG_S2_CA && accel <= ACCEL_MAX_DEG_S2_CA;
 }
 
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
@@ -474,14 +549,117 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         }
         break;
 
+    case CAN_OP_AXIS_SPEED:
+        if (len >= 6U) {
+            size_t axis_index = 0U;
+            char axis = '\0';
+            float speed = can_decode_float_le(&buf[2]);
+            if (!can_parse_axis(buf[1], &axis_index, &axis) || !can_speed_is_valid(axis, speed)) {
+                err = ESP_ERR_INVALID_ARG;
+            } else {
+                uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed);
+                ctx->settings.speed_delay_us[axis_index] = delay_us;
+                ctx->state.speed_delay_us[axis_index] = delay_us;
+                if (speed > ctx->settings.speed_max[axis_index]) {
+                    ctx->settings.speed_max[axis_index] = speed;
+                    ctx->state.speed_max[axis_index] = speed;
+                }
+            }
+            xSemaphoreGive(ctx->state_mutex);
+            if (err == ESP_OK) {
+                err = storage_save_settings(&ctx->settings);
+            }
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
+                                 CAN_OP_AXIS_SPEED, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_AXIS_SPEED,
+                                 (uint8_t)ESP_ERR_INVALID_SIZE);
+        }
+        break;
+
+    case CAN_OP_AXIS_ACCEL:
+        if (len >= 6U) {
+            size_t axis_index = 0U;
+            char axis = '\0';
+            float accel = can_decode_float_le(&buf[2]);
+            if (!can_parse_axis(buf[1], &axis_index, &axis) || !can_accel_is_valid(axis, accel)) {
+                err = ESP_ERR_INVALID_ARG;
+            } else {
+                ctx->settings.accel[axis_index] = accel;
+                if (accel > ctx->settings.accel_max[axis_index]) {
+                    ctx->settings.accel_max[axis_index] = accel;
+                    ctx->state.accel_max[axis_index] = accel;
+                }
+            }
+            xSemaphoreGive(ctx->state_mutex);
+            if (err == ESP_OK) {
+                err = storage_save_settings(&ctx->settings);
+            }
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
+                                 CAN_OP_AXIS_ACCEL, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_AXIS_ACCEL,
+                                 (uint8_t)ESP_ERR_INVALID_SIZE);
+        }
+        break;
+
+    case CAN_OP_MOVE_PROFILE:
+        if (len >= 8U) {
+            size_t axis_index = 0U;
+            char axis = '\0';
+            float speed = can_decode_float_le(&buf[2]);
+            uint16_t accel_raw = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
+            float accel = (float)accel_raw;
+            bool speed_ok = false;
+            bool accel_ok = false;
+            if (!can_parse_axis(buf[1], &axis_index, &axis)) {
+                err = ESP_ERR_INVALID_ARG;
+            } else {
+                speed_ok = (speed == 0.0f) || can_speed_is_valid(axis, speed);
+                accel_ok = (accel_raw == 0U) || can_accel_is_valid(axis, accel);
+                if (!speed_ok || !accel_ok) {
+                    s_motion_profiles[axis_index].valid = false;
+                    err = ESP_ERR_INVALID_ARG;
+                } else {
+                    s_motion_profiles[axis_index] = (can_motion_profile_t) {
+                        .valid = true,
+                        .speed = (speed > 0.0f) ? speed : -1.0f,
+                        .accel = (accel_raw > 0U) ? accel : -1.0f,
+                    };
+                }
+            }
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
+                                 CAN_OP_MOVE_PROFILE, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_MOVE_PROFILE,
+                                 (uint8_t)ESP_ERR_INVALID_SIZE);
+        }
+        break;
+
     case CAN_OP_MOVE:
         if (len >= 6U) {
             int32_t steps = (int32_t)((uint32_t)buf[2] |
                                       ((uint32_t)buf[3] << 8) |
                                       ((uint32_t)buf[4] << 16) |
                                       ((uint32_t)buf[5] << 24));
+            size_t axis_index = 0U;
+            char axis = '\0';
+            can_motion_profile_t profile = {0};
+            if (can_parse_axis(buf[1], &axis_index, &axis) && s_motion_profiles[axis_index].valid) {
+                profile = s_motion_profiles[axis_index];
+                s_motion_profiles[axis_index].valid = false;
+            }
             xSemaphoreGive(ctx->state_mutex);
-            err = motion_post_move_axis(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE);
+            if (profile.valid) {
+                err = motion_post_move_axis_profile(ctx, axis, steps, profile.speed, profile.accel,
+                                                    false, ctx->settings.node_id, CAN_OP_MOVE);
+            } else {
+                err = motion_post_move_axis(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE);
+            }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_MOVE, (uint8_t)err);
         } else {
             xSemaphoreGive(ctx->state_mutex);
@@ -494,8 +672,20 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                                       ((uint32_t)buf[3] << 8) |
                                       ((uint32_t)buf[4] << 16) |
                                       ((uint32_t)buf[5] << 24));
+            size_t axis_index = 0U;
+            char axis = '\0';
+            can_motion_profile_t profile = {0};
+            if (can_parse_axis(buf[1], &axis_index, &axis) && s_motion_profiles[axis_index].valid) {
+                profile = s_motion_profiles[axis_index];
+                s_motion_profiles[axis_index].valid = false;
+            }
             xSemaphoreGive(ctx->state_mutex);
-            err = motion_post_move_axis_force(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE_FORCE);
+            if (profile.valid) {
+                err = motion_post_move_axis_profile(ctx, axis, steps, profile.speed, profile.accel,
+                                                    true, ctx->settings.node_id, CAN_OP_MOVE_FORCE);
+            } else {
+                err = motion_post_move_axis_force(ctx, (char)buf[1], steps, ctx->settings.node_id, CAN_OP_MOVE_FORCE);
+            }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_MOVE_FORCE, (uint8_t)err);
         } else {
             xSemaphoreGive(ctx->state_mutex);
@@ -539,10 +729,6 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_FAN:
         if (len >= 2U) {
-            if (!check_cmd_seq(ctx, buf[0], buf, len)) {
-                xSemaphoreGive(ctx->state_mutex);
-                return;
-            }
             switch (buf[1]) {
             case 0:
                 ctx->state.fan_mode = FAN_MODE_MANUAL_OFF;

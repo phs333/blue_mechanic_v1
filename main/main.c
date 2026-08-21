@@ -68,6 +68,7 @@ static void safety_task(void *arg) {
 
 static void thermal_task(void *arg) {
   app_context_t *ctx = (app_context_t *)arg;
+  uint8_t consecutive_failures = 0U;
 
   while (true) {
     float temp_c = 0.0f;
@@ -76,8 +77,14 @@ static void thermal_task(void *arg) {
       if (err == ESP_OK) {
         ctx->state.last_temp_c = temp_c;
         ctx->state.temp_valid = true;
+        consecutive_failures = 0U;
       } else {
-        ctx->state.temp_valid = false;
+        if (consecutive_failures < 3U) {
+          ++consecutive_failures;
+        }
+        if (consecutive_failures >= 3U) {
+          ctx->state.temp_valid = false;
+        }
       }
       xSemaphoreGive(ctx->state_mutex);
     }
@@ -88,6 +95,11 @@ static void thermal_task(void *arg) {
       } else if (ctx->state.fan_output_on && temp_c <= FAN_AUTO_OFF_TEMP_C) {
         hardware_set_fan_output(ctx, false);
       }
+    }
+
+    if (err != ESP_OK) {
+      ESP_LOGW(APP_TAG, "Falha ao ler DS18B20 (%s), tentativa consecutiva %u/3",
+               esp_err_to_name(err), (unsigned)consecutive_failures);
     }
 
     vTaskDelay(pdMS_TO_TICKS(1000));

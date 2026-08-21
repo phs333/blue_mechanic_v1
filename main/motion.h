@@ -10,6 +10,16 @@ esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t ste
 esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id, uint8_t opcode);
 
 uint32_t motion_speed_to_delay_us(app_context_t *ctx, char axis, float speed);
+float motion_delay_us_to_speed(app_context_t *ctx, char axis, uint32_t delay_us);
 void compute_trapezoidal_profile(app_context_t *ctx, char axis, uint32_t start_delay, uint32_t end_delay, uint32_t total_steps, uint32_t ramp_steps, uint32_t *delay_us);
 esp_err_t motion_post_move_axis_with_params(app_context_t *ctx, char axis, int32_t steps, float speed, float accel, uint8_t sender_id, uint8_t opcode);
+esp_err_t motion_post_move_axis_profile(app_context_t *ctx, char axis, int32_t steps,
+                                        float speed, float accel, bool force_no_encoder,
+                                        uint8_t sender_id, uint8_t opcode);
 esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z, float speed, float accel, uint8_t sender_id, uint8_t opcode);
+
+/* Pure planner helper: clamps a relative request to direct absolute encoder limits. */
+int32_t motion_plan_limited_steps_direct(float actual_deg, float min_limit_deg, float max_limit_deg,
+                                         float deg_per_step, int32_t requested_steps);
+int32_t motion_plan_limited_steps(float actual_deg, float home_deg, float limit_span_deg,
+                                  float deg_per_step, int32_t requested_steps);

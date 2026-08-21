@@ -110,7 +110,7 @@ class DashboardView(QWidget):
         row_layout.setSpacing(16)
         
         # Jog Pad
-        self.jog_widget = JogPad()
+        self.jog_widget = JogPad(self.state)
         self.jog_widget.jog_requested.connect(self._on_jog)
         self.jog_widget.home_requested.connect(self.comm.home_axis)
         row_layout.addWidget(self.jog_widget, 3)
@@ -176,8 +176,13 @@ class DashboardView(QWidget):
             self.card_a.set_badge("SEM ENCODER", "amber")
         
         # Update Z
-        teeth = self.state.parameters.z_pulley_teeth or 16
-        pos_z_mm = t.get_pos_z_mm(teeth, 200, 16)
+        params = self.state.parameters
+        teeth = params.z_pulley_teeth or 16
+        pos_z_mm = t.get_pos_z_mm(
+            teeth,
+            params.steps_per_rev[2],
+            params.tmc_microsteps[2],
+        )
         self.card_z.set_value(f"{t.pos_z_steps} ({pos_z_mm:.2f} mm)")
         self.card_z.set_progress(t.z_progress_pct)
         if t.z_bloqueado:

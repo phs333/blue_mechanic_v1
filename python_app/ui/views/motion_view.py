@@ -18,7 +18,6 @@ from PyQt6.QtCore import Qt
 from python_app.ui.widgets.jog_pad import JogPad
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, HardwareParameters, DeviceState
-from python_app.core.protocol_defs import GRAUS_POR_PASSO_CA, PASSOS_POR_MM_Z
 
 class MotionView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -68,7 +67,7 @@ class MotionView(QWidget):
         grid_layout.setSpacing(16)
         
         # Left: Jog Pad
-        self.jog_pad = JogPad()
+        self.jog_pad = JogPad(self.state)
         self.jog_pad.jog_requested.connect(self._on_jog)
         self.jog_pad.home_requested.connect(self.comm.home_axis)
         grid_layout.addWidget(self.jog_pad, 1)
@@ -91,6 +90,7 @@ class MotionView(QWidget):
         form_grid.addWidget(QLabel("Eixo Alvo:"), 0, 0)
         self.combo_axis = QComboBox()
         self.combo_axis.addItems(["Eixo C (Base Rotativa)", "Eixo A (Pivot dos Lasers)", "Eixo Z (Linear)"])
+        self.combo_axis.currentIndexChanged.connect(self._update_override_units)
         form_grid.addWidget(self.combo_axis, 0, 1)
         
         form_grid.addWidget(QLabel("Distância / Passos:"), 1, 0)
@@ -242,9 +242,19 @@ class MotionView(QWidget):
         outer_layout.addWidget(scroll)
         
         self.state.telemetry_updated.connect(self.update_telemetry)
+        self._update_override_units(self.combo_axis.currentIndex())
+
+    def _update_override_units(self, axis_index: int):
+        is_z = axis_index == 2
+        self.spin_speed.setMaximum(500.0 if is_z else 10000.0)
+        self.spin_speed.setSuffix(" mm/s" if is_z else " °/s")
+        self.spin_accel.setMaximum(5000.0 if is_z else 50000.0)
+        self.spin_accel.setSuffix(" mm/s²" if is_z else " °/s²")
 
     def _on_jog(self, axis: str, steps: int, force: bool = False):
-        self.comm.move_axis(axis, steps, force_no_encoder=force)
+        speed = self.spin_speed.value() if self.spin_speed.value() > 0 else None
+        accel = self.spin_accel.value() if self.spin_accel.value() > 0 else None
+        self.comm.move_axis(axis, steps, speed=speed, accel=accel, force_no_encoder=force)
 
     def _execute_direct_move(self):
         axis_idx = self.combo_axis.currentIndex()
@@ -274,10 +284,15 @@ class MotionView(QWidget):
         self.comm.set_alarm_z(new_state)
 
     def update_telemetry(self, t: HardwareTelemetry):
-        teeth = self.state.parameters.z_pulley_teeth or 16
-        pos_z_mm = t.get_pos_z_mm(teeth, 200, 16)
-        self.lbl_pos_c.setText(f"Posição C (Base): {t.pos_c_deg:.2f}°")
-        self.lbl_pos_a.setText(f"Posição A (Pivot): {t.pos_a_deg:.2f}°")
+        params = self.state.parameters
+        teeth = params.z_pulley_teeth or 16
+        pos_z_mm = t.get_pos_z_mm(
+            teeth,
+            params.steps_per_rev[2],
+            params.tmc_microsteps[2],
+        )
+        self.lbl_pos_c.setText(f"Posição C (Base): {t.pos_c_deg:.2f}° [{params.limit_min_deg_c:.1f}°..{params.limit_max_deg_c:.1f}°]")
+        self.lbl_pos_a.setText(f"Posição A (Pivot): {t.pos_a_deg:.2f}° [{params.limit_min_deg_a:.1f}°..{params.limit_max_deg_a:.1f}°]")
         self.lbl_pos_z.setText(f"Posição Z: {t.pos_z_steps} passos ({pos_z_mm:.2f} mm | Polia: {teeth}T)")
         
         if t.drivers_enabled:

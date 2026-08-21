@@ -12,32 +12,35 @@ O protocolo usa frames CAN padrão de 11 bits (standard identifiers) com DLC má
 
 | Parâmetro     | Valor Padrão | Pino ESP32-S3 |
 |---------------|-------------|---------------|
-| CAN TX        | GPIO 48     | GPIO_NUM_48   |
-| CAN RX        | GPIO 47     | GPIO_NUM_47   |
+| CAN TX        | GPIO 39     | GPIO_NUM_39   |
+| CAN RX        | GPIO 40     | GPIO_NUM_40   |
 | Bitrate       | 500 kbps    | —             |
 | Node ID       | 1           | —             |
 
 ### IDs CAN
 
-Cada slave possui três faixas de IDs base configuráveis:
+Cada slave possui três faixas de IDs base configuráveis. A telemetria de posição/temperatura usa uma subfaixa derivada do status:
 
 | Base            | Padrão  | Finalidade                        |
 |-----------------|---------|-----------------------------------|
 | `can_command_base_id` | `0x200` | Comandos do master para o slave   |
 | `can_status_base_id`  | `0x280` | Status do slave para o master     |
 | `can_event_base_id`   | `0x300` | Eventos do slave para o master    |
+| `can_status_base_id + 0x10` | `0x290` | Posição e temperatura |
 
 O ID efetivo de cada slave é calculado somando o `node_id` à base:
 
 ```
 own_command_id  = can_command_base_id + node_id
 own_status_id   = can_status_base_id  + node_id
+own_position_id = can_status_base_id  + 0x10 + node_id
 own_event_id    = can_event_base_id   + node_id
 ```
 
 **Exemplo para node_id = 1:**
 - Comando: `0x201`
 - Status: `0x281`
+- Posição/temperatura: `0x291`
 - Evento: `0x301`
 
 ### Filtro de Hardware
@@ -67,7 +70,8 @@ Todos os frames usam o formato padrão de 11 bits:
 | Direção     | ID de Origem     | ID de Destino      | Descrição                              |
 |-------------|------------------|--------------------|----------------------------------------|
 | Master → Slave | `own_command_id` | —                  | Comandos do master para o slave        |
-| Slave → Master | —                | `own_status_id`    | Respostas de status e eventos          |
+| Slave → Master | —                | `own_status_id`    | Resposta compacta de estado            |
+| Slave → Master | —                | `own_position_id`  | Posições e temperatura                 |
 | Slave → Master | —                | `own_event_id`     | Eventos assíncronos (heartbeat, ACK)   |
 
 ---
@@ -80,14 +84,14 @@ Cada comando CAN pode incluir um byte opcional de sequência no final do payload
 
 - Se o DLC do frame for **maior** que o tamanho esperado do opcode, o byte extra é o número de sequência.
 - Se o DLC for **igual** ao tamanho esperado, não há sequência (comportamento backward-compatible).
-- O slave rastreia `last_cmd_seq` por opcode. Comandos com sequência ≤ `last_cmd_seq` são descartados como duplicatas.
-- Sequência `0` é tratada como sem sequenciamento (sempre processado).
+- O byte é reservado para correlação e diagnóstico pelo master.
+- A versão atual do slave não descarta duplicatas automaticamente; o master não deve repetir comandos de movimento sem confirmar o resultado.
 
 ### Exemplo
 
 Para `CAN_OP_SPEED` (tamanho esperado = 2 bytes: opcode + level):
 - Frame com DLC=2: `[0x11, 3]` → processado (sem sequência)
-- Frame com DLC=3: `[0x11, 3, 5]` → processado se `5 > last_cmd_seq`, senão ignorado
+- Frame com DLC=3: `[0x11, 3, 5]` → nível 3 com sequência 5
 
 O master deve incrementar o número de sequência para cada novo comando enviado a um slave.
 
@@ -162,6 +166,36 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 
 ---
 
+### `0x12` — `CAN_OP_AXIS_SPEED`
+
+Define e persiste a velocidade exata de um eixo.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0 | Opcode (`0x12`) |
+| 1 | Eixo (`C`, `A` ou `Z`; aliases `X`/`Y` aceitos) |
+| 2–5 | Velocidade `float32`, little-endian (`deg/s` para C/A, `mm/s` para Z) |
+| 6 (opcional) | Sequência |
+
+### `0x13` — `CAN_OP_AXIS_ACCEL`
+
+Mesmo formato de `CAN_OP_AXIS_SPEED`, com aceleração `float32` em `deg/s²` ou `mm/s²`.
+
+### `0x14` — `CAN_OP_MOVE_PROFILE`
+
+Carrega um perfil de uso único para o próximo `MOVE`/`MOVE_FORCE` do mesmo eixo. Esse comando não grava NVS.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0 | Opcode (`0x14`) |
+| 1 | Eixo (`C`, `A` ou `Z`) |
+| 2–5 | Velocidade `float32` little-endian; `0` usa o padrão |
+| 6–7 | Aceleração `uint16` little-endian; `0` usa o padrão |
+
+O master deve enviar o perfil imediatamente antes do movimento correspondente.
+
+---
+
 ### `0x20` — `CAN_OP_MOVE`
 
 **Tamanho mínimo:** 6 bytes
@@ -169,7 +203,7 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x20`)                       |
-| 1    | Eixo (`'X'`, `'Y'` ou `'Z'`)          |
+| 1    | Eixo (`'C'`, `'A'` ou `'Z'`; aliases `'X'`/`'Y'`) |
 | 2    | Steps byte 0 (LSB)                    |
 | 3    | Steps byte 1                        |
 | 4    | Steps byte 2                        |
@@ -189,7 +223,7 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x21`)                       |
-| 1    | Eixo (`'X'`, `'x'`, `'Y'`, `'y'`, `'Z'`, `'z'`) |
+| 1    | Eixo (`'C'`, `'A'`, `'Z'`; aliases `'X'`/`'Y'`, sem distinção de caixa) |
 | 2 (opcional) | Sequência                        |
 
 **Ação:** Enfileira comando de homing no eixo especificado. O movimento Z pode levar até ~24 segundos (30000 passos com yield a cada 4096).
@@ -198,16 +232,22 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 
 ---
 
+### `0x22` — `CAN_OP_MOVE_FORCE`
+
+Mesmo payload de `CAN_OP_MOVE`, mas executa em malha aberta, sem correção/limites dos encoders C/A. Os limites físicos do eixo Z continuam ativos.
+
+---
+
 ### `0x30` — `CAN_OP_LASER`
 
-**Tamanho mínimo:** 3 bytes
+**Tamanho mínimo:** 3 bytes no formato legado (8 bits); 4 bytes no formato atual (16 bits)
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x30`)                       |
 | 1    | Índice do laser (1 ou 2)              |
-| 2    | Nível lógico do laser (0–255)         |
-| 3 (opcional) | Sequência                        |
+| 2–3  | Nível lógico do laser (`uint16`, little-endian, 0–4095) |
+| 4 (opcional) | Sequência                        |
 
 **Ação:** Configura o nível lógico do laser selecionado via `hardware_set_laser_level()`, remapeado internamente para a faixa útil calibrada do módulo.
 
@@ -258,9 +298,10 @@ Resposta ao `CAN_OP_PING`.
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Evento (`0x81`)   |
-| 1    | Arg0 do ping      |
-| 2    | Arg1 do ping      |
-| 3–7  | Reservado (0)     |
+| 1    | Node ID           |
+| 2    | Arg0 do ping      |
+| 3    | Arg1 do ping      |
+| 4–7  | Reservado (0)     |
 
 ---
 
@@ -273,11 +314,9 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 | 0    | Evento (`0x82`)                       |
 | 1    | Node ID do slave                      |
 | 2    | Flags de estado (bitmask)             |
-| 3    | Nível lógico do laser 1 (0–255)       |
-| 4    | Nível lógico do laser 2 (0–255)       |
-| 5    | Flags do fan (bitmask)                |
-| 6    | Temperatura atual (int8_t, °C × 100)  |
-| 7    | Nível de velocade (1–5)               |
+| 3–4  | Nível lógico do laser 1 (`uint16`, little-endian) |
+| 5–6  | Nível lógico do laser 2 (`uint16`, little-endian) |
+| 7    | Fan: bit 0 saída, bits 1–3 modo, bits 4–7 nível de velocidade |
 
 ### Byte 2 — Flags de estado (bitmask):
 
@@ -290,12 +329,14 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 | 4   | `0x10`   | `tmc_uart_ready`               |
 | 5   | `0x20`   | `can_online`                   |
 
-### Byte 5 — Flags do fan (bitmask):
+### Telemetria de posição e temperatura (`own_position_id`)
 
-| Bit | Máscara  | Significado                    |
-|-----|----------|--------------------------------|
-| 0   | `0x01`   | `fan_output_on`                |
-| 1–7 | —        | `fan_mode` (shiftado 1 bit à esquerda) |
+| Byte | Conteúdo |
+|------|----------|
+| 0–1 | C em centigraus, `uint16` little-endian (`0xFFFF` = inválido) |
+| 2–3 | A em centigraus, `uint16` little-endian (`0xFFFF` = inválido) |
+| 4–5 | Z em passos, `uint16` little-endian (saturado em `65534`) |
+| 6–7 | Temperatura em décimos de °C, `int16` little-endian (`INT16_MIN` = inválida) |
 
 ---
 
@@ -306,9 +347,10 @@ Confirmação de que um comando foi processado com sucesso.
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Evento (`0x83`)   |
-| 1    | Opcode do comando |
-| 2    | 0 (sucesso)       |
-| 3–7  | Reservado (0)     |
+| 1    | Node ID           |
+| 2    | Opcode do comando |
+| 3    | 0 (sucesso)       |
+| 4–7  | Reservado (0)     |
 
 ---
 
@@ -319,9 +361,10 @@ Indica que um comando de movimento foi concluído (o eixo chegou ao destino).
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Evento (`0x84`)   |
-| 1    | Opcode do comando |
-| 2    | 0 (sucesso)       |
-| 3–7  | Reservado (0)     |
+| 1    | Node ID           |
+| 2    | Opcode do comando |
+| 3    | 0 (sucesso)       |
+| 4–7  | Reservado (0)     |
 
 ---
 
@@ -332,19 +375,24 @@ Indica que um comando falhou.
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Evento (`0xE0`)   |
-| 1    | Opcode do comando |
-| 2    | Código do erro (`esp_err_t`) |
-| 3–7  | Reservado (0)     |
+| 1    | Node ID           |
+| 2    | Opcode do comando |
+| 3    | Byte baixo do código `esp_err_t` |
+| 4–7  | Reservado (0)     |
 
-**Códigos de erro comuns:**
+**Bytes baixos de erro comuns:**
 
 | Valor              | Significado                    |
 |--------------------|--------------------------------|
-| `ESP_OK` (0)       | Sucesso (usado em ACK/DONE)    |
-| `ESP_ERR_INVALID_ARG` | Argumento inválido           |
-| `ESP_ERR_INVALID_STATE` | Slave CAN offline          |
-| `ESP_ERR_NOT_SUPPORTED` | Opcode desconhecido        |
-| `ESP_ERR_NO_MEM`    | Falha de memória (queue cheia)|
+| `0x00` | `ESP_OK` |
+| `0x01` | `ESP_ERR_NO_MEM` |
+| `0x02` | `ESP_ERR_INVALID_ARG` |
+| `0x03` | `ESP_ERR_INVALID_STATE` |
+| `0x04` | `ESP_ERR_INVALID_SIZE` |
+| `0x05` | `ESP_ERR_NOT_FOUND` |
+| `0x06` | `ESP_ERR_NOT_SUPPORTED` |
+| `0x07` | `ESP_ERR_TIMEOUT` |
+| `0xFF` | `ESP_FAIL` |
 
 ---
 
@@ -358,6 +406,7 @@ O slave valida as configurações CAN antes de iniciar o periférico TWAI:
 | `can_bitrate` | 125000, 250000, 500000, 1000000   |
 | `can_command_base_id + 127` | ≤ `0x7FF` (limite de 11 bits) |
 | `can_status_base_id + 127`  | ≤ `0x7FF`                       |
+| `can_status_base_id + 0x10 + 127` | ≤ `0x7FF`                 |
 | `can_event_base_id + 127`   | ≤ `0x7FF`                       |
 
 Se a configuração for inválida, o slave não inicia o TWAI e reporta `ESP_ERR_INVALID_ARG`.
@@ -394,6 +443,7 @@ can_send(target_id, payload, 6);  // DLC=6 (sem sequência)
 
 O master deve configurar filtros separados para:
 - IDs de status (`can_status_base_id + node_id`)
+- IDs de posição/temperatura (`can_status_base_id + 0x10 + node_id`)
 - IDs de evento (`can_event_base_id + node_id`)
 
 Ou usar um único filtro que aceite a faixa de eventos/status de todos os slaves.
@@ -404,7 +454,7 @@ Ou usar um único filtro que aceite a faixa de eventos/status de todos os slaves
 |-----------------|-------------------------------------------------------|
 | `CAN_EVT_ACK`   | Comando enfileirado com sucesso                       |
 | `CAN_EVT_DONE`  | Movimento concluído                                   |
-| `CAN_EVT_ERROR` | Comando falhou — verificar byte 2 para o código de erro |
+| `CAN_EVT_ERROR` | Comando falhou — byte 2 é o opcode e byte 3 é o código de erro |
 | `CAN_EVT_PONG`  | Resposta ao ping — verificar Arg0 e Arg1              |
 | `CAN_EVT_STATUS`| Atualizar estado do slave                             |
 | `CAN_EVT_HEARTBEAT` | Manter conexão ativa                               |
@@ -412,8 +462,9 @@ Ou usar um único filtro que aceite a faixa de eventos/status de todos os slaves
 ### Timeout e Retransmissão
 
 - Se nenhum evento for recebido em **500 ms** após o envio de um comando, considerar o comando como falho (timeout).
-- O master pode retransmitir o comando com a mesma sequência — o slave irá ignorá-lo como duplicata.
-- Para reenviar após timeout, usar um **novo número de sequência**.
+- A versão atual não elimina duplicatas pelo byte de sequência. Não retransmita automaticamente
+  comandos de movimento: primeiro confirme a telemetria/estado para evitar execução dupla.
+- Para um novo envio deliberado após timeout, use um **novo número de sequência**.
 
 ### Exemplo de Máquina de Estados do Master
 

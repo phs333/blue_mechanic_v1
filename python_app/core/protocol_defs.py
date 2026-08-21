@@ -41,12 +41,29 @@ def calc_z_steps_per_mm(pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH, steps_per_re
     mm_step = calc_z_mm_per_step(pulley_teeth, steps_per_rev, microsteps)
     return (1.0 / mm_step) if mm_step > 0 else 100.0
 
+def calc_ca_steps_for_degrees(degrees: float, steps_per_rev: int = 200, microsteps: int = 16) -> int:
+    spr = steps_per_rev if steps_per_rev > 0 else 200
+    usteps = microsteps if microsteps > 0 else 16
+    return int(round(float(degrees) * spr * usteps / 360.0))
+
+def calc_ca_degrees_per_step(steps_per_rev: int = 200, microsteps: int = 16) -> float:
+    spr = steps_per_rev if steps_per_rev > 0 else 200
+    usteps = microsteps if microsteps > 0 else 16
+    return 360.0 / (spr * usteps)
+
+def calc_z_steps_for_mm(mm: float, pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH,
+                        steps_per_rev: int = 200, microsteps: int = 16) -> int:
+    return int(round(float(mm) * calc_z_steps_per_mm(pulley_teeth, steps_per_rev, microsteps)))
+
 # --- CAN Protocol OpCodes (Master -> Slave) ---
 class CanOpcode(IntEnum):
     PING = 0x01
     STATUS_REQUEST = 0x02
     ENABLE = 0x10
     SPEED = 0x11
+    AXIS_SPEED = 0x12
+    AXIS_ACCEL = 0x13
+    MOVE_PROFILE = 0x14
     MOVE = 0x20
     HOME = 0x21
     MOVE_FORCE = 0x22
@@ -88,14 +105,14 @@ SPEED_LEVEL_DELAYS = {
 # --- ESP-IDF Common Error Codes ---
 ESP_ERRORS = {
     0x00: "ESP_OK",
-    0x01: "ESP_FAIL",
-    0x02: "ESP_ERR_NO_MEM",
-    0x03: "ESP_ERR_INVALID_ARG",
-    0x04: "ESP_ERR_INVALID_STATE",
-    0x05: "ESP_ERR_INVALID_SIZE",
-    0x06: "ESP_ERR_NOT_FOUND",
-    0x07: "ESP_ERR_NOT_SUPPORTED",
-    0x08: "ESP_ERR_TIMEOUT",
+    0x01: "ESP_ERR_NO_MEM",
+    0x02: "ESP_ERR_INVALID_ARG",
+    0x03: "ESP_ERR_INVALID_STATE",
+    0x04: "ESP_ERR_INVALID_SIZE",
+    0x05: "ESP_ERR_NOT_FOUND",
+    0x06: "ESP_ERR_NOT_SUPPORTED",
+    0x07: "ESP_ERR_TIMEOUT",
+    0xFF: "ESP_FAIL",
 }
 
 def delay_to_speed_level(delay_us: int) -> int:

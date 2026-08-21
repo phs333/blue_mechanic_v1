@@ -10,6 +10,12 @@ class BaseClient(ABC):
     def __init__(self, state: DeviceState):
         self.state = state
         self.is_connected = False
+
+    def _unsupported(self, operation: str) -> bool:
+        self.state.error_occurred.emit(
+            f"{operation} não é suportado pela interface {self.__class__.__name__}."
+        )
+        return False
         
     @abstractmethod
     def connect(self, **kwargs) -> bool:
@@ -52,6 +58,10 @@ class BaseClient(ABC):
         """Store current position as home for C or A."""
         pass
 
+    def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
+        """Store min/max angular limits for axis C or A in NVS."""
+        return self._unsupported("SET_LIMITS")
+
     @abstractmethod
     def move_axis(self, axis: str, steps: int, speed: Optional[float] = None, accel: Optional[float] = None, force_no_encoder: bool = False) -> bool:
         """Move specified axis by relative steps with optional speed/accel."""
@@ -59,7 +69,7 @@ class BaseClient(ABC):
 
     def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
         """Move C, A, and Z axes simultaneously in hardware."""
-        return True
+        return self._unsupported("MOVE_SYNC")
 
     @abstractmethod
     def set_laser(self, laser_index: int, level: int) -> bool:
@@ -88,20 +98,42 @@ class BaseClient(ABC):
 
     def set_z_pulley_teeth(self, teeth: int) -> bool:
         """Set Z motor pulley teeth count."""
-        return True
+        return self._unsupported("Configuração da polia Z")
+
+    def set_steps_per_rev(self, axis: str, steps: int) -> bool:
+        return self._unsupported("Passos por volta")
+
+    def set_length_z(self, steps: int) -> bool:
+        return self._unsupported("Limite do eixo Z")
 
     def set_driver_mode(self, mode: str) -> bool:
         """Set driver bus mode (STEPDIR or UART)."""
-        return True
+        return self._unsupported("Modo do driver")
 
     def set_driver_invert(self, axis: str, invert: bool) -> bool:
         """Set hardware driver DIR inversion (C, A, Z)."""
-        return True
+        return self._unsupported("Inversão de direção")
+
+    def set_tmc_uart_current(self, axis: str, ihold: int, irun: int, delay: int) -> bool:
+        return self._unsupported("Corrente TMC2209")
+
+    def set_tmc_spreadcycle(self, axis: str, enable: bool) -> bool:
+        return self._unsupported("SpreadCycle TMC2209")
+
+    def set_tmc_microsteps(self, axis: str, microsteps: int) -> bool:
+        return self._unsupported("Microsteps TMC2209")
+
+    def apply_driver_settings(self) -> bool:
+        return self._unsupported("Aplicação das configurações TMC2209")
+
+    def configure_can(self, node_id: int, bitrate: int, cmd_base: int,
+                      status_base: int, event_base: int) -> bool:
+        return self._unsupported("Configuração da rede CAN")
 
     def read_tmc_reg(self, axis: str, reg: int) -> bool:
         """Read TMC register directly."""
-        return True
+        return self._unsupported("Leitura de registrador TMC2209")
 
     def write_tmc_reg(self, axis: str, reg: int, val: int) -> bool:
         """Write TMC register directly."""
-        return True
+        return self._unsupported("Escrita de registrador TMC2209")

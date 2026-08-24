@@ -521,82 +521,60 @@ static esp_err_t do_motion_move_axis(app_context_t *ctx, char axis, int32_t requ
 
 
 
-static float normalize_angle_deg(float angle)
-{
-    while (angle > 180.0f) {
-        angle -= 360.0f;
-    }
-    while (angle < -180.0f) {
-        angle += 360.0f;
-    }
-    return angle;
-}
 
-#define PLANNER_LIMIT_MARGIN_DEG 0.6f
 
 int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
                                   float min_limit_deg, float max_limit_deg,
                                   float deg_per_step, int32_t requested_steps)
 {
-    if (requested_steps == 0 || !isfinite(actual_deg) || !isfinite(home_deg) ||
+    (void)home_deg;
+    if (requested_steps == 0 || !isfinite(actual_deg) ||
         !isfinite(min_limit_deg) || !isfinite(max_limit_deg) || !isfinite(deg_per_step) ||
         deg_per_step <= 0.0f || max_limit_deg <= min_limit_deg) {
         return 0;
     }
 
-    // Normalized angular offsets relative to home (-180 to +180 deg)
-    float current_offset_deg = normalize_angle_deg(actual_deg - home_deg);
-    float max_offset_deg = normalize_angle_deg(max_limit_deg - home_deg);
-    float min_offset_deg = normalize_angle_deg(min_limit_deg - home_deg);
-
-    if (max_offset_deg <= 0.0f) max_offset_deg = 90.0f;
-    if (min_offset_deg >= 0.0f) min_offset_deg = -90.0f;
-
-    // Safety margin to ensure physical motor deceleration and mechanical tolerances stay within boundary
-    float safe_max_offset = max_offset_deg - PLANNER_LIMIT_MARGIN_DEG;
-    float safe_min_offset = min_offset_deg + PLANNER_LIMIT_MARGIN_DEG;
-    if (safe_max_offset <= safe_min_offset) {
-        safe_max_offset = max_offset_deg;
-        safe_min_offset = min_offset_deg;
-    }
-
-    bool moving_positive = (requested_steps > 0);
-    float permitted_delta_deg = 0.0f;
-
-    if (moving_positive) {
-        if (current_offset_deg >= safe_max_offset) {
-            return 0;
+    // Direct comparison against exact configured limits
+    if (requested_steps > 0) {
+        // Moving in positive direction
+        if (actual_deg >= max_limit_deg) {
+            return 0; // Already at or beyond max limit
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
-        float target_offset_deg = current_offset_deg + requested_delta_deg;
-        if (target_offset_deg > safe_max_offset) {
-            target_offset_deg = safe_max_offset;
+        float target_deg = actual_deg + requested_delta_deg;
+        if (target_deg > max_limit_deg) {
+            target_deg = max_limit_deg;
         }
-        if (target_offset_deg <= current_offset_deg) {
+        float permitted_delta_deg = target_deg - actual_deg;
+        if (permitted_delta_deg <= 0.0f) {
             return 0;
         }
-        permitted_delta_deg = target_offset_deg - current_offset_deg;
+        int32_t permitted_steps = (int32_t)floorf(permitted_delta_deg / deg_per_step);
+        if (permitted_steps > requested_steps) {
+            permitted_steps = requested_steps;
+        }
+        return permitted_steps;
     } else {
-        if (current_offset_deg <= safe_min_offset) {
+        // Moving in negative direction
+        if (actual_deg <= min_limit_deg) {
+            return 0; // Already at or below min limit
+        }
+        float requested_delta_deg = (float)requested_steps * deg_per_step; // negative
+        float target_deg = actual_deg + requested_delta_deg;
+        if (target_deg < min_limit_deg) {
+            target_deg = min_limit_deg;
+        }
+        float permitted_delta_deg = target_deg - actual_deg; // negative
+        if (permitted_delta_deg >= 0.0f) {
             return 0;
         }
-        float requested_delta_deg = (float)requested_steps * deg_per_step;
-        float target_offset_deg = current_offset_deg + requested_delta_deg;
-        if (target_offset_deg < safe_min_offset) {
-            target_offset_deg = safe_min_offset;
+        int32_t permitted_steps = (int32_t)floorf(fabsf(permitted_delta_deg) / deg_per_step);
+        int32_t requested_abs = -requested_steps;
+        if (permitted_steps > requested_abs) {
+            permitted_steps = requested_abs;
         }
-        if (target_offset_deg >= current_offset_deg) {
-            return 0;
-        }
-        permitted_delta_deg = target_offset_deg - current_offset_deg;
+        return -permitted_steps;
     }
-
-    int32_t permitted_steps = (int32_t)floorf(fabsf(permitted_delta_deg) / deg_per_step);
-    int64_t requested_magnitude = (requested_steps < 0) ? -(int64_t)requested_steps : (int64_t)requested_steps;
-    if ((int64_t)permitted_steps > requested_magnitude) {
-        permitted_steps = (int32_t)requested_magnitude;
-    }
-    return (requested_steps > 0) ? permitted_steps : -permitted_steps;
 }
 
 static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int32_t requested_steps,

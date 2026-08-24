@@ -49,8 +49,8 @@ class ParametersView(QWidget):
         
         header_layout.addStretch()
         
-        self.btn_refresh = QPushButton("📥 Ler do Hardware (STATUS)")
-        self.btn_refresh.clicked.connect(self.comm.request_status)
+        self.btn_refresh = QPushButton("📥 Ler Parâmetros (CONFIG DUMP)")
+        self.btn_refresh.clicked.connect(self.comm.request_config_dump)
         header_layout.addWidget(self.btn_refresh)
         
         self.btn_save_nvs = QPushButton("💾 Gravar Toda Configuração na NVS")
@@ -661,34 +661,48 @@ class ParametersView(QWidget):
         else:
             QMessageBox.warning(self, "Erro", "Não foi possível enviar comando LIMIT A.")
 
-    def _apply_tmc_settings(self):
+    def _apply_tmc_settings_internal(self) -> bool:
         client = self.comm.active_client
-        if client:
-            target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
-            # Always ensure UART is active to write TMC registers
-            results = [
-                client.set_driver_mode("UART"),
-                client.apply_driver_settings(),
-                client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
-                client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
-                client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
-                client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
-                client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
-                client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
-                client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
-                client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
-                client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
-            ]
+        if not client:
+            return False
+        target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
+        results = [
+            client.set_driver_mode("UART"),
+            client.apply_driver_settings(),
+            client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
+            client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
+            client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
+            client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
+            client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
+            client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
+            client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
+            client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
+            client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
+            client.set_driver_mode(target_mode),
+            client.apply_driver_settings(),
+        ]
+        return all(results)
 
-            # Restore and apply configured driver mode
-            results.extend([
-                client.set_driver_mode(target_mode),
-                client.apply_driver_settings(),
-            ])
-            return all(results)
-        return False
+    def _apply_tmc_settings(self):
+        if not self.comm.is_connected:
+            QMessageBox.warning(self, "Sem Conexão", "Conecte ao hardware antes de aplicar parâmetros TMC.")
+            return
+        success = self._apply_tmc_settings_internal()
+        if success:
+            QMessageBox.information(
+                self,
+                "TMC Gravado",
+                f"Configurações dos drivers TMC2209 gravadas na NVS com sucesso!\n"
+                f"Correntes aplicadas:\n"
+                f"• Eixo C: Run={self.spin_tmc_irun_c.value()}mA / Hold={self.spin_tmc_ihold_c.value()}mA\n"
+                f"• Eixo A: Run={self.spin_tmc_irun_a.value()}mA / Hold={self.spin_tmc_ihold_a.value()}mA\n"
+                f"• Eixo Z: Run={self.spin_tmc_irun_z.value()}mA / Hold={self.spin_tmc_ihold_z.value()}mA"
+            )
+            self.comm.request_config_dump()
+        else:
+            QMessageBox.warning(self, "Aviso", "Falha ao enviar algumas configurações do TMC.")
 
-    def _apply_can_settings(self):
+    def _apply_can_settings_internal(self) -> bool:
         try:
             node_id = self.spin_node_id.value()
             bitrate = int(self.combo_can_bitrate.currentText())
@@ -697,66 +711,85 @@ class ParametersView(QWidget):
             event_base = int(self.txt_base_event.text(), 16)
             if hasattr(self.comm.active_client, 'configure_can'):
                 return self.comm.active_client.configure_can(node_id, bitrate, cmd_base, status_base, event_base)
+        except ValueError:
+            pass
+        return False
+
+    def _apply_can_settings(self):
+        if not self.comm.is_connected:
+            QMessageBox.warning(self, "Sem Conexão", "Conecte ao hardware antes de aplicar parâmetros CAN.")
+            return
+        try:
+            int(self.txt_base_cmd.text(), 16)
+            int(self.txt_base_status.text(), 16)
+            int(self.txt_base_event.text(), 16)
         except ValueError as e:
             QMessageBox.warning(self, "Valor Inválido", f"Formato hexadecimal incorreto nas bases CAN: {e}")
-        return False
+            return
+
+        success = self._apply_can_settings_internal()
+        if success:
+            QMessageBox.information(self, "CAN Gravado", "Configurações da rede CAN (TWAI) gravadas e aplicadas na NVS.")
+            self.comm.request_config_dump()
+        else:
+            QMessageBox.warning(self, "Aviso", "Falha ao aplicar configurações CAN.")
 
     def _apply_all_parameters(self):
         client = self.comm.active_client
-        if client:
-            # 1. Steps
-            results = [
-                client.set_steps_per_rev('C', self.spin_steps_c.value()),
-                client.set_steps_per_rev('A', self.spin_steps_a.value()),
-                client.set_steps_per_rev('Z', self.spin_steps_z.value()),
-            ]
-            
-            # 2. Speeds & Accel
-            results.extend([
-                client.set_axis_speed('C', self.spin_speed_c.value()),
-                client.set_axis_speed('A', self.spin_speed_a.value()),
-                client.set_axis_speed('Z', self.spin_speed_z.value()),
-                client.set_axis_accel('C', self.spin_accel_c.value()),
-                client.set_axis_accel('A', self.spin_accel_a.value()),
-                client.set_axis_accel('Z', self.spin_accel_z.value()),
-            ])
-            
-            # 3. Inverts
-            results.extend([
-                client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
-                client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
-                client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
-            ])
-            
-            # 4. Pulley Z & Max Z
-            results.extend([
-                client.set_z_pulley_teeth(self.spin_pulley_z.value()),
-                client.set_length_z(self.spin_max_z.value()),
-            ])
-
-            # 5. Angular Limits C & A
-            results.extend([
-                client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
-                client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
-            ])
-            
-            # 6. TMC settings (handles temporary UART mode and restore)
-            results.append(self._apply_tmc_settings())
-            
-            # 7. CAN settings
-            results.append(self._apply_can_settings())
-            
-            # 8. Refresh and read back
-            results.append(self.comm.request_status())
-
-            if all(results):
-                QMessageBox.information(self, "Sucesso", "Todas as configurações foram enviadas ao hardware.")
-            else:
-                QMessageBox.warning(
-                    self,
-                    "Aplicação Parcial",
-                    "Algumas configurações não são suportadas pela interface ativa ou não puderam ser enviadas. "
-                    "Consulte a barra de status/terminal.",
-                )
-        else:
+        if not client or not self.comm.is_connected:
             QMessageBox.warning(self, "Sem conexão", "Conecte ao hardware antes de aplicar parâmetros.")
+            return
+
+        # 1. Steps
+        results = [
+            client.set_steps_per_rev('C', self.spin_steps_c.value()),
+            client.set_steps_per_rev('A', self.spin_steps_a.value()),
+            client.set_steps_per_rev('Z', self.spin_steps_z.value()),
+        ]
+        
+        # 2. Speeds & Accel
+        results.extend([
+            client.set_axis_speed('C', self.spin_speed_c.value()),
+            client.set_axis_speed('A', self.spin_speed_a.value()),
+            client.set_axis_speed('Z', self.spin_speed_z.value()),
+            client.set_axis_accel('C', self.spin_accel_c.value()),
+            client.set_axis_accel('A', self.spin_accel_a.value()),
+            client.set_axis_accel('Z', self.spin_accel_z.value()),
+        ])
+        
+        # 3. Inverts
+        results.extend([
+            client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
+            client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
+            client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
+        ])
+        
+        # 4. Pulley Z & Max Z
+        results.extend([
+            client.set_z_pulley_teeth(self.spin_pulley_z.value()),
+            client.set_length_z(self.spin_max_z.value()),
+        ])
+
+        # 5. Angular Limits C & A
+        results.extend([
+            client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
+            client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
+        ])
+        
+        # 6. TMC settings
+        results.append(self._apply_tmc_settings_internal())
+        
+        # 7. CAN settings
+        results.append(self._apply_can_settings_internal())
+        
+        # 8. Refresh and read back configuration
+        self.comm.request_config_dump()
+
+        if all(results):
+            QMessageBox.information(self, "Sucesso", "Todas as configurações foram gravadas na NVS com sucesso.")
+        else:
+            QMessageBox.warning(
+                self,
+                "Aplicação Parcial",
+                "Algumas configurações não puderam ser enviadas. Consulte a barra de status/terminal.",
+            )

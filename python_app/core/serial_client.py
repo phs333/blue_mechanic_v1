@@ -29,6 +29,7 @@ class SerialClient(BaseClient):
         self.lock = threading.Lock()
         self.port_name = ""
         self.baudrate = 115200
+        self._in_config_dump = False
         
     @staticmethod
     def list_available_ports() -> List[Dict[str, str]]:
@@ -60,8 +61,10 @@ class SerialClient(BaseClient):
             
             self.state.set_connection_status(True, f"COM ({port} @ {baudrate})")
             
-            # Initial poll
+            # Initial parameters read and status poll
             time.sleep(0.1)
+            self.request_config_dump()
+            time.sleep(0.05)
             self.request_status()
             return True
         except Exception as e:
@@ -134,31 +137,22 @@ class SerialClient(BaseClient):
 
     def _parse_response_line(self, line: str):
         """Parse status lines printed by Blue Mechanic V1 ESP32 firmware."""
+        # --- 1. LIVE TELEMETRY PARSERS (Pure Dynamic State) ---
         # Eixo C (Base): 45.20 deg (Limites: [10.00, 190.00] deg)
-        m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)(?:\s*\(Limites:\s*\[([\d\.\-]+),\s*([\d\.\-]+)\]\s*deg\))?', line, re.IGNORECASE)
+        m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
         if m_c:
             try:
                 self.state.update_telemetry(pos_c_deg=float(m_c.group(1)), pos_c_valid=True)
-                if m_c.group(2) and m_c.group(3):
-                    self.state.update_parameters(
-                        limit_min_deg_c=float(m_c.group(2)),
-                        limit_max_deg_c=float(m_c.group(3))
-                    )
             except ValueError:
                 pass
         elif re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):
             self.state.update_telemetry(pos_c_valid=False)
 
         # Eixo A (Pivot): 12.30 deg (Limites: [10.00, 190.00] deg)
-        m_a = re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)(?:\s*\(Limites:\s*\[([\d\.\-]+),\s*([\d\.\-]+)\]\s*deg\))?', line, re.IGNORECASE)
+        m_a = re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
         if m_a:
             try:
                 self.state.update_telemetry(pos_a_deg=float(m_a.group(1)), pos_a_valid=True)
-                if m_a.group(2) and m_a.group(3):
-                    self.state.update_parameters(
-                        limit_min_deg_a=float(m_a.group(2)),
-                        limit_max_deg_a=float(m_a.group(3))
-                    )
             except ValueError:
                 pass
         elif re.search(r'Eixo\s+[AY](?:\s*\(.*?\))?:\s*erro', line, re.IGNORECASE):
@@ -186,7 +180,7 @@ class SerialClient(BaseClient):
         if m:
             self.state.update_telemetry(z_bloqueado=(m.group(1).upper() == "BLOQUEADO"))
 
-        # Drivers: ENERGIZADOS / DESLIGADOS ou Drivers energizados / desligados
+        # Drivers: ENERGIZADOS / DESLIGADOS
         m = re.search(r'Drivers:?\s*(ENERGIZADOS|DESLIGADOS)', line, re.IGNORECASE)
         if m:
             self.state.update_telemetry(drivers_enabled=(m.group(1).upper() == "ENERGIZADOS"))
@@ -219,7 +213,7 @@ class SerialClient(BaseClient):
                 mode = FanMode.MANUAL_ON
             self.state.update_telemetry(fan_output_on=fan_on, fan_mode=mode)
 
-        # Temperatura: 32.50 C / Temperatura atual: 32.50 C
+        # Temperatura: 32.50 C
         m = re.search(r'Temperatura(?:\satual)?:\s*([\d\.\-]+)\s*C', line, re.IGNORECASE)
         if m:
             try:
@@ -229,69 +223,72 @@ class SerialClient(BaseClient):
         elif "Temperatura: indisponivel" in line:
             self.state.update_telemetry(temp_valid=False)
 
-        # CAN: ONLINE node=1 bitrate=500000
-        m = re.search(r'CAN:\s*(ONLINE|OFF|CONFIGURADO/OFFLINE)\s+node=(\d+)\s+bitrate=(\d+)', line, re.IGNORECASE)
-        if m:
-            can_online = (m.group(1).upper() == "ONLINE")
-            node_id = int(m.group(2))
-            bitrate = int(m.group(3))
-            self.state.update_telemetry(can_online=can_online)
-            self.state.update_parameters(node_id=node_id, can_bitrate=bitrate, can_enabled=can_online)
+        # TMC UART status line
+        if "TMC UART: ATIVA" in line:
+            self.state.update_telemetry(tmc_uart_ready=True)
 
-        # Home C/X/A/Y gravado em ... deg
-        m_home = re.search(r'Home\s+([CAXY])\s+gravado\s+em\s+([\d\.\-]+)\s*deg', line, re.IGNORECASE)
-        if m_home:
-            axis = m_home.group(1).upper()
-            val = float(m_home.group(2))
-            if axis in ['C', 'X']:
-                self.state.update_parameters(home_c_deg=val)
-            else:
-                self.state.update_parameters(home_a_deg=val)
+        # CAN status line
+        m_can_stat = re.search(r'CAN:\s*(ONLINE|OFF|CONFIGURADO/OFFLINE)', line, re.IGNORECASE)
+        if m_can_stat:
+            self.state.update_telemetry(can_online=(m_can_stat.group(1).upper() == "ONLINE"))
 
-        # Polia Z: 16T GT2 ou Polia do motor Z configurada para 16 dentes
-        m_pulley = re.search(r'Polia(?:.*Z)?[^\d]*(\d+)\s*(?:T|dentes)', line, re.IGNORECASE)
-        if m_pulley:
-            try:
-                self.state.update_parameters(z_pulley_teeth=int(m_pulley.group(1)))
-            except ValueError:
-                pass
+        # --- 2. CONFIG DUMP BATCH PARSER (Persistent Parameters) ---
+        if "=== CONFIG DUMP ===" in line:
+            self._in_config_dump = True
+            return
 
-        # --- NVS CONFIG DUMP PARSERS ---
+        if self._in_config_dump and "===================" in line:
+            self._in_config_dump = False
+            self.state.parameters_updated.emit(self.state.parameters)
+            return
+
         m_cfg_steps = re.search(r'CONFIG STEPS C=(\d+)\s+A=(\d+)\s+Z=(\d+)', line, re.IGNORECASE)
         if m_cfg_steps:
             c, a, z = int(m_cfg_steps.group(1)), int(m_cfg_steps.group(2)), int(m_cfg_steps.group(3))
             self.state.parameters.steps_per_rev = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_spd = re.search(r'CONFIG SPEED C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_spd:
             c, a, z = float(m_cfg_spd.group(1)), float(m_cfg_spd.group(2)), float(m_cfg_spd.group(3))
             self.state.parameters.speed = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_spd_max = re.search(r'CONFIG SPEED_MAX C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_spd_max:
             c, a, z = float(m_cfg_spd_max.group(1)), float(m_cfg_spd_max.group(2)), float(m_cfg_spd_max.group(3))
             self.state.parameters.speed_max = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_acc = re.search(r'CONFIG ACCEL C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_acc:
             c, a, z = float(m_cfg_acc.group(1)), float(m_cfg_acc.group(2)), float(m_cfg_acc.group(3))
             self.state.parameters.accel = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_acc_max = re.search(r'CONFIG ACCEL_MAX C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_acc_max:
             c, a, z = float(m_cfg_acc_max.group(1)), float(m_cfg_acc_max.group(2)), float(m_cfg_acc_max.group(3))
             self.state.parameters.accel_max = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_inv = re.search(r'CONFIG INVERT C=([01])\s+A=([01])\s+Z=([01])', line, re.IGNORECASE)
         if m_cfg_inv:
             c, a, z = (m_cfg_inv.group(1) == "1"), (m_cfg_inv.group(2) == "1"), (m_cfg_inv.group(3) == "1")
             self.state.parameters.inverter = [c, a, z]
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_z = re.search(r'CONFIG PULLEY_Z=(\d+)\s+MAX_PASSOS_Z=(\d+)', line, re.IGNORECASE)
         if m_cfg_z:
@@ -300,7 +297,9 @@ class SerialClient(BaseClient):
             self.state.parameters.z_pulley_teeth = teeth
             self.state.parameters.max_passos_z = max_z
             self.state.telemetry.max_z_steps = max_z
-            self.state.parameters_updated.emit(self.state.parameters)
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_cfg_lim = re.search(r'CONFIG LIMITS C=([\d\.\-]+)\.\.([\d\.\-]+)\s+A=([\d\.\-]+)\.\.([\d\.\-]+)', line, re.IGNORECASE)
         if m_cfg_lim:
@@ -308,7 +307,56 @@ class SerialClient(BaseClient):
             self.state.parameters.limit_max_deg_c = float(m_cfg_lim.group(2))
             self.state.parameters.limit_min_deg_a = float(m_cfg_lim.group(3))
             self.state.parameters.limit_max_deg_a = float(m_cfg_lim.group(4))
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        m_cfg_mode = re.search(r'CONFIG DRIVER_BUS_MODE=(\d+)', line, re.IGNORECASE)
+        if m_cfg_mode:
+            self.state.parameters.driver_bus_mode = int(m_cfg_mode.group(1))
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        m_cfg_tmc = re.search(r'CONFIG TMC ([CAZ]) addr=(\d+) ihold=(\d+) irun=(\d+) delay=(\d+) usteps=(\d+) spread=([01])', line, re.IGNORECASE)
+        if m_cfg_tmc:
+            axis_char = m_cfg_tmc.group(1).upper()
+            idx = 0 if axis_char == 'C' else (1 if axis_char == 'A' else 2)
+            self.state.parameters.tmc_slave_addr[idx] = int(m_cfg_tmc.group(2))
+            self.state.parameters.tmc_ihold_ma[idx] = int(m_cfg_tmc.group(3))
+            self.state.parameters.tmc_irun_ma[idx] = int(m_cfg_tmc.group(4))
+            self.state.parameters.tmc_ihold_delay[idx] = int(m_cfg_tmc.group(5))
+            self.state.parameters.tmc_microsteps[idx] = int(m_cfg_tmc.group(6))
+            self.state.parameters.tmc_spreadcycle[idx] = (m_cfg_tmc.group(7) == "1")
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        m_cfg_can = re.search(r'CONFIG CAN node=(\d+)\s+bitrate=(\d+)\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
+        if m_cfg_can:
+            try:
+                self.state.parameters.node_id = int(m_cfg_can.group(1))
+                self.state.parameters.can_bitrate = int(m_cfg_can.group(2))
+                self.state.parameters.can_command_base_id = int(m_cfg_can.group(3), 16)
+                self.state.parameters.can_status_base_id = int(m_cfg_can.group(4), 16)
+                self.state.parameters.can_event_base_id = int(m_cfg_can.group(5), 16)
+                if not self._in_config_dump:
+                    self.state.parameters_updated.emit(self.state.parameters)
+            except ValueError:
+                pass
+            return
+
+        # --- 3. INDIVIDUAL PARAMETER CHANGE CONFIRMATIONS ---
+        m_home = re.search(r'Home\s+([CAXY])\s+gravado\s+em\s+([\d\.\-]+)\s*deg', line, re.IGNORECASE)
+        if m_home:
+            axis = m_home.group(1).upper()
+            val = float(m_home.group(2))
+            if axis in ['C', 'X']:
+                self.state.parameters.home_c_deg = val
+            else:
+                self.state.parameters.home_a_deg = val
             self.state.parameters_updated.emit(self.state.parameters)
+            return
 
         m_lim_resp = re.search(r'LIMIT\s+([CA])\s+gravado:\s+min=([\d\.\-]+)\s+max=([\d\.\-]+)', line, re.IGNORECASE)
         if m_lim_resp:
@@ -322,62 +370,23 @@ class SerialClient(BaseClient):
                 self.state.parameters.limit_min_deg_a = mn
                 self.state.parameters.limit_max_deg_a = mx
             self.state.parameters_updated.emit(self.state.parameters)
+            return
 
-        m_cfg_mode = re.search(r'CONFIG DRIVER_BUS_MODE=(\d+)', line, re.IGNORECASE)
-        if m_cfg_mode:
-            self.state.parameters.driver_bus_mode = int(m_cfg_mode.group(1))
-            self.state.parameters_updated.emit(self.state.parameters)
-
-        m_cfg_tmc = re.search(r'CONFIG TMC ([CAZ]) addr=(\d+) ihold=(\d+) irun=(\d+) delay=(\d+) usteps=(\d+) spread=([01])', line, re.IGNORECASE)
-        if m_cfg_tmc:
-            axis_char = m_cfg_tmc.group(1).upper()
-            idx = 0 if axis_char == 'C' else (1 if axis_char == 'A' else 2)
-            self.state.parameters.tmc_slave_addr[idx] = int(m_cfg_tmc.group(2))
-            self.state.parameters.tmc_ihold_ma[idx] = int(m_cfg_tmc.group(3))
-            self.state.parameters.tmc_irun_ma[idx] = int(m_cfg_tmc.group(4))
-            self.state.parameters.tmc_ihold_delay[idx] = int(m_cfg_tmc.group(5))
-            self.state.parameters.tmc_microsteps[idx] = int(m_cfg_tmc.group(6))
-            self.state.parameters.tmc_spreadcycle[idx] = (m_cfg_tmc.group(7) == "1")
-            self.state.parameters_updated.emit(self.state.parameters)
-
-        # TMC line from STATUS (TMC C: addr=0 ihold=59mA irun=59mA delay=6 status=UART OK)
-        m_tmc_stat = re.search(r'TMC ([CAZ]):\s+addr=(\d+)\s+ihold=(\d+)mA\s+irun=(\d+)mA\s+delay=(\d+)', line, re.IGNORECASE)
-        if m_tmc_stat:
-            axis_char = m_tmc_stat.group(1).upper()
-            idx = 0 if axis_char == 'C' else (1 if axis_char == 'A' else 2)
-            self.state.parameters.tmc_slave_addr[idx] = int(m_tmc_stat.group(2))
-            self.state.parameters.tmc_ihold_ma[idx] = int(m_tmc_stat.group(3))
-            self.state.parameters.tmc_irun_ma[idx] = int(m_tmc_stat.group(4))
-            self.state.parameters.tmc_ihold_delay[idx] = int(m_tmc_stat.group(5))
-            self.state.parameters_updated.emit(self.state.parameters)
-
-        # CAN bases from STATUS (CAN bases: cmd=0x200 status=0x280 event=0x300)
-        m_can_bases = re.search(r'CAN bases:\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
-        if m_can_bases:
+        m_pulley = re.search(r'Polia(?:.*Z)?[^\d]*(\d+)\s*(?:T|dentes)', line, re.IGNORECASE)
+        if m_pulley:
             try:
-                self.state.parameters.can_command_base_id = int(m_can_bases.group(1), 16)
-                self.state.parameters.can_status_base_id = int(m_can_bases.group(2), 16)
-                self.state.parameters.can_event_base_id = int(m_can_bases.group(3), 16)
+                self.state.parameters.z_pulley_teeth = int(m_pulley.group(1))
                 self.state.parameters_updated.emit(self.state.parameters)
             except ValueError:
                 pass
-
-        m_cfg_can = re.search(r'CONFIG CAN node=(\d+)\s+bitrate=(\d+)\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
-        if m_cfg_can:
-            try:
-                self.state.parameters.node_id = int(m_cfg_can.group(1))
-                self.state.parameters.can_bitrate = int(m_cfg_can.group(2))
-                self.state.parameters.can_command_base_id = int(m_cfg_can.group(3), 16)
-                self.state.parameters.can_status_base_id = int(m_cfg_can.group(4), 16)
-                self.state.parameters.can_event_base_id = int(m_cfg_can.group(5), 16)
-                self.state.parameters_updated.emit(self.state.parameters)
-            except ValueError:
-                pass
+            return
 
     # --- High Level Implementation ---
     def request_status(self) -> bool:
-        self.send_raw("CONFIG DUMP")
         return self.send_raw("STATUS")
+
+    def request_config_dump(self) -> bool:
+        return self.send_raw("CONFIG DUMP")
 
     def request_config_dump(self) -> bool:
         return self.send_raw("CONFIG DUMP")

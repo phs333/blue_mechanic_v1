@@ -339,11 +339,5 @@ class MainWindow(QMainWindow):
             self.lbl_status_hb.setText(f"💓 Heartbeat: Sem sinal ({int(time.time() - self.last_heartbeat_time)}s)")
             self.lbl_status_hb.setStyleSheet("color: #f87171; font-size: 11px; margin-right: 15px;")
 
-        # Periodically refresh live hardware position and telemetry for Serial/COM (throttled to 1.5s)
-        now = time.time()
-        if self.comm.is_connected and self.comm.backend == "COM":
-            if not hasattr(self, '_last_status_poll'):
-                self._last_status_poll = 0.0
-            if now - self._last_status_poll >= 1.5:
-                self._last_status_poll = now
-                self.comm.request_status()
+        # Telemetry is event-driven (ESP32 pushes updates on move finish / parameter changes)
+        pass

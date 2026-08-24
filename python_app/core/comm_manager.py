@@ -89,6 +89,11 @@ class CommManager(QObject):
             return self.active_client.request_status()
         return False
 
+    def request_config_dump(self) -> bool:
+        if self.active_client and hasattr(self.active_client, 'request_config_dump'):
+            return self.active_client.request_config_dump()
+        return False
+
     def set_driver_enabled(self, enable: bool) -> bool:
         if self.active_client:
             return self.active_client.set_driver_enabled(enable)

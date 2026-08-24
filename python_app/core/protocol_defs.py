@@ -21,7 +21,7 @@ DEFAULT_CAN_BITRATE = 500000
 
 # Physical & Kinematics Constants
 PASSOS_POR_VOLTA_MOTOR = 3200.0
-GRAUS_POR_PASSO_CA = 360.0 / PASSOS_POR_VOLTA_MOTOR  # 0.1125 deg/step (Eixos C e A)
+GRAUS_POR_PASSO_CA = 360.0 / PASSOS_POR_VOLTA_MOTOR  # 0.1125 deg/step (Eixos C e A: 800 passos = 90 deg, 400 passos = 45 deg, 133 passos = 15 deg)
 GRAUS_POR_PASSO_XY = GRAUS_POR_PASSO_CA  # Alias retrocompatibilidade
 
 Z_BELT_PITCH_MM = 2.0  # Correia GT2 = 2.0 mm passo

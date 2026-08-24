@@ -130,6 +130,7 @@ void app_main(void) {
   }
   for (size_t i = 0; i < AXIS_COUNT; ++i) {
       g_app.state.speed_delay_us[i] = g_app.settings.speed_delay_us[i];
+      g_app.state.inverter[i] = (bool)g_app.settings.inverter[i];
   }
   ESP_ERROR_CHECK(hardware_init(&g_app));
   g_app.state.driver_mode_requested =

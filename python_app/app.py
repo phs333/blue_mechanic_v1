@@ -40,7 +40,7 @@ def main():
     
     # Initialize UI
     window = MainWindow(comm, state)
-    window.show()
+    window.showMaximized()
     
     # Clean exit
     exit_code = app.exec()

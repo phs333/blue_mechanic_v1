@@ -147,7 +147,7 @@ class TerminalView(QWidget):
             node = self.comm.teensy_serial_client.node_id
             labels = [f"R {node}", f"P {node} 10 20", f"E {node} 1", f"S {node} 3", f"F {node} 2"]
             self.txt_cmd.setPlaceholderText(
-                f"Teensy Node {node}: M {node} C 800, MF {node} A -400, H {node} Z, R {node}..."
+                f"Teensy Node {node}: M {node} C 800, MS {node} 90.0 -45.0 10.00, H {node} Z, R {node}..."
             )
         else:
             self._terminal_mode = "ESP32"

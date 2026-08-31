@@ -116,12 +116,48 @@ class CanProtocolTests(unittest.TestCase):
             (lambda: self.client.set_fan(2), 2),
             (lambda: self.client.set_speed_level(3), 2),
             (lambda: self.client.set_axis_accel("Z", 300.0), 6),
+            (lambda: self.client.move_sync(800, -400, 1000), 8),
         ]
 
         for send, expected_dlc in cases:
             with self.subTest(expected_dlc=expected_dlc):
                 self.assertTrue(send())
                 self.assertEqual(len(self.client.frames[-1][1]), expected_dlc)
+
+    def test_move_sync_encodes_physical_units_in_one_trigger_frame(self):
+        self.assertTrue(self.client.move_sync(800, -400, 1000, force_no_encoder=True))
+        self.assertEqual(len(self.client.frames), 1)
+
+        _, payload, _ = self.client.frames[0]
+        opcode, angle_c_deci, angle_a_deci, distance_z_centi, flags = struct.unpack(
+            "<BhhhB", payload
+        )
+        self.assertEqual(opcode, CanOpcode.MOVE_SYNC)
+        self.assertEqual(angle_c_deci, 900)
+        self.assertEqual(angle_a_deci, -450)
+        self.assertEqual(distance_z_centi, 1000)
+        self.assertEqual(flags, 0x01)
+
+    def test_move_sync_sends_axis_profiles_before_trigger_when_requested(self):
+        self.assertTrue(
+            self.client.move_sync(
+                800,
+                -400,
+                1000,
+                speed_c=140.0,
+                speed_a=150.0,
+                speed_z=12.5,
+                accel=300.0,
+            )
+        )
+        self.assertEqual(len(self.client.frames), 4)
+        self.assertEqual([frame[1][0] for frame in self.client.frames[:3]], [
+            CanOpcode.MOVE_PROFILE,
+            CanOpcode.MOVE_PROFILE,
+            CanOpcode.MOVE_PROFILE,
+        ])
+        self.assertEqual(self.client.frames[-1][1][0], CanOpcode.MOVE_SYNC)
+        self.assertEqual(len(self.client.frames[-1][1]), 8)
 
 
 class SerialConfigParsingTests(unittest.TestCase):
@@ -174,6 +210,20 @@ class TeensySerialProtocolTests(unittest.TestCase):
         self.assertFalse(self.client.move_axis("C", 100, speed=200.0))
         self.assertFalse(self.client.set_axis_accel("A", 500.0))
         self.assertEqual(self.client.commands, [])
+
+    def test_move_sync_uses_teensy_physical_command(self):
+        self.assertTrue(
+            self.client.move_sync(
+                800,
+                -400,
+                1000,
+                speed_c=140.0,
+                speed_a=140.0,
+                speed_z=12.5,
+                force_no_encoder=True,
+            )
+        )
+        self.assertEqual(self.client.commands, ["MSF 3 90.0 -45.0 10.00"])
 
     def test_status_and_position_lines_update_selected_node(self):
         self.client._parse_response_line("STATUS 3 61 4095 2048 1 2 4")

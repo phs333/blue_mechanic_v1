@@ -4,6 +4,9 @@
 
 #include "app_defs.h"
 
+#define CAN_NODE_ID_MIN 1U
+#define CAN_NODE_ID_MAX 10U
+
 typedef enum {
     CAN_OP_PING = 0x01,
     CAN_OP_STATUS_REQUEST = 0x02,
@@ -15,6 +18,7 @@ typedef enum {
     CAN_OP_MOVE = 0x20,
     CAN_OP_HOME = 0x21,
     CAN_OP_MOVE_FORCE = 0x22,
+    CAN_OP_MOVE_SYNC = 0x23,
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
 } can_opcode_t;

@@ -49,6 +49,10 @@ esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0,
 static uint8_t speed_level_from_delay(uint32_t delay_us);
 static bool can_parse_axis(uint8_t token, size_t *axis_index, char *canonical_axis);
 static float can_decode_float_le(const uint8_t *data);
+static int16_t can_decode_i16_le(const uint8_t *data);
+static int32_t can_sync_angle_to_steps(const app_context_t *ctx, size_t axis_index,
+                                       int16_t angle_deci_deg);
+static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_centi_mm);
 static bool can_speed_is_valid(char axis, float speed);
 static bool can_accel_is_valid(char axis, float accel);
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame);
@@ -152,9 +156,9 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     payload[6] = (uint8_t)((laser_level[1] >> 8) & 0xFF);
     payload[7] = (uint8_t)((fan_output_on ? 0x01U : 0x00U) | ((uint8_t)fan_mode << 1) | ((uint8_t)speed_lvl << 4));
 
-    esp_err_t err1 = can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + ctx->settings.node_id), payload, sizeof(payload), can_online);
-
-    // Read live encoders and temperature for POS_TELEMETRY frame (ID: can_status_base_id + 0x10 + node_id)
+    // Capture live telemetry before any CAN transmission. This keeps the
+    // encoder path identical to the direct serial STATUS path and avoids
+    // sampling I2C immediately after switching the external CAN transceiver.
     float cur_c = 0.0f, cur_a = 0.0f;
     uint16_t c_centi = UINT16_MAX;
     uint16_t a_centi = UINT16_MAX;
@@ -183,9 +187,16 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     payload_pos[6] = (uint8_t)(temp_deci & 0xFF);
     payload_pos[7] = (uint8_t)((temp_deci >> 8) & 0xFF);
 
+    esp_err_t err1 = can_send_payload(ctx,
+                                      (uint16_t)(ctx->settings.can_status_base_id +
+                                                 ctx->settings.node_id),
+                                      payload, sizeof(payload), can_online);
+    if (err1 != ESP_OK) {
+        return err1;
+    }
     esp_err_t err2 = can_send_payload(ctx, (uint16_t)(ctx->settings.can_status_base_id + 0x10U + ctx->settings.node_id), payload_pos, sizeof(payload_pos), can_online);
 
-    return (err1 == ESP_OK) ? err2 : err1;
+    return err2;
 }
 
 void can_bus_print_status(const app_context_t *ctx)
@@ -214,15 +225,23 @@ void can_bus_print_status(const app_context_t *ctx)
 
 static bool validate_can_settings(const persisted_settings_t *settings)
 {
-    if (settings->node_id == 0U || settings->node_id > 127U) {
+    if (settings->node_id < CAN_NODE_ID_MIN ||
+        settings->node_id > CAN_NODE_ID_MAX) {
         ESP_LOGW(APP_TAG, "Node ID CAN invalido: %u", (unsigned)settings->node_id);
         return false;
     }
-    if ((settings->can_command_base_id + 127U) > TWAI_STD_ID_MASK ||
-        (settings->can_status_base_id + 127U) > TWAI_STD_ID_MASK ||
-        (settings->can_status_base_id + 0x10U + 127U) > TWAI_STD_ID_MASK ||
-        (settings->can_event_base_id + 127U) > TWAI_STD_ID_MASK) {
+    if ((settings->can_command_base_id + CAN_NODE_ID_MAX) > TWAI_STD_ID_MASK ||
+        (settings->can_status_base_id + CAN_NODE_ID_MAX) > TWAI_STD_ID_MASK ||
+        (settings->can_status_base_id + 0x10U + CAN_NODE_ID_MAX) > TWAI_STD_ID_MASK ||
+        (settings->can_event_base_id + CAN_NODE_ID_MAX) > TWAI_STD_ID_MASK) {
         ESP_LOGW(APP_TAG, "Bases CAN excedem o range de 11 bits.");
+        return false;
+    }
+    if ((settings->can_status_base_id + CAN_NODE_ID_MAX) >=
+            (settings->can_status_base_id + 0x10U + CAN_NODE_ID_MIN) ||
+        (settings->can_status_base_id + 0x10U + CAN_NODE_ID_MAX) >=
+            (settings->can_event_base_id + CAN_NODE_ID_MIN)) {
+        ESP_LOGW(APP_TAG, "Faixas CAN de status, posicao e eventos se sobrepoem.");
         return false;
     }
 
@@ -438,6 +457,49 @@ static float can_decode_float_le(const uint8_t *data)
     float value = 0.0f;
     memcpy(&value, &bits, sizeof(value));
     return value;
+}
+
+static int16_t can_decode_i16_le(const uint8_t *data)
+{
+    return (int16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static int32_t can_sync_angle_to_steps(const app_context_t *ctx, size_t axis_index,
+                                       int16_t angle_deci_deg)
+{
+    uint16_t steps_per_rev = ctx->settings.steps_per_rev[axis_index];
+    uint16_t microsteps = ctx->settings.tmc_microsteps[axis_index];
+    if (steps_per_rev == 0U) {
+        steps_per_rev = 200U;
+    }
+    if (microsteps == 0U) {
+        microsteps = 16U;
+    }
+
+    float angle_deg = (float)angle_deci_deg / 10.0f;
+    return (int32_t)lroundf(angle_deg * (float)steps_per_rev *
+                           (float)microsteps / 360.0f);
+}
+
+static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_centi_mm)
+{
+    uint16_t steps_per_rev = ctx->settings.steps_per_rev[AXIS_Z_ID];
+    uint16_t microsteps = ctx->settings.tmc_microsteps[AXIS_Z_ID];
+    uint16_t pulley_teeth = ctx->settings.z_pulley_teeth;
+    if (steps_per_rev == 0U) {
+        steps_per_rev = 200U;
+    }
+    if (microsteps == 0U) {
+        microsteps = 16U;
+    }
+    if (pulley_teeth == 0U) {
+        pulley_teeth = DEFAULT_Z_PULLEY_TEETH;
+    }
+
+    float distance_mm = (float)distance_centi_mm / 100.0f;
+    float mm_per_rev = (float)pulley_teeth * Z_BELT_PITCH_MM;
+    return (int32_t)lroundf(distance_mm * (float)steps_per_rev *
+                           (float)microsteps / mm_per_rev);
 }
 
 static bool can_speed_is_valid(char axis, float speed)
@@ -690,6 +752,56 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_MOVE_FORCE, (uint8_t)err);
         } else {
             xSemaphoreGive(ctx->state_mutex);
+        }
+        break;
+
+    case CAN_OP_MOVE_SYNC:
+        if (len == 8U) {
+            int16_t angle_c_deci = can_decode_i16_le(&buf[1]);
+            int16_t angle_a_deci = can_decode_i16_le(&buf[3]);
+            int16_t distance_z_centi_mm = can_decode_i16_le(&buf[5]);
+            uint8_t flags = buf[7];
+            float speed_c = -1.0f;
+            float speed_a = -1.0f;
+            float speed_z = -1.0f;
+            float accel = -1.0f;
+
+            if ((flags & ~0x01U) != 0U) {
+                err = ESP_ERR_INVALID_ARG;
+            } else {
+                float *sync_speeds[AXIS_COUNT] = {&speed_c, &speed_a, &speed_z};
+                for (size_t i = 0; i < AXIS_COUNT; ++i) {
+                    if (s_motion_profiles[i].valid) {
+                        *sync_speeds[i] = s_motion_profiles[i].speed;
+                        if (s_motion_profiles[i].accel > 0.0f) {
+                            if (accel > 0.0f && fabsf(accel - s_motion_profiles[i].accel) > 0.5f) {
+                                err = ESP_ERR_INVALID_ARG;
+                            } else {
+                                accel = s_motion_profiles[i].accel;
+                            }
+                        }
+                    }
+                    s_motion_profiles[i].valid = false;
+                }
+            }
+
+            int32_t steps_c = can_sync_angle_to_steps(ctx, AXIS_C_ID, angle_c_deci);
+            int32_t steps_a = can_sync_angle_to_steps(ctx, AXIS_A_ID, angle_a_deci);
+            int32_t steps_z = can_sync_z_to_steps(ctx, distance_z_centi_mm);
+            xSemaphoreGive(ctx->state_mutex);
+
+            if (err == ESP_OK) {
+                err = motion_post_move_sync(ctx, steps_c, steps_a, steps_z,
+                                            speed_c, speed_a, speed_z, accel,
+                                            (flags & 0x01U) != 0U,
+                                            ctx->settings.node_id, CAN_OP_MOVE_SYNC);
+            }
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
+                                 CAN_OP_MOVE_SYNC, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_MOVE_SYNC,
+                                 (uint8_t)ESP_ERR_INVALID_SIZE);
         }
         break;
 

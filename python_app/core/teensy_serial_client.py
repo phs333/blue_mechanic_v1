@@ -23,6 +23,8 @@ from .protocol_defs import (
     STATUS_FLAG_TEMP_VALID,
     STATUS_FLAG_TMC_UART_READY,
     STATUS_FLAG_Z_BLOQUEADO,
+    calc_ca_degrees_per_step,
+    calc_z_mm_per_step,
 )
 from .state_model import DeviceState
 
@@ -361,6 +363,48 @@ class TeensySerialClient(BaseClient):
             return False
         command = "MF" if force_no_encoder else "M"
         return self.send_raw(f"{command} {self.node_id} {canonical} {int(steps)}")
+
+    def move_sync(
+        self,
+        steps_c: int = 0,
+        steps_a: int = 0,
+        steps_z: int = 0,
+        speed_c: Optional[float] = None,
+        speed_a: Optional[float] = None,
+        speed_z: Optional[float] = None,
+        accel: Optional[float] = None,
+        force_no_encoder: bool = False,
+    ) -> bool:
+        params = self.state.parameters
+        angle_c_deg = int(steps_c) * calc_ca_degrees_per_step(
+            params.steps_per_rev[0], params.tmc_microsteps[0]
+        )
+        angle_a_deg = int(steps_a) * calc_ca_degrees_per_step(
+            params.steps_per_rev[1], params.tmc_microsteps[1]
+        )
+        distance_z_mm = int(steps_z) * calc_z_mm_per_step(
+            params.z_pulley_teeth,
+            params.steps_per_rev[2],
+            params.tmc_microsteps[2],
+        )
+
+        angle_c_deci = round(angle_c_deg * 10.0)
+        angle_a_deci = round(angle_a_deg * 10.0)
+        distance_z_centi = round(distance_z_mm * 100.0)
+        if any(
+            value < -32768 or value > 32767
+            for value in (angle_c_deci, angle_a_deci, distance_z_centi)
+        ):
+            self.state.error_occurred.emit(
+                "MOVE_SYNC fora da faixa do protocolo Teensy/CAN."
+            )
+            return False
+
+        command = "MSF" if force_no_encoder else "MS"
+        return self.send_raw(
+            f"{command} {self.node_id} {angle_c_deci / 10.0:.1f} "
+            f"{angle_a_deci / 10.0:.1f} {distance_z_centi / 100.0:.2f}"
+        )
 
     def set_laser(self, laser_index: int, level: int) -> bool:
         laser_index = int(laser_index)

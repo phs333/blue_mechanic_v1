@@ -67,6 +67,7 @@ class CanOpcode(IntEnum):
     MOVE = 0x20
     HOME = 0x21
     MOVE_FORCE = 0x22
+    MOVE_SYNC = 0x23
     LASER = 0x30
     FAN = 0x31
 

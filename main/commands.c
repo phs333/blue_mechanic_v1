@@ -78,7 +78,7 @@ void commands_print_help(void)
     puts("DRIVER APPLY");
     puts("CAN STATUS");
     puts("CAN ON / CAN OFF / CAN APPLY");
-    puts("CAN NODE <1..127>");
+    puts("CAN NODE <1..10>");
     puts("CAN BITRATE <125000|250000|500000|1000000>");
     puts("CAN BASE CMD|STATUS|EVENT <id>");
     puts("CAN SEND STATUS");
@@ -842,8 +842,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     unsigned node_id = 0;
     if (sscanf(cmd, "CAN NODE %u", &node_id) == 1) {
-        if (node_id == 0U || node_id > 127U) {
-            puts("Node ID invalido. Use 1..127.");
+        if (node_id < CAN_NODE_ID_MIN || node_id > CAN_NODE_ID_MAX) {
+            puts("Node ID invalido. Use 1..10.");
             return;
         }
         ctx->settings.node_id = (uint8_t)node_id;

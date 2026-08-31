@@ -16,7 +16,7 @@ Aplicação desktop profissional em Python e PyQt6 para controle, parametrizaç�
 
 - **Quatro backends de comunicação**:
   - **ESP32-S3 Serial Direta (COM / UART)**: Transmissão de comandos ASCII (`STATUS`, `MOVE`, `MOVE_F`, `HOME`, `SETHOME`, `SPEED`, `ACCEL`, `LASER`, `FAN`, `DRIVER`, etc.) com parsing e telemetria contínua.
-  - **Teensy USB/CAN (COM / CDC-ACM)**: Conexão serial própria com o bridge Teensy 4.1 e comandos compactos `M`, `MF`, `H`, `E`, `S`, `L`, `F`, `P` e `R`. O app seleciona um node ESP32-S3 entre 1 e 10 e decodifica `STATUS`, `POS`, `HEARTBEAT`, `PONG`, `ACK`, `DONE`, `ERROR` e `TEENSY_ERROR`.
+  - **Teensy USB/CAN (COM / CDC-ACM)**: Conexão serial própria com o bridge Teensy 4.1 e comandos compactos `M`, `MF`, `MS`, `MSF`, `H`, `E`, `S`, `L`, `F`, `P` e `R`. O app seleciona um node ESP32-S3 entre 1 e 10 e decodifica `STATUS`, `POS`, `HEARTBEAT`, `PONG`, `ACK`, `DONE`, `ERROR` e `TEENSY_ERROR`.
   - **PeakCAN (PCAN-Basic)**: Suporte completo ao protocolo CAN 11-bit padrão com decodificação de `HEARTBEAT` (0x80), `STATUS` (0x82), `PONG` (0x81), `ACK` (0x83), `DONE` (0x84) e `ERROR` (0xE0).
   - **Simulador Virtual Integrado**: Permite testar movimentação, lasers, aquecimento térmico e sniffer sem precisar do hardware conectado fisicamente.
 - **Dashboard em Tempo Real**:
@@ -71,7 +71,7 @@ python -m python_app.app
    - Selecione `Teensy USB/CAN`.
    - Escolha a porta COM USB do Teensy, o baud rate `115200` e o node ESP32-S3 de destino (`1` a `10`).
    - Clique em **Conectar**. O app solicitará `R <node>` periodicamente para atualizar status e posição.
-   - O terminal muda automaticamente para exemplos do protocolo Teensy. Operações que o bridge não oferece, como gravação de NVS, perfil individual por eixo e movimento sincronizado, são reportadas como não suportadas.
+   - O terminal muda automaticamente para exemplos do protocolo Teensy. O movimento sincronizado usa `MS/MSF` e o opcode CAN `0x23`; gravação de NVS e perfil individual por eixo continuam reportados como não suportados.
 
 3. **PeakCAN (PCAN-Basic)**:
    - Certifique-se de ter o driver PCAN instalado no Windows (driver PCAN-USB da PEAK-System).

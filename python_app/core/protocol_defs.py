@@ -55,7 +55,7 @@ def calc_z_steps_for_mm(mm: float, pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH,
                         steps_per_rev: int = 200, microsteps: int = 16) -> int:
     return int(round(float(mm) * calc_z_steps_per_mm(pulley_teeth, steps_per_rev, microsteps)))
 
-# --- CAN Protocol OpCodes (Master -> Slave) ---
+# --- CAN Protocol OpCodes (Teensy/host -> ESP32) ---
 class CanOpcode(IntEnum):
     PING = 0x01
     STATUS_REQUEST = 0x02
@@ -70,7 +70,7 @@ class CanOpcode(IntEnum):
     LASER = 0x30
     FAN = 0x31
 
-# --- CAN Protocol Events / Responses (Slave -> Master) ---
+# --- CAN Protocol Events / Responses (ESP32 -> Teensy/host) ---
 class CanEvent(IntEnum):
     HEARTBEAT = 0x80
     PONG = 0x81

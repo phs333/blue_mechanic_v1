@@ -115,7 +115,7 @@ class SimulatorClient(BaseClient):
 
             # Thermal simulation (laser heats up, fan cools down)
             if now - last_temp_update > 0.5:
-                laser_heat = (self.laser1 + self.laser2) / 510.0 * 15.0 # up to +15C
+                laser_heat = (self.laser1 + self.laser2) / 8190.0 * 15.0 # up to +15C
                 fan_cooling = -10.0 if self.fan_on else 0.0
                 target_temp = self.temp_ambient + laser_heat + fan_cooling
                 
@@ -201,8 +201,8 @@ class SimulatorClient(BaseClient):
             f"Alarme Z: {'ON' if self.alarm_z else 'OFF'}\n"
             f"Estado Z: {'BLOQUEADO' if self.z_locked else 'LIVRE'}\n"
             f"Drivers: {'ENERGIZADOS' if self.drivers_en else 'DESLIGADOS'}\n"
-            f"Laser 1: {int(self.laser1*100/255)}% ({self.laser1}/255)\n"
-            f"Laser 2: {int(self.laser2*100/255)}% ({self.laser2}/255)\n"
+            f"Laser 1: {int(self.laser1*100/4095)}% ({self.laser1}/4095)\n"
+            f"Laser 2: {int(self.laser2*100/4095)}% ({self.laser2}/4095)\n"
             f"Fan: {'ON' if self.fan_on else 'OFF'} ({self.fan_mode.name})\n"
             f"Temperatura: {self.temp_base:.2f} C"
         )
@@ -281,14 +281,14 @@ class SimulatorClient(BaseClient):
         return True
 
     def set_laser(self, laser_index: int, level: int) -> bool:
-        level = max(0, min(255, level))
+        level = max(0, min(4095, level))
         if laser_index == 1:
             self.laser1 = level
             self.state.update_telemetry(laser1_level=level)
         elif laser_index == 2:
             self.laser2 = level
             self.state.update_telemetry(laser2_level=level)
-        self.state.raw_message_received.emit("RX", f"Laser {laser_index} ajustado para {level}/255.")
+        self.state.raw_message_received.emit("RX", f"Laser {laser_index} ajustado para {level}/4095.")
         return True
 
     def set_fan(self, mode: int) -> bool:

@@ -1,6 +1,6 @@
 """
 Communication Manager for Blue Mechanic V1.
-Seamlessly switches between Serial (COM), PeakCAN, and Simulator backends.
+Switches between direct ESP32 serial, Teensy USB/CAN, PeakCAN, and Simulator.
 """
 
 from typing import Optional, List, Dict, Any
@@ -9,6 +9,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from .state_model import DeviceState
 from .base_client import BaseClient
 from .serial_client import SerialClient
+from .teensy_serial_client import TeensySerialClient
 from .can_client import CanClient
 from .simulator import SimulatorClient
 
@@ -18,6 +19,7 @@ class CommManager(QObject):
         self.state = state or DeviceState()
         
         self.serial_client = SerialClient(self.state)
+        self.teensy_serial_client = TeensySerialClient(self.state)
         self.can_client = CanClient(self.state)
         self.sim_client = SimulatorClient(self.state)
         
@@ -36,6 +38,23 @@ class CommManager(QObject):
         if success:
             self.active_client = self.serial_client
             self.backend_type = "COM"
+        return success
+
+    def connect_teensy(
+        self,
+        port: str,
+        baudrate: int = 115200,
+        node_id: int = 1,
+    ) -> bool:
+        self.disconnect_all()
+        success = self.teensy_serial_client.connect(
+            port=port,
+            baudrate=baudrate,
+            node_id=node_id,
+        )
+        if success:
+            self.active_client = self.teensy_serial_client
+            self.backend_type = "TEENSY"
         return success
 
     def connect_can(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
@@ -65,6 +84,7 @@ class CommManager(QObject):
             self.active_client.disconnect()
             self.active_client = None
         self.serial_client.disconnect()
+        self.teensy_serial_client.disconnect()
         self.can_client.disconnect()
         self.sim_client.disconnect()
         self.backend_type = "None"
@@ -124,9 +144,21 @@ class CommManager(QObject):
             return self.active_client.move_axis(axis, steps, speed, accel, force_no_encoder)
         return False
 
-    def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
+    def move_sync(
+        self,
+        steps_c: int = 0,
+        steps_a: int = 0,
+        steps_z: int = 0,
+        speed_c: Optional[float] = None,
+        speed_a: Optional[float] = None,
+        speed_z: Optional[float] = None,
+        accel: Optional[float] = None,
+        force_no_encoder: bool = False,
+    ) -> bool:
         if self.active_client:
-            return self.active_client.move_sync(steps_c, steps_a, steps_z, speed, accel)
+            return self.active_client.move_sync(
+                steps_c, steps_a, steps_z, speed_c, speed_a, speed_z, accel, force_no_encoder
+            )
         return False
 
     def set_laser(self, laser_index: int, level: int) -> bool:

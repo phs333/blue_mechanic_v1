@@ -37,8 +37,8 @@ class HardwareTelemetry:
     fan_mode: FanMode = FanMode.MANUAL_OFF
     
     # Lasers (Colineares e opostos no Pivot A)
-    laser1_level: int = 0  # 0..255
-    laser2_level: int = 0  # 0..255
+    laser1_level: int = 0  # 0..4095
+    laser2_level: int = 0  # 0..4095
     
     # Drivers & CAN State
     tmc_uart_ready: bool = False

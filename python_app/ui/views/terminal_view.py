@@ -21,6 +21,7 @@ class TerminalView(QWidget):
         self.state = state
         self.history = []
         self.history_idx = -1
+        self._terminal_mode = "ESP32"
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(18, 16, 18, 16)
@@ -60,10 +61,12 @@ class TerminalView(QWidget):
         # Quick Presets Buttons
         preset_row = QHBoxLayout()
         preset_row.setSpacing(6)
-        for cmd in ["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]:
+        self.preset_buttons = []
+        for index, cmd in enumerate(["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]):
             btn = QPushButton(cmd)
-            btn.clicked.connect(lambda checked, c=cmd: self.comm.send_raw(c))
+            btn.clicked.connect(lambda checked, i=index: self._send_preset(i))
             preset_row.addWidget(btn)
+            self.preset_buttons.append(btn)
         preset_row.addStretch()
         serial_layout.addLayout(preset_row)
         
@@ -80,7 +83,7 @@ class TerminalView(QWidget):
         input_layout.addWidget(self.btn_send)
         
         serial_layout.addLayout(input_layout)
-        self.tab_widget.addTab(serial_tab, "📟 Monitor Serial (COM)")
+        self.tab_widget.addTab(serial_tab, "📟 Monitor ASCII / Serial")
         
         # --- TAB 2: CAN Frame Sniffer ---
         can_tab = QWidget()
@@ -116,6 +119,45 @@ class TerminalView(QWidget):
         # Signals
         self.state.raw_message_received.connect(self._append_console_msg)
         self.state.can_frame_received.connect(self._append_can_frame)
+        self.state.connection_changed.connect(self._on_connection_changed)
+
+    def _send_preset(self, index: int):
+        if self._terminal_mode == "TEENSY":
+            node = self.comm.teensy_serial_client.node_id
+            commands = [
+                f"R {node}",
+                f"P {node} 10 20",
+                f"E {node} 1",
+                f"S {node} 3",
+                f"F {node} 2",
+            ]
+            self.comm.send_raw(commands[index])
+            return
+
+        if index == 0:
+            self.comm.request_status()
+            return
+
+        commands = ["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]
+        self.comm.send_raw(commands[index])
+
+    def _on_connection_changed(self, connected: bool, backend: str):
+        if connected and backend.startswith("Teensy USB/CAN"):
+            self._terminal_mode = "TEENSY"
+            node = self.comm.teensy_serial_client.node_id
+            labels = [f"R {node}", f"P {node} 10 20", f"E {node} 1", f"S {node} 3", f"F {node} 2"]
+            self.txt_cmd.setPlaceholderText(
+                f"Teensy Node {node}: M {node} C 800, MF {node} A -400, H {node} Z, R {node}..."
+            )
+        else:
+            self._terminal_mode = "ESP32"
+            labels = ["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]
+            self.txt_cmd.setPlaceholderText(
+                "Digite um comando (ex: STATUS, MOVE C 400, MOVE A -200, DRIVER ENABLED ON)..."
+            )
+
+        for button, label in zip(self.preset_buttons, labels):
+            button.setText(label)
 
     def _clear_console(self):
         self.console.clear()

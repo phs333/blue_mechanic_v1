@@ -136,7 +136,12 @@ class MainWindow(QMainWindow):
         
         top_bar_layout.addWidget(QLabel("Interface:"))
         self.combo_backend = QComboBox()
-        self.combo_backend.addItems(["Porta Serial (COM)", "PeakCAN (PCAN-Basic)", "Simulador Virtual"])
+        self.combo_backend.addItems([
+            "ESP32-S3 Serial Direta",
+            "Teensy USB/CAN",
+            "PeakCAN (PCAN-Basic)",
+            "Simulador Virtual",
+        ])
         self.combo_backend.currentIndexChanged.connect(self._on_backend_change)
         top_bar_layout.addWidget(self.combo_backend)
         
@@ -168,9 +173,11 @@ class MainWindow(QMainWindow):
 
         self.lbl_can_node = QLabel("Node:", top_bar)
         self.spin_can_node = QSpinBox(top_bar)
-        self.spin_can_node.setRange(1, 127)
+        self.spin_can_node.setRange(1, 10)
         self.spin_can_node.setValue(self.state.parameters.node_id)
-        self.spin_can_node.setToolTip("Node ID usado para calcular os IDs CAN de comando e telemetria")
+        self.spin_can_node.setToolTip(
+            "Node ESP32-S3 selecionado (1..10) para PeakCAN ou Teensy USB/CAN"
+        )
         
         top_bar_layout.addWidget(self.lbl_can_chan)
         top_bar_layout.addWidget(self.combo_can_chan)
@@ -252,22 +259,23 @@ class MainWindow(QMainWindow):
             btn.style().polish(btn)
 
     def _on_backend_change(self, index: int):
-        # 0 = COM, 1 = PeakCAN, 2 = Simulator
-        is_com = (index == 0)
-        is_can = (index == 1)
+        # 0 = ESP32 serial, 1 = Teensy USB/CAN, 2 = PeakCAN, 3 = Simulator
+        is_serial = index in (0, 1)
+        is_can = index == 2
+        uses_node = index in (1, 2)
         
-        self.lbl_port.setVisible(is_com)
-        self.combo_ports.setVisible(is_com)
-        self.btn_refresh_ports.setVisible(is_com)
-        self.lbl_baud.setVisible(is_com)
-        self.combo_baud.setVisible(is_com)
+        self.lbl_port.setVisible(is_serial)
+        self.combo_ports.setVisible(is_serial)
+        self.btn_refresh_ports.setVisible(is_serial)
+        self.lbl_baud.setVisible(is_serial)
+        self.combo_baud.setVisible(is_serial)
         
         self.lbl_can_chan.setVisible(is_can)
         self.combo_can_chan.setVisible(is_can)
         self.lbl_can_bit.setVisible(is_can)
         self.combo_can_bit.setVisible(is_can)
-        self.lbl_can_node.setVisible(is_can)
-        self.spin_can_node.setVisible(is_can)
+        self.lbl_can_node.setVisible(uses_node)
+        self.spin_can_node.setVisible(uses_node)
 
     def _refresh_ports(self):
         self.combo_ports.clear()
@@ -282,14 +290,21 @@ class MainWindow(QMainWindow):
             self.comm.disconnect_all()
         else:
             backend_idx = self.combo_backend.currentIndex()
-            if backend_idx == 0: # COM
+            if backend_idx in (0, 1):  # ESP32 serial or Teensy USB/CAN
                 port = self.combo_ports.currentData() or self.combo_ports.currentText().split()[0]
                 if not port or port == "Nenhuma":
                     QMessageBox.warning(self, "Aviso", "Selecione uma porta COM válida.")
                     return
                 baud = int(self.combo_baud.currentText())
-                self.comm.connect_serial(port=port, baudrate=baud)
-            elif backend_idx == 1: # PeakCAN
+                if backend_idx == 0:
+                    self.comm.connect_serial(port=port, baudrate=baud)
+                else:
+                    self.comm.connect_teensy(
+                        port=port,
+                        baudrate=baud,
+                        node_id=self.spin_can_node.value(),
+                    )
+            elif backend_idx == 2:  # PeakCAN
                 chan = self.combo_can_chan.currentText()
                 bitrate = int(self.combo_can_bit.currentText())
                 params = self.state.parameters

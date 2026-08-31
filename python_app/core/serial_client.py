@@ -440,10 +440,25 @@ class SerialClient(BaseClient):
             cmd += f" F={accel:.1f}"
         return self.send_raw(cmd)
 
-    def move_sync(self, steps_c: int = 0, steps_a: int = 0, steps_z: int = 0, speed: Optional[float] = None, accel: Optional[float] = None) -> bool:
-        cmd = f"MOVE_SYNC C {steps_c} A {steps_a} Z {steps_z}"
-        if speed is not None and speed > 0:
-            cmd += f" S={speed:.1f}"
+    def move_sync(
+        self,
+        steps_c: int = 0,
+        steps_a: int = 0,
+        steps_z: int = 0,
+        speed_c: Optional[float] = None,
+        speed_a: Optional[float] = None,
+        speed_z: Optional[float] = None,
+        accel: Optional[float] = None,
+        force_no_encoder: bool = False,
+    ) -> bool:
+        cmd_name = "MOVE_SYNC_F" if force_no_encoder else "MOVE_SYNC"
+        cmd = f"{cmd_name} C {steps_c} A {steps_a} Z {steps_z}"
+        if speed_c is not None and speed_c > 0:
+            cmd += f" SC={speed_c:.1f}"
+        if speed_a is not None and speed_a > 0:
+            cmd += f" SA={speed_a:.1f}"
+        if speed_z is not None and speed_z > 0:
+            cmd += f" SZ={speed_z:.1f}"
         if accel is not None and accel > 0:
             cmd += f" F={accel:.1f}"
         return self.send_raw(cmd)
@@ -510,8 +525,13 @@ class SerialClient(BaseClient):
 
     def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int) -> bool:
         self.send_raw(f"CAN NODE {node_id}")
+        time.sleep(0.03)
         self.send_raw(f"CAN BITRATE {bitrate}")
+        time.sleep(0.03)
         self.send_raw(f"CAN BASE CMD 0x{cmd_base:03X}")
+        time.sleep(0.03)
         self.send_raw(f"CAN BASE STATUS 0x{status_base:03X}")
+        time.sleep(0.03)
         self.send_raw(f"CAN BASE EVENT 0x{event_base:03X}")
+        time.sleep(0.03)
         return self.send_raw("CAN APPLY")

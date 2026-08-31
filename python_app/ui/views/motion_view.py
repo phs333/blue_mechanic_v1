@@ -18,17 +18,18 @@ from PyQt6.QtCore import Qt
 from python_app.ui.widgets.jog_pad import JogPad
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, HardwareParameters, DeviceState
+from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm
 
 class MotionView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
         super().__init__(parent)
         self.comm = comm
         self.state = state
-        
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        
+
         container = QWidget()
         main_layout = QVBoxLayout(container)
         main_layout.setContentsMargins(18, 16, 18, 16)
@@ -174,31 +175,70 @@ class MotionView(QWidget):
         sync_grid = QGridLayout()
         sync_grid.setSpacing(8)
         
-        sync_grid.addWidget(QLabel("Passos C:"), 0, 0)
-        self.spin_sync_c = QSpinBox()
-        self.spin_sync_c.setRange(-100000, 100000)
-        self.spin_sync_c.setValue(1600)
-        self.spin_sync_c.setSingleStep(100)
+        # Row 0: Target Relative Displacements (deg for C/A, mm for Z)
+        sync_grid.addWidget(QLabel("Graus C (Base):"), 0, 0)
+        self.spin_sync_c = QDoubleSpinBox()
+        self.spin_sync_c.setRange(-360.0, 360.0)
+        self.spin_sync_c.setValue(0.0)
+        self.spin_sync_c.setSingleStep(5.0)
+        self.spin_sync_c.setSuffix(" °")
+        self.spin_sync_c.valueChanged.connect(self._update_sync_preview)
         sync_grid.addWidget(self.spin_sync_c, 0, 1)
         
-        sync_grid.addWidget(QLabel("Passos A:"), 0, 2)
-        self.spin_sync_a = QSpinBox()
-        self.spin_sync_a.setRange(-100000, 100000)
-        self.spin_sync_a.setValue(3200)
-        self.spin_sync_a.setSingleStep(100)
+        sync_grid.addWidget(QLabel("Graus A (Pivot):"), 0, 2)
+        self.spin_sync_a = QDoubleSpinBox()
+        self.spin_sync_a.setRange(-360.0, 360.0)
+        self.spin_sync_a.setValue(0.0)
+        self.spin_sync_a.setSingleStep(5.0)
+        self.spin_sync_a.setSuffix(" °")
+        self.spin_sync_a.valueChanged.connect(self._update_sync_preview)
         sync_grid.addWidget(self.spin_sync_a, 0, 3)
 
-        sync_grid.addWidget(QLabel("Passos Z:"), 1, 0)
-        self.spin_sync_z = QSpinBox()
-        self.spin_sync_z.setRange(-100000, 100000)
-        self.spin_sync_z.setValue(0)
-        self.spin_sync_z.setSingleStep(100)
-        sync_grid.addWidget(self.spin_sync_z, 1, 1)
-        
+        sync_grid.addWidget(QLabel("Deslocamento Z:"), 0, 4)
+        self.spin_sync_z = QDoubleSpinBox()
+        self.spin_sync_z.setRange(-200.0, 200.0)
+        self.spin_sync_z.setValue(0.0)
+        self.spin_sync_z.setSingleStep(1.0)
+        self.spin_sync_z.setSuffix(" mm")
+        self.spin_sync_z.valueChanged.connect(self._update_sync_preview)
+        sync_grid.addWidget(self.spin_sync_z, 0, 5)
+
+        # Row 1: Speeds per axis
+        sync_grid.addWidget(QLabel("Velocidade C:"), 1, 0)
+        self.spin_sync_speed_c = QDoubleSpinBox()
+        self.spin_sync_speed_c.setRange(1.0, 720.0)
+        self.spin_sync_speed_c.setValue(140.0)
+        self.spin_sync_speed_c.setSuffix(" °/s")
+        sync_grid.addWidget(self.spin_sync_speed_c, 1, 1)
+
+        sync_grid.addWidget(QLabel("Velocidade A:"), 1, 2)
+        self.spin_sync_speed_a = QDoubleSpinBox()
+        self.spin_sync_speed_a.setRange(1.0, 720.0)
+        self.spin_sync_speed_a.setValue(140.0)
+        self.spin_sync_speed_a.setSuffix(" °/s")
+        sync_grid.addWidget(self.spin_sync_speed_a, 1, 3)
+
+        sync_grid.addWidget(QLabel("Velocidade Z:"), 1, 4)
+        self.spin_sync_speed_z = QDoubleSpinBox()
+        self.spin_sync_speed_z.setRange(0.1, 60.0)
+        self.spin_sync_speed_z.setValue(12.5)
+        self.spin_sync_speed_z.setSuffix(" mm/s")
+        sync_grid.addWidget(self.spin_sync_speed_z, 1, 5)
+
+        # Row 2: Force (Sem correção) & Steps preview
+        self.chk_sync_force = QCheckBox("Forçar sem correção (ignorar limites e encoder)")
+        self.chk_sync_force.setStyleSheet("color: #f59e0b; font-weight: 600;")
+        sync_grid.addWidget(self.chk_sync_force, 2, 0, 1, 3)
+
+        self.lbl_sync_calc = QLabel("Passos calculados: C=0 | A=0 | Z=0")
+        self.lbl_sync_calc.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        sync_grid.addWidget(self.lbl_sync_calc, 2, 3, 1, 3)
+
+        # Row 3: Action Button
         self.btn_sync_move = QPushButton("⚡ Mover C, A e Z Simultaneamente (MOVE_SYNC)")
         self.btn_sync_move.setProperty("class", "btn-warning")
         self.btn_sync_move.clicked.connect(self._execute_sync_move)
-        sync_grid.addWidget(self.btn_sync_move, 2, 0, 1, 4)
+        sync_grid.addWidget(self.btn_sync_move, 3, 0, 1, 6)
         
         move_vbox.addLayout(sync_grid)
         
@@ -242,7 +282,28 @@ class MotionView(QWidget):
         outer_layout.addWidget(scroll)
         
         self.state.telemetry_updated.connect(self.update_telemetry)
+        self.state.parameters_updated.connect(self._on_parameters_updated)
         self._update_override_units(self.combo_axis.currentIndex())
+        self._update_sync_preview()
+
+    def _on_parameters_updated(self, p: HardwareParameters):
+        self._update_sync_preview()
+        if p.speed[0] > 0:
+            self.spin_sync_speed_c.setValue(p.speed[0])
+        if p.speed[1] > 0:
+            self.spin_sync_speed_a.setValue(p.speed[1])
+        if p.speed[2] > 0:
+            self.spin_sync_speed_z.setValue(p.speed[2])
+
+    def _update_sync_preview(self):
+        params = self.state.parameters
+        deg_c = self.spin_sync_c.value()
+        deg_a = self.spin_sync_a.value()
+        mm_z = self.spin_sync_z.value()
+        steps_c = calc_ca_steps_for_degrees(deg_c, params.steps_per_rev[0], params.tmc_microsteps[0])
+        steps_a = calc_ca_steps_for_degrees(deg_a, params.steps_per_rev[1], params.tmc_microsteps[1])
+        steps_z = calc_z_steps_for_mm(mm_z, params.z_pulley_teeth, params.steps_per_rev[2], params.tmc_microsteps[2])
+        self.lbl_sync_calc.setText(f"Passos calculados: C={steps_c} | A={steps_a} | Z={steps_z}")
 
     def _update_override_units(self, axis_index: int):
         is_z = axis_index == 2
@@ -268,12 +329,25 @@ class MotionView(QWidget):
         self.comm.move_axis(axis, steps, speed=speed, accel=accel, force_no_encoder=force)
 
     def _execute_sync_move(self):
-        steps_c = self.spin_sync_c.value()
-        steps_a = self.spin_sync_a.value()
-        steps_z = self.spin_sync_z.value()
-        speed = self.spin_speed.value() if self.spin_speed.value() > 0 else None
+        params = self.state.parameters
+        deg_c = self.spin_sync_c.value()
+        deg_a = self.spin_sync_a.value()
+        mm_z = self.spin_sync_z.value()
+        steps_c = calc_ca_steps_for_degrees(deg_c, params.steps_per_rev[0], params.tmc_microsteps[0])
+        steps_a = calc_ca_steps_for_degrees(deg_a, params.steps_per_rev[1], params.tmc_microsteps[1])
+        steps_z = calc_z_steps_for_mm(mm_z, params.z_pulley_teeth, params.steps_per_rev[2], params.tmc_microsteps[2])
+
+        speed_c = self.spin_sync_speed_c.value() if self.spin_sync_speed_c.value() > 0 else None
+        speed_a = self.spin_sync_speed_a.value() if self.spin_sync_speed_a.value() > 0 else None
+        speed_z = self.spin_sync_speed_z.value() if self.spin_sync_speed_z.value() > 0 else None
         accel = self.spin_accel.value() if self.spin_accel.value() > 0 else None
-        self.comm.move_sync(steps_c, steps_a, steps_z, speed=speed, accel=accel)
+        force = self.chk_sync_force.isChecked()
+
+        self.comm.move_sync(
+            steps_c, steps_a, steps_z,
+            speed_c=speed_c, speed_a=speed_a, speed_z=speed_z,
+            accel=accel, force_no_encoder=force
+        )
 
     def _toggle_drivers(self):
         new_state = not self.state.telemetry.drivers_enabled

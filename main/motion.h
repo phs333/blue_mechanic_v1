@@ -16,7 +16,9 @@ esp_err_t motion_post_move_axis_with_params(app_context_t *ctx, char axis, int32
 esp_err_t motion_post_move_axis_profile(app_context_t *ctx, char axis, int32_t steps,
                                         float speed, float accel, bool force_no_encoder,
                                         uint8_t sender_id, uint8_t opcode);
-esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z, float speed, float accel, uint8_t sender_id, uint8_t opcode);
+esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z,
+                                float speed_c, float speed_a, float speed_z, float accel,
+                                bool force_no_encoder, uint8_t sender_id, uint8_t opcode);
 
 /* Pure planner helper: clamps a relative request to limits relative to home angle. */
 int32_t motion_plan_limited_steps(float actual_deg, float home_deg,

@@ -1033,19 +1033,47 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
 
     if (strncmp(cmd, "MOVE_SYNC", 9) == 0) {
+        bool force = false;
+        const char *p = cmd + 9;
+        if (*p == '_') {
+            if (*(p + 1) == 'F' || *(p + 1) == 'f') {
+                force = true;
+                p += 2;
+            }
+        }
         long steps_c_sync = 0;
         long steps_a_sync = 0;
         long steps_z_sync = 0;
-        float sync_speed_val = -1.0f;
+        float sync_speed_c = -1.0f;
+        float sync_speed_a = -1.0f;
+        float sync_speed_z = -1.0f;
+        float sync_speed_all = -1.0f;
         float sync_accel_val = -1.0f;
 
-        const char *p = cmd + 9;
         int positional_idx = 0;
         while (*p) {
             while (*p && isspace((unsigned char)*p)) p++;
             if (*p == '\0') break;
 
-            if (*p == 'C' || *p == 'c' || *p == 'X' || *p == 'x') {
+            if ((*p == 'S' || *p == 's') && (*(p + 1) == 'C' || *(p + 1) == 'c')) {
+                p += 2;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                sync_speed_c = strtof(p, &endp);
+                p = endp;
+            } else if ((*p == 'S' || *p == 's') && (*(p + 1) == 'A' || *(p + 1) == 'a')) {
+                p += 2;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                sync_speed_a = strtof(p, &endp);
+                p = endp;
+            } else if ((*p == 'S' || *p == 's') && (*(p + 1) == 'Z' || *(p + 1) == 'z')) {
+                p += 2;
+                while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
+                char *endp = NULL;
+                sync_speed_z = strtof(p, &endp);
+                p = endp;
+            } else if (*p == 'C' || *p == 'c' || *p == 'X' || *p == 'x') {
                 p++;
                 while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
                 char *endp = NULL;
@@ -1067,7 +1095,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 p++;
                 while (*p && (isspace((unsigned char)*p) || *p == '=')) p++;
                 char *endp = NULL;
-                sync_speed_val = strtof(p, &endp);
+                sync_speed_all = strtof(p, &endp);
                 p = endp;
             } else if (*p == 'F' || *p == 'f') {
                 p++;
@@ -1092,9 +1120,16 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             }
         }
 
-        esp_err_t err = motion_post_move_sync(ctx, (int32_t)steps_c_sync, (int32_t)steps_a_sync, (int32_t)steps_z_sync, sync_speed_val, sync_accel_val, 0, 0);
+        if (sync_speed_all > 0.0f) {
+            if (sync_speed_c <= 0.0f) sync_speed_c = sync_speed_all;
+            if (sync_speed_a <= 0.0f) sync_speed_a = sync_speed_all;
+            if (sync_speed_z <= 0.0f) sync_speed_z = sync_speed_all;
+        }
+
+        esp_err_t err = motion_post_move_sync(ctx, (int32_t)steps_c_sync, (int32_t)steps_a_sync, (int32_t)steps_z_sync,
+                                              sync_speed_c, sync_speed_a, sync_speed_z, sync_accel_val, force, 0, 0);
         if (err == ESP_OK) {
-            printf("MOVE_SYNC C=%ld A=%ld Z=%ld enfileirado.\n", steps_c_sync, steps_a_sync, steps_z_sync);
+            printf("MOVE_SYNC%s C=%ld A=%ld Z=%ld enfileirado.\n", force ? "_F" : "", steps_c_sync, steps_a_sync, steps_z_sync);
         } else {
             printf("ERRO no MOVE_SYNC: %s\n", esp_err_to_name(err));
         }

@@ -2,7 +2,9 @@
 
 ## Visão Geral
 
-A comunicação CAN utiliza o periférico TWAI do ESP32-S3 (modo on-chip) em configuração de slave. O master é um Teensy 4.1 rodando Zephyr RTOS. A topologia é ponto-a-ponto com 1 master e até 10 slaves, cada slave com um ID de node único (1–127).
+A comunicação CAN utiliza o periférico TWAI on-chip do ESP32-S3. O Teensy 4.1 com Zephyr atua como bridge/controlador da aplicação e os ESP32-S3 atuam como nós de execução. Fisicamente, a topologia é um barramento multidrop com 1 Teensy e até 10 ESP32-S3.
+
+Embora o firmware ESP32 aceite `node_id` de 1 a 127, o contrato do sistema Blue Mechanic limita os IDs a **1–10**. Esse limite mantém as faixas padrão de status e posição sem sobreposição e corresponde aos filtros do Teensy.
 
 O protocolo usa frames CAN padrão de 11 bits (standard identifiers) com DLC máximo de 8 bytes.
 
@@ -17,18 +19,20 @@ O protocolo usa frames CAN padrão de 11 bits (standard identifiers) com DLC má
 | Bitrate       | 500 kbps    | —             |
 | Node ID       | 1           | —             |
 
+No Teensy 4.1, o bridge usa FlexCAN1: CTX1 no pino 22 e CRX1 no pino 23. Os dois controladores exigem transceivers CAN externos compatíveis com lógica de 3,3 V, terra comum e terminação de 120 Ω nas duas extremidades físicas do barramento.
+
 ### IDs CAN
 
-Cada slave possui três faixas de IDs base configuráveis. A telemetria de posição/temperatura usa uma subfaixa derivada do status:
+Cada nó ESP32 possui três faixas de IDs base configuráveis. A telemetria de posição/temperatura usa uma subfaixa derivada do status:
 
 | Base            | Padrão  | Finalidade                        |
 |-----------------|---------|-----------------------------------|
-| `can_command_base_id` | `0x200` | Comandos do master para o slave   |
-| `can_status_base_id`  | `0x280` | Status do slave para o master     |
-| `can_event_base_id`   | `0x300` | Eventos do slave para o master    |
+| `can_command_base_id` | `0x200` | Comandos do Teensy para o ESP32   |
+| `can_status_base_id`  | `0x280` | Status do ESP32 para o Teensy     |
+| `can_event_base_id`   | `0x300` | Eventos do ESP32 para o Teensy    |
 | `can_status_base_id + 0x10` | `0x290` | Posição e temperatura |
 
-O ID efetivo de cada slave é calculado somando o `node_id` à base:
+O ID efetivo de cada ESP32 é calculado somando o `node_id` à base:
 
 ```
 own_command_id  = can_command_base_id + node_id
@@ -45,9 +49,14 @@ own_event_id    = can_event_base_id   + node_id
 
 ### Filtro de Hardware
 
-O filtro TWAI do ESP32-S3 é configurado para aceitar **apenas** o ID exclusivo do próprio slave (`own_command_id`), com máscara `0x7FF` (match exato de 11 bits). Isso elimina a necessidade de filtrar frames de outros slaves no software.
+Com as bases padrão, o filtro TWAI usa ID `0x200` e máscara `0x780`, aceitando em hardware o grupo `0x200..0x27F`. O firmware faz uma segunda validação em software e processa somente:
 
-O broadcast (`can_command_base_id` puro, sem node_id) **não** é aceito pelo filtro de hardware. O master deve enviar comandos direcionados para cada slave individualmente.
+- `can_command_base_id + node_id`: comando unicast para o próprio nó;
+- `can_command_base_id`: comando broadcast para todos os nós.
+
+O broadcast é indicado apenas para comandos de atuação, como enable, velocidade, movimento, home, laser e fan. Não use broadcast para `PING` ou `STATUS_REQUEST`, pois todos os nós responderiam ao mesmo tempo. O broadcast não oferece sincronização temporal rígida: cada ESP32 agenda a operação localmente depois de receber o frame.
+
+Se `can_command_base_id` for alterado, o Teensy deve ser reconfigurado junto. A base e os IDs `base + node_id` também devem permanecer no mesmo bloco de 128 IDs coberto pela máscara `0x780`.
 
 ---
 
@@ -57,7 +66,7 @@ Todos os frames usam o formato padrão de 11 bits:
 
 | Campo       | Bits          | Valor                          |
 |-------------|---------------|--------------------------------|
-| Standard ID | 11 bits       | ID efetivo do slave (base + node_id) |
+| Standard ID | 11 bits       | ID efetivo do nó ou base de comando para broadcast |
 | DLC         | 4 bits        | 1–8 bytes de dados             |
 | Data        | 0–64 bits     | Payload do frame               |
 | RTR         | 1 bit         | Data frame (0)                 |
@@ -69,46 +78,35 @@ Todos os frames usam o formato padrão de 11 bits:
 
 | Direção     | ID de Origem     | ID de Destino      | Descrição                              |
 |-------------|------------------|--------------------|----------------------------------------|
-| Master → Slave | `own_command_id` | —                  | Comandos do master para o slave        |
-| Slave → Master | —                | `own_status_id`    | Resposta compacta de estado            |
-| Slave → Master | —                | `own_position_id`  | Posições e temperatura                 |
-| Slave → Master | —                | `own_event_id`     | Eventos assíncronos (heartbeat, ACK)   |
+| Teensy → ESP32 | `own_command_id` | —                  | Comando unicast                         |
+| Teensy → ESP32 | `can_command_base_id` | —             | Comando broadcast                       |
+| ESP32 → Teensy | —                | `own_status_id`    | Resposta compacta de estado            |
+| ESP32 → Teensy | —                | `own_position_id`  | Posições e temperatura                 |
+| ESP32 → Teensy | —                | `own_event_id`     | Eventos assíncronos (heartbeat, ACK)   |
 
 ---
 
-## Sequenciamento de Comandos
+## DLC e correlação de comandos
 
-Cada comando CAN pode incluir um byte opcional de sequência no final do payload. O byte de sequência é o **último byte** do frame, além do payload esperado pelo opcode.
+O firmware ESP32-S3 atual **não implementa byte de sequência**. Ele não lê, armazena, devolve nem usa sequência para eliminar duplicatas. Alguns handlers toleram bytes excedentes, mas esses bytes não fazem parte do contrato e não devem ser enviados.
 
-### Como funciona
+O Teensy deve sempre transmitir o DLC exato indicado para cada opcode. Isso é especialmente importante no comando de laser, em que o quarto byte é a parte alta do nível, e no `MOVE_PROFILE`, que ocupa os 8 bytes do frame.
 
-- Se o DLC do frame for **maior** que o tamanho esperado do opcode, o byte extra é o número de sequência.
-- Se o DLC for **igual** ao tamanho esperado, não há sequência (comportamento backward-compatible).
-- O byte é reservado para correlação e diagnóstico pelo master.
-- A versão atual do slave não descarta duplicatas automaticamente; o master não deve repetir comandos de movimento sem confirmar o resultado.
-
-### Exemplo
-
-Para `CAN_OP_SPEED` (tamanho esperado = 2 bytes: opcode + level):
-- Frame com DLC=2: `[0x11, 3]` → processado (sem sequência)
-- Frame com DLC=3: `[0x11, 3, 5]` → nível 3 com sequência 5
-
-O master deve incrementar o número de sequência para cada novo comando enviado a um slave.
+Os eventos `ACK`, `DONE` e `ERROR` identificam somente o nó e o opcode. Portanto, não envie vários movimentos do mesmo opcode ao mesmo nó se for necessário correlacionar individualmente cada conclusão.
 
 ---
 
-## OpCodes de Comando (Master → Slave)
+## OpCodes de Comando (Teensy → ESP32)
 
 ### `0x01` — `CAN_OP_PING`
 
-**Tamanho mínimo:** 3 bytes
+**DLC esperado:** 3 bytes
 
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Opcode (`0x01`)   |
 | 1    | Arg0 (dado arbitrário) |
 | 2    | Arg1 (dado arbitrário) |
-| 3 (opcional) | Sequência |
 
 **Resposta:** `CAN_EVT_PONG` com os mesmos Arg0 e Arg1.
 
@@ -116,25 +114,24 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 
 ### `0x02` — `CAN_OP_STATUS_REQUEST`
 
-**Tamanho mínimo:** 1 byte
+**DLC esperado:** 1 byte
 
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Opcode (`0x02`)   |
 
-**Resposta:** `CAN_EVT_STATUS` com payload de 8 bytes (ver seção Status).
+**Resposta:** dois frames de 8 bytes: `CAN_EVT_STATUS` em `own_status_id` e a telemetria de posição/temperatura em `own_position_id`.
 
 ---
 
 ### `0x10` — `CAN_OP_ENABLE`
 
-**Tamanho mínimo:** 2 bytes
+**DLC esperado:** 2 bytes
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x10`)                       |
 | 1    | Enable flag (`0x01` = ligar, `0x00` = desligar) |
-| 2 (opcional) | Sequência                        |
 
 **Ação:** Liga/desliga os drivers de passo via `hardware_set_driver_enable()`.
 
@@ -144,13 +141,12 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 
 ### `0x11` — `CAN_OP_SPEED`
 
-**Tamanho mínimo:** 2 bytes
+**DLC esperado:** 2 bytes
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x11`)                       |
 | 1    | Nível de velocade (1–5)               |
-| 2 (opcional) | Sequência                        |
 
 **Níveis de velocidade:**
 
@@ -168,37 +164,42 @@ O master deve incrementar o número de sequência para cada novo comando enviado
 
 ### `0x12` — `CAN_OP_AXIS_SPEED`
 
-Define e persiste a velocidade exata de um eixo.
+Define e persiste a velocidade solicitada de um eixo. O firmware a converte para o período de passos disponível, portanto pode haver quantização.
+
+**DLC esperado:** 6 bytes
 
 | Byte | Conteúdo |
 |------|----------|
 | 0 | Opcode (`0x12`) |
 | 1 | Eixo (`C`, `A` ou `Z`; aliases `X`/`Y` aceitos) |
 | 2–5 | Velocidade `float32`, little-endian (`deg/s` para C/A, `mm/s` para Z) |
-| 6 (opcional) | Sequência |
 
 ### `0x13` — `CAN_OP_AXIS_ACCEL`
 
 Mesmo formato de `CAN_OP_AXIS_SPEED`, com aceleração `float32` em `deg/s²` ou `mm/s²`.
 
+**DLC esperado:** 6 bytes
+
 ### `0x14` — `CAN_OP_MOVE_PROFILE`
 
 Carrega um perfil de uso único para o próximo `MOVE`/`MOVE_FORCE` do mesmo eixo. Esse comando não grava NVS.
 
+**DLC esperado:** 8 bytes
+
 | Byte | Conteúdo |
 |------|----------|
 | 0 | Opcode (`0x14`) |
-| 1 | Eixo (`C`, `A` ou `Z`) |
+| 1 | Eixo (`C`, `A` ou `Z`; aliases legados `X`/`Y` aceitos) |
 | 2–5 | Velocidade `float32` little-endian; `0` usa o padrão |
 | 6–7 | Aceleração `uint16` little-endian; `0` usa o padrão |
 
-O master deve enviar o perfil imediatamente antes do movimento correspondente.
+O Teensy deve enviar o perfil imediatamente antes do movimento correspondente.
 
 ---
 
 ### `0x20` — `CAN_OP_MOVE`
 
-**Tamanho mínimo:** 6 bytes
+**DLC esperado:** 6 bytes
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
@@ -208,9 +209,8 @@ O master deve enviar o perfil imediatamente antes do movimento correspondente.
 | 3    | Steps byte 1                        |
 | 4    | Steps byte 2                        |
 | 5    | Steps byte 3 (MSB)                    |
-| 6 (opcional) | Sequência                        |
 
-**Ação:** Enfileira comando de movimento relativo em `motion_queue`. O slave executa o movimento de forma assíncrona.
+**Ação:** Enfileira comando de movimento relativo em `motion_queue`. O ESP32 executa o movimento de forma assíncrona.
 
 **Resposta:** `CAN_EVT_ACK` (enfileirado) ou `CAN_EVT_ERROR`.
 
@@ -218,15 +218,14 @@ O master deve enviar o perfil imediatamente antes do movimento correspondente.
 
 ### `0x21` — `CAN_OP_HOME`
 
-**Tamanho mínimo:** 2 bytes
+**DLC esperado:** 2 bytes
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x21`)                       |
 | 1    | Eixo (`'C'`, `'A'`, `'Z'`; aliases `'X'`/`'Y'`, sem distinção de caixa) |
-| 2 (opcional) | Sequência                        |
 
-**Ação:** Enfileira comando de homing no eixo especificado. O movimento Z pode levar até ~24 segundos (30000 passos com yield a cada 4096).
+**Ação:** Enfileira comando de homing. C/A ajustam para o home salvo. Z pode levar dezenas de segundos, pois busca o fim de curso por até 30000 passos, libera o sensor e aplica o alívio configurado.
 
 **Resposta:** `CAN_EVT_ACK` (enfileirado) ou `CAN_EVT_ERROR`.
 
@@ -236,20 +235,21 @@ O master deve enviar o perfil imediatamente antes do movimento correspondente.
 
 Mesmo payload de `CAN_OP_MOVE`, mas executa em malha aberta, sem correção/limites dos encoders C/A. Os limites físicos do eixo Z continuam ativos.
 
+**DLC esperado:** 6 bytes
+
 ---
 
 ### `0x30` — `CAN_OP_LASER`
 
-**Tamanho mínimo:** 3 bytes no formato legado (8 bits); 4 bytes no formato atual (16 bits)
+**DLC esperado:** 4 bytes no formato atual de 16 bits. O ESP32 ainda aceita o formato legado de 3 bytes.
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x30`)                       |
 | 1    | Índice do laser (1 ou 2)              |
 | 2–3  | Nível lógico do laser (`uint16`, little-endian, 0–4095) |
-| 4 (opcional) | Sequência                        |
 
-**Ação:** Configura o nível lógico do laser selecionado via `hardware_set_laser_level()`, remapeado internamente para a faixa útil calibrada do módulo.
+**Ação:** Configura o nível lógico do laser via `hardware_set_laser_level()`. O nível é aplicado diretamente ao duty PWM; o emissor deve limitá-lo a 0–4095.
 
 **Resposta:** `CAN_EVT_ACK` ou `CAN_EVT_ERROR`.
 
@@ -257,13 +257,12 @@ Mesmo payload de `CAN_OP_MOVE`, mas executa em malha aberta, sem correção/limi
 
 ### `0x31` — `CAN_OP_FAN`
 
-**Tamanho mínimo:** 2 bytes
+**DLC esperado:** 2 bytes
 
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Opcode (`0x31`)                       |
 | 1    | Modo do fan                           |
-| 2 (opcional) | Sequência                        |
 
 **Modos do fan:**
 
@@ -277,17 +276,18 @@ Mesmo payload de `CAN_OP_MOVE`, mas executa em malha aberta, sem correção/limi
 
 ---
 
-## Eventos e Respostas (Slave → Master)
+## Eventos e Respostas (ESP32 → Teensy)
 
 ### `0x80` — `CAN_EVT_HEARTBEAT`
 
-Enviado periodicamente pelo slave a cada 1000 ms quando o barramento CAN está online.
+Enviado periodicamente pelo ESP32 a cada 1000 ms quando o barramento CAN está online.
 
 | Byte | Conteúdo          |
 |------|-------------------|
 | 0    | Evento (`0x80`)   |
-| 1    | Node ID do slave  |
-| 2–7  | Reservado (0)     |
+| 1    | Node ID do ESP32  |
+| 2    | Node ID repetido pelo firmware atual |
+| 3–7  | Reservado (0)     |
 
 ---
 
@@ -312,7 +312,7 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 | Byte | Conteúdo                              |
 |------|---------------------------------------|
 | 0    | Evento (`0x82`)                       |
-| 1    | Node ID do slave                      |
+| 1    | Node ID do ESP32                      |
 | 2    | Flags de estado (bitmask)             |
 | 3–4  | Nível lógico do laser 1 (`uint16`, little-endian) |
 | 5–6  | Nível lógico do laser 2 (`uint16`, little-endian) |
@@ -342,7 +342,7 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 
 ### `0x83` — `CAN_EVT_ACK`
 
-Confirmação de que um comando foi processado com sucesso.
+Confirmação de que um comando síncrono foi processado ou de que um movimento/homing foi aceito na fila.
 
 | Byte | Conteúdo          |
 |------|-------------------|
@@ -356,7 +356,7 @@ Confirmação de que um comando foi processado com sucesso.
 
 ### `0x84` — `CAN_EVT_DONE`
 
-Indica que um comando de movimento foi concluído (o eixo chegou ao destino).
+Indica que o processamento de um comando de movimento ou homing terminou. Para movimentos limitados, `DONE` pode significar que o firmware executou apenas a parcela permitida ou não gerou passos por já estar no limite.
 
 | Byte | Conteúdo          |
 |------|-------------------|
@@ -398,7 +398,7 @@ Indica que um comando falhou.
 
 ## Validação de Configuração CAN
 
-O slave valida as configurações CAN antes de iniciar o periférico TWAI:
+O ESP32 valida as configurações CAN antes de iniciar o periférico TWAI:
 
 | Parâmetro     | Restrição                          |
 |---------------|------------------------------------|
@@ -409,64 +409,62 @@ O slave valida as configurações CAN antes de iniciar o periférico TWAI:
 | `can_status_base_id + 0x10 + 127` | ≤ `0x7FF`                 |
 | `can_event_base_id + 127`   | ≤ `0x7FF`                       |
 
-Se a configuração for inválida, o slave não inicia o TWAI e reporta `ESP_ERR_INVALID_ARG`.
+Se a configuração for inválida, o ESP32 não inicia o TWAI e reporta `ESP_ERR_INVALID_ARG`.
 
 ---
 
-## Implementação do Master (Teensy 4.1 + Zephyr)
+## Implementação do bridge (Teensy 4.1 + Zephyr)
 
 ### Inicialização
 
-1. Configurar o controlador CAN do Teensy 4.1 (MCAN) com o mesmo bitrate dos slaves (padrão: 500 kbps).
-2. Configurar o filtro de recepção para aceitar todos os IDs de comando dos slaves (faixa `[can_command_base_id, can_command_base_id + 127]`).
-3. Configurar os IDs de transmissão para status e eventos de cada slave.
+1. Configurar o controlador **FlexCAN** do Teensy 4.1 com o mesmo bitrate dos ESP32 (padrão: 500 kbps).
+2. Transmitir comandos unicast em `0x200 + node_id` ou broadcast em `0x200`.
+3. Configurar filtros de recepção para status `0x281..0x28A`, posição `0x291..0x29A` e eventos `0x301..0x30A`.
+4. Usar somente IDs padrão de 11 bits e frames Classic CAN de até 8 bytes.
 
 ### Envio de Comandos
 
-Para enviar um comando a um slave:
+Para enviar um comando a um ESP32:
 
 ```c
 // Exemplo: enviar CAN_OP_MOVE para node_id = 1
 uint16_t target_id = can_command_base_id + node_id;  // 0x201
-uint8_t payload[8] = {0x20, 'X', 0x00, 0x10, 0x00, 0x00, seq, 0};
+uint8_t payload[6] = {0x20, 'C', 0x00, 0x10, 0x00, 0x00};
 // payload[0] = opcode CAN_OP_MOVE (0x20)
-// payload[1] = eixo 'X'
+// payload[1] = eixo canônico 'C'
 // payload[2-5] = steps (little-endian, int32_t)
-// payload[6] = sequência (opcional)
 
-can_send(target_id, payload, 7);  // DLC=7 (com sequência)
-// ou
-can_send(target_id, payload, 6);  // DLC=6 (sem sequência)
+can_send(target_id, payload, 6);
 ```
 
 ### Recebimento de Respostas
 
-O master deve configurar filtros separados para:
+O Teensy deve configurar filtros separados para:
 - IDs de status (`can_status_base_id + node_id`)
 - IDs de posição/temperatura (`can_status_base_id + 0x10 + node_id`)
 - IDs de evento (`can_event_base_id + node_id`)
 
-Ou usar um único filtro que aceite a faixa de eventos/status de todos os slaves.
+Ou usar filtros por grupo que cubram as faixas de todos os ESP32.
 
 ### Tratamento de Respostas
 
-| Evento recebido | Ação esperada pelo master                              |
+| Evento recebido | Ação esperada pelo Teensy                              |
 |-----------------|-------------------------------------------------------|
-| `CAN_EVT_ACK`   | Comando enfileirado com sucesso                       |
-| `CAN_EVT_DONE`  | Movimento concluído                                   |
+| `CAN_EVT_ACK`   | Comando rápido processado ou movimento enfileirado     |
+| `CAN_EVT_DONE`  | Processamento do movimento/homing encerrado            |
 | `CAN_EVT_ERROR` | Comando falhou — byte 2 é o opcode e byte 3 é o código de erro |
 | `CAN_EVT_PONG`  | Resposta ao ping — verificar Arg0 e Arg1              |
-| `CAN_EVT_STATUS`| Atualizar estado do slave                             |
+| `CAN_EVT_STATUS`| Atualizar estado do ESP32                             |
 | `CAN_EVT_HEARTBEAT` | Manter conexão ativa                               |
 
-### Timeout e Retransmissão
+### Timeout e retransmissão
 
-- Se nenhum evento for recebido em **500 ms** após o envio de um comando, considerar o comando como falho (timeout).
-- A versão atual não elimina duplicatas pelo byte de sequência. Não retransmita automaticamente
-  comandos de movimento: primeiro confirme a telemetria/estado para evitar execução dupla.
-- Para um novo envio deliberado após timeout, use um **novo número de sequência**.
+- Um timeout de 500 ms pode ser usado para esperar a resposta inicial `ACK`, `PONG`, `STATUS` ou `ERROR`.
+- O timeout de `DONE` deve ser específico da operação; movimentos e homing podem durar vários segundos.
+- Não retransmita automaticamente movimentos após timeout. Como não existe deduplicação nem sequência, uma repetição pode executar o movimento duas vezes.
+- Antes de uma repetição deliberada, consulte `STATUS` e `POS`.
 
-### Exemplo de Máquina de Estados do Master
+### Exemplo de máquina de estados do Teensy
 
 ```
 ESTADO_IDLE → envia comando → ESPERA_RESPOSTA
@@ -475,27 +473,24 @@ ESTADO_IDLE → envia comando → ESPERA_RESPOSTA
     │                                    │
     └────────────────────────────────────┘
         │
-        ├── ACK/DONE → volta a IDLE
-        ├── ERROR  → reporta erro, volta a IDLE
-        └── timeout → retransmite (nova seq) ou reporta falha
+        ├── ACK de comando rápido → volta a IDLE
+        ├── ACK de movimento → espera DONE/ERROR
+        ├── ERROR → reporta erro, volta a IDLE
+        └── timeout → consulta estado antes de decidir
 ```
 
 ---
 
 ## Considerações de Timing
 
-| Operação                  | Tempo Máximo     | Observação                              |
-|---------------------------|------------------|-----------------------------------------|
-| CAN_OP_PING → PONG        | < 5 ms           | Resposta síncrona                       |
-| CAN_OP_STATUS_REQUEST     | < 5 ms           | Resposta síncrona                       |
-| CAN_OP_ENABLE             | < 5 ms           | Resposta síncrona                       |
-| CAN_OP_SPEED              | < 5 ms           | Resposta síncrona                       |
-| CAN_OP_MOVE               | < 5 ms           | Resposta síncrona (enfileirado)         |
-| CAN_OP_HOME (X/Y)         | < 5 ms           | Resposta síncrona (enfileirado)         |
-| CAN_OP_HOME (Z)           | < 5 ms           | Resposta síncrona (enfileirado), execução assíncrona até ~24s |
-| CAN_OP_LASER              | < 5 ms           | Resposta síncrona                       |
-| CAN_OP_FAN                | < 5 ms           | Resposta síncrona                       |
-| Heartbeat                 | A cada 1000 ms   | Assíncrono                              |
+| Operação                  | Regra de timing | Observação                              |
+|---------------------------|-----------------|-----------------------------------------|
+| Comando síncrono          | Esperar até 500 ms | Responde com PONG, STATUS, ACK ou ERROR |
+| MOVE/MOVE_FORCE/HOME      | ACK inicial; DONE variável | A conclusão depende da fila e do percurso |
+| HOME Z                    | Pode durar dezenas de segundos | Busca até 30000 passos, seguida da liberação |
+| Heartbeat                 | A cada 1000 ms  | Assíncrono                              |
+
+Os valores acima são políticas do bridge, não garantias rígidas de latência do ESP32.
 
 ---
 
@@ -505,11 +500,11 @@ ESTADO_IDLE → envia comando → ESPERA_RESPOSTA
 |----------------------|----------------------------------------------------------------|
 | Modo                 | Standard 11-bit identifiers                                    |
 | Bitrate              | 500 kbps (configurável: 125k, 250k, 500k, 1000k)             |
-| Topologia            | 1 master + até 10 slaves                                       |
-| Filtragem            | Hardware: match exato por node; Software: verificação de ID   |
-| Broadcast            | Não suportado (comandos direcionados)                          |
-| Sequenciamento       | Opcional, byte extra no final do payload                       |
-| Confirmação          | ACK para comandos rápidos; DONE para movimentos                |
+| Topologia            | 1 bridge Teensy + até 10 nós ESP32                            |
+| Filtragem            | Hardware por grupo `0x780`; software aceita ID próprio ou broadcast |
+| Broadcast            | Suportado em `can_command_base_id`; evitar em consultas       |
+| Sequenciamento       | Não implementado                                                |
+| Confirmação          | ACK para aceitação; DONE/ERROR posterior em movimentos          |
 | Heartbeat            | 1000 ms                                                        |
 | Payload máximo       | 8 bytes                                                        |
 | Endianness           | Little-endian para multi-bytes                                 |

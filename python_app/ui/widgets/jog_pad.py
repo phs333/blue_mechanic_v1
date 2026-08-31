@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QButtonGroup
 )
 from PyQt6.QtCore import pyqtSignal, Qt
+import time
 from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm
 from python_app.core.state_model import DeviceState
 
@@ -202,6 +203,43 @@ class JogPad(QFrame):
             btn.style().polish(btn)
 
     def _on_jog_ca(self, axis: str, direction_multiplier: int):
+        now = time.time()
+        if not hasattr(self, '_last_jog_time'):
+            self._last_jog_time = 0.0
+            self._last_jog_key = ""
+        key = f"{axis}_{direction_multiplier}"
+        # Throttle rapid duplicate clicks on the exact same button (120ms)
+        if now - self._last_jog_time < 0.12 and key == self._last_jog_key:
+            return
+        self._last_jog_time = now
+        self._last_jog_key = key
+
+        if axis == 'C' and self.chk_inv_c.isChecked():
+            direction_multiplier *= -1
+        elif axis == 'A' and self.chk_inv_a.isChecked():
+            direction_multiplier *= -1
+
+        force = self.chk_force.isChecked()
+        if not force:
+            if axis == 'A':
+                pos_a = self.state.telemetry.pos_a_deg
+                min_a = self.state.parameters.limit_min_deg_a
+                max_a = self.state.parameters.limit_max_deg_a
+                # If already at max limit and trying to move positive, block command at UI level
+                if direction_multiplier > 0 and pos_a >= (max_a - 0.2):
+                    return
+                # If already at min limit and trying to move negative, block command at UI level
+                if direction_multiplier < 0 and pos_a <= (min_a + 0.2):
+                    return
+            elif axis == 'C':
+                pos_c = self.state.telemetry.pos_c_deg
+                min_c = self.state.parameters.limit_min_deg_c
+                max_c = self.state.parameters.limit_max_deg_c
+                if direction_multiplier > 0 and pos_c >= (max_c - 0.2):
+                    return
+                if direction_multiplier < 0 and pos_c <= (min_c + 0.2):
+                    return
+
         axis_index = 0 if axis == 'C' else 1
         params = self.state.parameters
         steps = calc_ca_steps_for_degrees(
@@ -209,18 +247,31 @@ class JogPad(QFrame):
             params.steps_per_rev[axis_index],
             params.tmc_microsteps[axis_index],
         )
-        if axis == 'C' and self.chk_inv_c.isChecked():
-            direction_multiplier *= -1
-        elif axis == 'A' and self.chk_inv_a.isChecked():
-            direction_multiplier *= -1
-            
-        force = self.chk_force.isChecked()
         self.jog_requested.emit(axis, steps * direction_multiplier, force)
 
     def _on_jog_z(self, direction_multiplier: int):
+        now = time.time()
+        if not hasattr(self, '_last_jog_time'):
+            self._last_jog_time = 0.0
+            self._last_jog_key = ""
+        key = f"Z_{direction_multiplier}"
+        if now - self._last_jog_time < 0.12 and key == self._last_jog_key:
+            return
+        self._last_jog_time = now
+        self._last_jog_key = key
+
         if self.chk_inv_z.isChecked():
             direction_multiplier *= -1
+
         force = self.chk_force.isChecked()
+        if not force:
+            pos_z = self.state.telemetry.pos_z_steps
+            max_z = self.state.parameters.max_passos_z
+            if direction_multiplier > 0 and pos_z >= max_z:
+                return
+            if direction_multiplier < 0 and pos_z <= 0:
+                return
+
         params = self.state.parameters
         steps = calc_z_steps_for_mm(
             self.current_step_z_mm,

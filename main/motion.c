@@ -534,11 +534,13 @@ int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
         return 0;
     }
 
+    const float MIN_STEP_DELTA_DEG = deg_per_step * 2.0f; // Minimal threshold (~0.22 deg)
+
     // Direct comparison against exact configured limits
     if (requested_steps > 0) {
         // Moving in positive direction
-        if (actual_deg >= max_limit_deg) {
-            return 0; // Already at or beyond max limit
+        if (actual_deg >= (max_limit_deg - MIN_STEP_DELTA_DEG)) {
+            return 0; // Already at max limit threshold
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step;
         float target_deg = actual_deg + requested_delta_deg;
@@ -546,7 +548,7 @@ int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
             target_deg = max_limit_deg;
         }
         float permitted_delta_deg = target_deg - actual_deg;
-        if (permitted_delta_deg <= 0.0f) {
+        if (permitted_delta_deg < MIN_STEP_DELTA_DEG) {
             return 0;
         }
         int32_t permitted_steps = (int32_t)floorf(permitted_delta_deg / deg_per_step);
@@ -556,8 +558,8 @@ int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
         return permitted_steps;
     } else {
         // Moving in negative direction
-        if (actual_deg <= min_limit_deg) {
-            return 0; // Already at or below min limit
+        if (actual_deg <= (min_limit_deg + MIN_STEP_DELTA_DEG)) {
+            return 0; // Already at min limit threshold
         }
         float requested_delta_deg = (float)requested_steps * deg_per_step; // negative
         float target_deg = actual_deg + requested_delta_deg;
@@ -565,7 +567,7 @@ int32_t motion_plan_limited_steps(float actual_deg, float home_deg,
             target_deg = min_limit_deg;
         }
         float permitted_delta_deg = target_deg - actual_deg; // negative
-        if (permitted_delta_deg >= 0.0f) {
+        if (permitted_delta_deg > -MIN_STEP_DELTA_DEG) {
             return 0;
         }
         int32_t permitted_steps = (int32_t)floorf(fabsf(permitted_delta_deg) / deg_per_step);
@@ -618,6 +620,18 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
         ESP_LOGW(APP_TAG,
                  "MOVE %c bloqueado pelo limite: pedido=%ld pos=%.2f limites=[%.2f, %.2f]",
                  axis_upper, (long)requested_steps, actual_deg, min_limit_deg, max_limit_deg);
+        // Drain any consecutive queued moves in the same blocked direction
+        motion_cmd_t pending;
+        while (ctx->motion_queue && xQueuePeek(ctx->motion_queue, &pending, 0) == pdTRUE) {
+            if ((pending.type == MOTION_CMD_MOVE_REL || pending.type == MOTION_CMD_MOVE_FORCE) &&
+                pending.axis == axis_upper &&
+                ((pending.steps > 0 && requested_steps > 0) || (pending.steps < 0 && requested_steps < 0))) {
+                motion_cmd_t discarded;
+                xQueueReceive(ctx->motion_queue, &discarded, 0);
+            } else {
+                break;
+            }
+        }
         return ESP_OK;
     }
     bool moving_positive = planned_steps > 0;
@@ -724,7 +738,9 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
     return ESP_OK;
 }
 
-static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z, float speed_override, float accel_override)
+static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z,
+                                     float speed_c_override, float speed_a_override, float speed_z_override,
+                                     float accel_override, bool force_no_encoder)
 {
     ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
@@ -732,9 +748,79 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
         return ESP_OK;
     }
 
-    if (steps_z != 0 && ctx->state.z_bloqueado) {
-        ESP_LOGW(APP_TAG, "MOVE_SYNC Z bloqueado por seguranca");
-        return ESP_ERR_INVALID_STATE;
+    if (!force_no_encoder) {
+        // Closed loop limits check for Axis C
+        if (steps_c != 0) {
+            float actual_deg_c = 0.0f;
+            esp_err_t enc_err_c = hardware_read_axis_encoder('C', &actual_deg_c);
+            if (enc_err_c != ESP_OK) {
+                ESP_LOGE(APP_TAG, "MOVE_SYNC rejeitado: encoder C indisponivel (%s). Use MOVE_SYNC_F para forçar.",
+                         esp_err_to_name(enc_err_c));
+                return enc_err_c;
+            }
+            float deg_per_step_c = get_deg_per_step(ctx, 'C');
+            int32_t planned_c = motion_plan_limited_steps(actual_deg_c, ctx->settings.home_c_deg,
+                                                          ctx->settings.limit_min_c_deg, ctx->settings.limit_max_c_deg,
+                                                          deg_per_step_c, steps_c);
+            if (planned_c != steps_c) {
+                ESP_LOGW(APP_TAG, "MOVE_SYNC C ajustado por limite: pedido=%ld planned=%ld (pos=%.2f limites=[%.2f, %.2f])",
+                         (long)steps_c, (long)planned_c, actual_deg_c, ctx->settings.limit_min_c_deg, ctx->settings.limit_max_c_deg);
+            }
+            steps_c = planned_c;
+        }
+
+        // Closed loop limits check for Axis A
+        if (steps_a != 0) {
+            float actual_deg_a = 0.0f;
+            esp_err_t enc_err_a = hardware_read_axis_encoder('A', &actual_deg_a);
+            if (enc_err_a != ESP_OK) {
+                ESP_LOGE(APP_TAG, "MOVE_SYNC rejeitado: encoder A indisponivel (%s). Use MOVE_SYNC_F para forçar.",
+                         esp_err_to_name(enc_err_a));
+                return enc_err_a;
+            }
+            float deg_per_step_a = get_deg_per_step(ctx, 'A');
+            int32_t planned_a = motion_plan_limited_steps(actual_deg_a, ctx->settings.home_a_deg,
+                                                          ctx->settings.limit_min_a_deg, ctx->settings.limit_max_a_deg,
+                                                          deg_per_step_a, steps_a);
+            if (planned_a != steps_a) {
+                ESP_LOGW(APP_TAG, "MOVE_SYNC A ajustado por limite: pedido=%ld planned=%ld (pos=%.2f limites=[%.2f, %.2f])",
+                         (long)steps_a, (long)planned_a, actual_deg_a, ctx->settings.limit_min_a_deg, ctx->settings.limit_max_a_deg);
+            }
+            steps_a = planned_a;
+        }
+
+        // Limits check for Axis Z
+        if (steps_z != 0) {
+            if (ctx->state.z_bloqueado) {
+                ESP_LOGW(APP_TAG, "MOVE_SYNC Z bloqueado por seguranca");
+                return ESP_ERR_INVALID_STATE;
+            }
+            int32_t cur_z = ctx->state.atual_z;
+            int32_t max_z = (int32_t)ctx->settings.max_passos_z;
+            if (steps_z > 0) {
+                if (cur_z + steps_z > max_z) {
+                    int32_t allowed_z = (max_z > cur_z) ? (max_z - cur_z) : 0;
+                    ESP_LOGW(APP_TAG, "MOVE_SYNC Z ajustado por limite: pedido=%ld planned=%ld", (long)steps_z, (long)allowed_z);
+                    steps_z = allowed_z;
+                }
+            } else if (steps_z < 0) {
+                if (cur_z + steps_z < 0) {
+                    int32_t allowed_z = (cur_z > 0) ? -cur_z : 0;
+                    ESP_LOGW(APP_TAG, "MOVE_SYNC Z ajustado por limite: pedido=%ld planned=%ld", (long)steps_z, (long)allowed_z);
+                    steps_z = allowed_z;
+                }
+            }
+        }
+    } else {
+        if (steps_z != 0 && ctx->state.z_bloqueado) {
+            ESP_LOGW(APP_TAG, "MOVE_SYNC Z bloqueado por seguranca");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
+    if (steps_c == 0 && steps_a == 0 && steps_z == 0) {
+        ESP_LOGW(APP_TAG, "MOVE_SYNC ignorado: todos os eixos estao nos limites");
+        return ESP_OK;
     }
 
     if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
@@ -775,10 +861,13 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
     if (accel_a < 10.0f) accel_a = 10.0f;
     if (accel_z < 10.0f) accel_z = 10.0f;
 
-    // Speed
-    float speed_c = (speed_override > 0.0f) ? speed_override : (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_C_ID]) * step_size_c);
-    float speed_a = (speed_override > 0.0f) ? speed_override : (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_A_ID]) * step_size_a);
-    float speed_z = (speed_override > 0.0f) ? speed_override : (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_Z_ID]) * step_size_z);
+    // Speeds individual per axis
+    float speed_c = (speed_c_override > 0.0f) ? speed_c_override :
+                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_C_ID]) * step_size_c);
+    float speed_a = (speed_a_override > 0.0f) ? speed_a_override :
+                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_A_ID]) * step_size_a);
+    float speed_z = (speed_z_override > 0.0f) ? speed_z_override :
+                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_Z_ID]) * step_size_z);
     if (speed_c < 1.0f) speed_c = 1.0f;
     if (speed_a < 1.0f) speed_a = 1.0f;
     if (speed_z < 1.0f) speed_z = 1.0f;
@@ -807,7 +896,8 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
     uint32_t ramp_z = (uint32_t)(ramp_z_f + 0.5f);
     if (ramp_z < 1U) ramp_z = 1U;
 
-    ESP_LOGI(APP_TAG, "MOVE_SYNC C=%lu A=%lu Z=%lu", (unsigned long)abs_c, (unsigned long)abs_a, (unsigned long)abs_z);
+    ESP_LOGI(APP_TAG, "MOVE_SYNC C=%lu A=%lu Z=%lu (SC=%.1f SA=%.1f SZ=%.1f force=%d)",
+             (unsigned long)abs_c, (unsigned long)abs_a, (unsigned long)abs_z, speed_c, speed_a, speed_z, (int)force_no_encoder);
     esp_err_t err = hardware_step_pulse_rmt_move_sync3(abs_c, start_freq_c, target_freq_c, ramp_c,
                                                        abs_a, start_freq_a, target_freq_a, ramp_a,
                                                        abs_z, start_freq_z, target_freq_z, ramp_z);
@@ -837,7 +927,9 @@ static void motion_task(void *arg)
                 err = do_motion_move_axis_force(ctx, cmd.axis, cmd.steps, cmd.speed_override, cmd.accel_override);
                 break;
             case MOTION_CMD_MOVE_SYNC:
-                err = do_motion_move_sync(ctx, cmd.steps_c, cmd.steps_a, cmd.steps_z, cmd.speed_override, cmd.accel_override);
+                err = do_motion_move_sync(ctx, cmd.steps_c, cmd.steps_a, cmd.steps_z,
+                                          cmd.speed_c, cmd.speed_a, cmd.speed_z,
+                                          cmd.accel_override, cmd.force_no_encoder);
                 break;
             case MOTION_CMD_HOME:
                 if (cmd.axis == 'Z') {
@@ -912,6 +1004,23 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
 {
     if (ctx->motion_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
+    }
+    // If the new command reverses direction on the same axis, purge stale opposing moves in queue
+    if (cmd->type == MOTION_CMD_MOVE_REL || cmd->type == MOTION_CMD_MOVE_FORCE) {
+        motion_cmd_t peek_cmd;
+        UBaseType_t count = uxQueueMessagesWaiting(ctx->motion_queue);
+        for (UBaseType_t i = 0; i < count; i++) {
+            if (xQueuePeek(ctx->motion_queue, &peek_cmd, 0) == pdTRUE) {
+                if ((peek_cmd.type == MOTION_CMD_MOVE_REL || peek_cmd.type == MOTION_CMD_MOVE_FORCE) &&
+                    peek_cmd.axis == cmd->axis &&
+                    ((peek_cmd.steps > 0 && cmd->steps < 0) || (peek_cmd.steps < 0 && cmd->steps > 0))) {
+                    motion_cmd_t discarded;
+                    xQueueReceive(ctx->motion_queue, &discarded, 0);
+                } else {
+                    break;
+                }
+            }
+        }
     }
     if (xQueueSend(ctx->motion_queue, cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -1006,7 +1115,9 @@ esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id
     return enqueue_motion_cmd(ctx, &cmd);
 }
 
-esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z, float speed, float accel, uint8_t sender_id, uint8_t opcode)
+esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z,
+                                float speed_c, float speed_a, float speed_z, float accel,
+                                bool force_no_encoder, uint8_t sender_id, uint8_t opcode)
 {
     ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
 
@@ -1019,8 +1130,12 @@ esp_err_t motion_post_move_sync(app_context_t *ctx, int32_t steps_c, int32_t ste
         .steps_z = steps_z,
         .sender_node_id = sender_id,
         .opcode = opcode,
-        .speed_override = speed,
-        .accel_override = accel
+        .speed_override = -1.0f,
+        .accel_override = accel,
+        .speed_c = speed_c,
+        .speed_a = speed_a,
+        .speed_z = speed_z,
+        .force_no_encoder = force_no_encoder
     };
     return enqueue_motion_cmd(ctx, &cmd);
 }

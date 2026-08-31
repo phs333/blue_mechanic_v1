@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLineEdit, QMessageBox
 )
 from PyQt6.QtCore import Qt
+import time
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareParameters, DeviceState
 from python_app.core.protocol_defs import calc_z_mm_per_rev, calc_z_mm_per_step, calc_z_steps_per_mm, Z_BELT_PITCH_MM
@@ -22,11 +23,11 @@ class ParametersView(QWidget):
         super().__init__(parent)
         self.comm = comm
         self.state = state
-        
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        
+
         container = QWidget()
         main_layout = QVBoxLayout(container)
         main_layout.setContentsMargins(18, 16, 18, 16)
@@ -449,9 +450,9 @@ class ParametersView(QWidget):
         can_grid = QGridLayout()
         can_grid.setSpacing(10)
         
-        can_grid.addWidget(QLabel("Node ID do Slave (1..127):"), 0, 0)
+        can_grid.addWidget(QLabel("Node ID do ESP32 (1..10):"), 0, 0)
         self.spin_node_id = QSpinBox()
-        self.spin_node_id.setRange(1, 127)
+        self.spin_node_id.setRange(1, 10)
         self.spin_node_id.setValue(1)
         can_grid.addWidget(self.spin_node_id, 0, 1)
         
@@ -666,21 +667,26 @@ class ParametersView(QWidget):
         if not client:
             return False
         target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
-        results = [
-            client.set_driver_mode("UART"),
-            client.apply_driver_settings(),
-            client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
-            client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
-            client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
-            client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
-            client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
-            client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
-            client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
-            client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
-            client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
-            client.set_driver_mode(target_mode),
-            client.apply_driver_settings(),
+
+        cmds = [
+            lambda: client.set_driver_mode("UART"),
+            lambda: client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
+            lambda: client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
+            lambda: client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
+            lambda: client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
+            lambda: client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
+            lambda: client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
+            lambda: client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
+            lambda: client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
+            lambda: client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
+            lambda: client.set_driver_mode(target_mode),
+            lambda: client.apply_driver_settings(),
         ]
+
+        results = []
+        for cmd_func in cmds:
+            results.append(cmd_func())
+            time.sleep(0.04)  # 40ms inter-command delay prevents ESP32 UART RX FIFO overrun
         return all(results)
 
     def _apply_tmc_settings(self):
@@ -740,47 +746,42 @@ class ParametersView(QWidget):
             QMessageBox.warning(self, "Sem conexão", "Conecte ao hardware antes de aplicar parâmetros.")
             return
 
-        # 1. Steps
-        results = [
-            client.set_steps_per_rev('C', self.spin_steps_c.value()),
-            client.set_steps_per_rev('A', self.spin_steps_a.value()),
-            client.set_steps_per_rev('Z', self.spin_steps_z.value()),
+        cmds = [
+            # 1. Steps
+            lambda: client.set_steps_per_rev('C', self.spin_steps_c.value()),
+            lambda: client.set_steps_per_rev('A', self.spin_steps_a.value()),
+            lambda: client.set_steps_per_rev('Z', self.spin_steps_z.value()),
+            # 2. Speeds & Accel
+            lambda: client.set_axis_speed('C', self.spin_speed_c.value()),
+            lambda: client.set_axis_speed('A', self.spin_speed_a.value()),
+            lambda: client.set_axis_speed('Z', self.spin_speed_z.value()),
+            lambda: client.set_axis_accel('C', self.spin_accel_c.value()),
+            lambda: client.set_axis_accel('A', self.spin_accel_a.value()),
+            lambda: client.set_axis_accel('Z', self.spin_accel_z.value()),
+            # 3. Inverts
+            lambda: client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
+            lambda: client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
+            lambda: client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
+            # 4. Pulley Z & Max Z
+            lambda: client.set_z_pulley_teeth(self.spin_pulley_z.value()),
+            lambda: client.set_length_z(self.spin_max_z.value()),
+            # 5. Angular Limits C & A
+            lambda: client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
+            lambda: client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
         ]
-        
-        # 2. Speeds & Accel
-        results.extend([
-            client.set_axis_speed('C', self.spin_speed_c.value()),
-            client.set_axis_speed('A', self.spin_speed_a.value()),
-            client.set_axis_speed('Z', self.spin_speed_z.value()),
-            client.set_axis_accel('C', self.spin_accel_c.value()),
-            client.set_axis_accel('A', self.spin_accel_a.value()),
-            client.set_axis_accel('Z', self.spin_accel_z.value()),
-        ])
-        
-        # 3. Inverts
-        results.extend([
-            client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
-            client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
-            client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
-        ])
-        
-        # 4. Pulley Z & Max Z
-        results.extend([
-            client.set_z_pulley_teeth(self.spin_pulley_z.value()),
-            client.set_length_z(self.spin_max_z.value()),
-        ])
 
-        # 5. Angular Limits C & A
-        results.extend([
-            client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
-            client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
-        ])
+        results = []
+        for cmd_func in cmds:
+            results.append(cmd_func())
+            time.sleep(0.02)
         
         # 6. TMC settings
         results.append(self._apply_tmc_settings_internal())
+        time.sleep(0.04)
         
         # 7. CAN settings
         results.append(self._apply_can_settings_internal())
+        time.sleep(0.04)
         
         # 8. Refresh and read back configuration
         self.comm.request_config_dump()

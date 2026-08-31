@@ -14,8 +14,9 @@ Aplicação desktop profissional em Python e PyQt6 para controle, parametrizaç�
 
 ## 🚀 Funcionalidades
 
-- **Comunicação Dupla**:
-  - **Porta Serial (COM / UART)**: Transmissão de comandos ASCII (`STATUS`, `MOVE`, `MOVE_F`, `HOME`, `SETHOME`, `SPEED`, `ACCEL`, `LASER`, `FAN`, `DRIVER`, etc.) com parsing e telemetria contínua.
+- **Quatro backends de comunicação**:
+  - **ESP32-S3 Serial Direta (COM / UART)**: Transmissão de comandos ASCII (`STATUS`, `MOVE`, `MOVE_F`, `HOME`, `SETHOME`, `SPEED`, `ACCEL`, `LASER`, `FAN`, `DRIVER`, etc.) com parsing e telemetria contínua.
+  - **Teensy USB/CAN (COM / CDC-ACM)**: Conexão serial própria com o bridge Teensy 4.1 e comandos compactos `M`, `MF`, `H`, `E`, `S`, `L`, `F`, `P` e `R`. O app seleciona um node ESP32-S3 entre 1 e 10 e decodifica `STATUS`, `POS`, `HEARTBEAT`, `PONG`, `ACK`, `DONE`, `ERROR` e `TEENSY_ERROR`.
   - **PeakCAN (PCAN-Basic)**: Suporte completo ao protocolo CAN 11-bit padrão com decodificação de `HEARTBEAT` (0x80), `STATUS` (0x82), `PONG` (0x81), `ACK` (0x83), `DONE` (0x84) e `ERROR` (0xE0).
   - **Simulador Virtual Integrado**: Permite testar movimentação, lasers, aquecimento térmico e sniffer sem precisar do hardware conectado fisicamente.
 - **Dashboard em Tempo Real**:
@@ -27,7 +28,7 @@ Aplicação desktop profissional em Python e PyQt6 para controle, parametrizaç�
   - Comandos diretos de Homing (`HOME C`, `HOME A`, `HOME Z`, `HOME TODOS`).
   - Gravação de zero na NVS (`SETHOME C`, `SETHOME A`, `SETLENGTH Z`).
 - **Periféricos & Gestão Térmica**:
-  - Sliders de alta precisão com porcentagem e valor 8-bit (0-255) para Laser 1 (Frontal) e Laser 2 (Oposto 180°) com presets rápidos (0%, 25%, 50%, 75%, 100%).
+  - Sliders de alta precisão com porcentagem e valor 12-bit (0-4095) para Laser 1 (Frontal) e Laser 2 (Oposto 180°) com presets rápidos (0%, 25%, 50%, 75%, 100%).
   - Controle de modos da ventoinha (Desligado, Ligado, Automático por temperatura).
 - **Gerenciador de Parâmetros (NVS & TMC2209 & CAN)**:
   - Passos por volta, limites de velocidade e aceleração para Eixo C (Base), Eixo A (Pivot) e Eixo Z (Linear).
@@ -61,15 +62,21 @@ python -m python_app.app
 
 ## 🔌 Modos de Conexão
 
-1. **Porta Serial (COM)**:
-   - Selecione `Porta Serial (COM)` no topo da tela.
+1. **ESP32-S3 Serial Direta**:
+   - Selecione `ESP32-S3 Serial Direta` no topo da tela.
    - Escolha a porta COM correspondente ao ESP32-S3 e o baud rate (padrão `115200`).
    - Clique em **Conectar**.
 
-2. **PeakCAN (PCAN-Basic)**:
+2. **Teensy USB/CAN**:
+   - Selecione `Teensy USB/CAN`.
+   - Escolha a porta COM USB do Teensy, o baud rate `115200` e o node ESP32-S3 de destino (`1` a `10`).
+   - Clique em **Conectar**. O app solicitará `R <node>` periodicamente para atualizar status e posição.
+   - O terminal muda automaticamente para exemplos do protocolo Teensy. Operações que o bridge não oferece, como gravação de NVS, perfil individual por eixo e movimento sincronizado, são reportadas como não suportadas.
+
+3. **PeakCAN (PCAN-Basic)**:
    - Certifique-se de ter o driver PCAN instalado no Windows (driver PCAN-USB da PEAK-System).
    - Selecione `PeakCAN (PCAN-Basic)` e o canal desejado (ex: `PCAN_USBBUS1`) e bitrate (padrão `500000`).
    - Clique em **Conectar**.
 
-3. **Simulador Virtual**:
+4. **Simulador Virtual**:
    - Selecione `Simulador Virtual` e clique em **Conectar** para testar toda a interface de forma autônoma.

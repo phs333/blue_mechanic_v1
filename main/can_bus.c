@@ -305,8 +305,8 @@ static esp_err_t can_node_start(app_context_t *ctx)
     };
 
     twai_mask_filter_config_t cmd_filter = {
-        .id = ctx->settings.can_command_base_id + ctx->settings.node_id,
-        .mask = 0x7FF,
+        .id = ctx->settings.can_command_base_id,
+        .mask = 0x780, // Aceita 0x200 (broadcast) e 0x201..0x27F (node específico)
         .is_ext = false,
     };
 
@@ -466,10 +466,11 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 {
     uint16_t rx_id = frame->header.id;
     uint16_t own_cmd_id = (uint16_t)(ctx->settings.can_command_base_id + ctx->settings.node_id);
+    uint16_t broadcast_cmd_id = (uint16_t)ctx->settings.can_command_base_id;
     size_t len = frame->header.dlc;
     const uint8_t *buf = frame->buffer;
 
-    if (rx_id != own_cmd_id) {
+    if (rx_id != own_cmd_id && rx_id != broadcast_cmd_id) {
         return;
     }
 

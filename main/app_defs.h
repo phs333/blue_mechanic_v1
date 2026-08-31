@@ -256,8 +256,12 @@ typedef struct {
     int32_t steps_z;
     uint8_t sender_node_id;
     uint8_t opcode;
-    float speed_override;   // velocidade em deg/s (X/Y) ou mm/s (Z), -1.0 = usar padrão
-    float accel_override;   // aceleração em deg/s² (X/Y) ou mm/s² (Z), -1.0 = usar padrão
+    float speed_override;   // velocidade geral em deg/s ou mm/s, -1.0 = usar padrão
+    float accel_override;   // aceleração em deg/s² ou mm/s², -1.0 = usar padrão
+    float speed_c;          // velocidade individual C (deg/s), -1.0 = usar padrão
+    float speed_a;          // velocidade individual A (deg/s), -1.0 = usar padrão
+    float speed_z;          // velocidade individual Z (mm/s), -1.0 = usar padrão
+    bool force_no_encoder;  // true = ignora limites e encoder (sem correção)
 } motion_cmd_t;
 
 typedef struct {

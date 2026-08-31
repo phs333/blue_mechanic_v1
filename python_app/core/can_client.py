@@ -1,6 +1,6 @@
 """
 PeakCAN (PCAN-Basic) Client for Blue Mechanic V1 using python-can.
-Implements 11-bit standard frames, opcode encoding, sequence management,
+Implements 11-bit standard frames, opcode encoding,
 background reception, status polling, and event parsing.
 """
 
@@ -36,16 +36,11 @@ class CanClient(BaseClient):
         self.status_base_id = 0x280
         self.pos_base_id = 0x290
         self.event_base_id = 0x300
-        self.seq_counter = 1
 
     @staticmethod
     def list_available_channels() -> List[str]:
         channels = ["PCAN_USBBUS1", "PCAN_USBBUS2", "PCAN_USBBUS3", "PCAN_USBBUS4", "PCAN_PCIBUS1"]
         return channels
-
-    def _next_seq(self) -> int:
-        self.seq_counter = (self.seq_counter % 254) + 1
-        return self.seq_counter
 
     def connect(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
                 node_id: int = 1, cmd_base: int = 0x200, status_base: int = 0x280, 
@@ -329,20 +324,17 @@ class CanClient(BaseClient):
     # --- High-level command implementations ---
     def request_status(self) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
-        payload = bytes([CanOpcode.STATUS_REQUEST, seq])
+        payload = bytes([CanOpcode.STATUS_REQUEST])
         return self.send_frame(target_id, payload, "STATUS_REQUEST")
 
     def ping(self, arg0: int = 0xAA, arg1: int = 0x55) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
-        payload = bytes([CanOpcode.PING, arg0 & 0xFF, arg1 & 0xFF, seq])
+        payload = bytes([CanOpcode.PING, arg0 & 0xFF, arg1 & 0xFF])
         return self.send_frame(target_id, payload, f"PING ({arg0:02X}, {arg1:02X})")
 
     def set_driver_enabled(self, enable: bool) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
-        payload = bytes([CanOpcode.ENABLE, 1 if enable else 0, seq])
+        payload = bytes([CanOpcode.ENABLE, 1 if enable else 0])
         return self.send_frame(target_id, payload, f"ENABLE {'ON' if enable else 'OFF'}")
 
     def set_alarm_z(self, enable: bool) -> bool:
@@ -351,14 +343,13 @@ class CanClient(BaseClient):
     def home_axis(self, axis: str) -> bool:
         axis = axis.upper()
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
         if axis == "ALL" or axis == "CA":
-            self.send_frame(target_id, bytes([CanOpcode.HOME, ord('C'), self._next_seq()]), "HOME C")
-            self.send_frame(target_id, bytes([CanOpcode.HOME, ord('A'), self._next_seq()]), "HOME A")
-            return self.send_frame(target_id, bytes([CanOpcode.HOME, ord('Z'), self._next_seq()]), "HOME Z")
+            self.send_frame(target_id, bytes([CanOpcode.HOME, ord('C')]), "HOME C")
+            self.send_frame(target_id, bytes([CanOpcode.HOME, ord('A')]), "HOME A")
+            return self.send_frame(target_id, bytes([CanOpcode.HOME, ord('Z')]), "HOME Z")
         
         canonical_char = 'C' if axis[0] in ['C', 'X'] else ('A' if axis[0] in ['A', 'Y'] else 'Z')
-        payload = bytes([CanOpcode.HOME, ord(canonical_char), seq])
+        payload = bytes([CanOpcode.HOME, ord(canonical_char)])
         return self.send_frame(target_id, payload, f"HOME {axis}")
 
     def set_home(self, axis: str) -> bool:
@@ -392,39 +383,33 @@ class CanClient(BaseClient):
             ):
                 return False
 
-        seq = self._next_seq()
         # 32-bit signed int, little endian
         steps_bytes = struct.pack('<i', int(steps))
         opcode = CanOpcode.MOVE_FORCE if force_no_encoder else CanOpcode.MOVE
         payload = bytearray([opcode, ord(axis_char)])
         payload.extend(steps_bytes)
-        payload.append(seq)
-        
         desc = f"{'MOVE_F' if force_no_encoder else 'MOVE'} {axis_char} {steps} steps"
         return self.send_frame(target_id, bytes(payload), desc)
 
     def set_laser(self, laser_index: int, level: int) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
         level = max(0, min(4095, int(level)))
         lvl_low = level & 0xFF
         lvl_high = (level >> 8) & 0xFF
-        payload = bytes([CanOpcode.LASER, laser_index, lvl_low, lvl_high, seq])
+        payload = bytes([CanOpcode.LASER, laser_index, lvl_low, lvl_high])
         return self.send_frame(target_id, payload, f"LASER {laser_index} -> {level}")
 
     def set_fan(self, mode: int) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
         mode = max(0, min(2, mode))
-        payload = bytes([CanOpcode.FAN, mode, seq])
+        payload = bytes([CanOpcode.FAN, mode])
         mode_names = ["OFF", "ON", "AUTO"]
         return self.send_frame(target_id, payload, f"FAN -> {mode_names[mode]}")
 
     def set_speed_level(self, level: int) -> bool:
         target_id = self.cmd_base_id + self.node_id
-        seq = self._next_seq()
         level = max(1, min(5, level))
-        payload = bytes([CanOpcode.SPEED, level, seq])
+        payload = bytes([CanOpcode.SPEED, level])
         return self.send_frame(target_id, payload, f"SPEED -> Level {level}")
 
     def set_axis_speed(self, axis: str, speed: float) -> bool:
@@ -432,7 +417,6 @@ class CanClient(BaseClient):
         target_id = self.cmd_base_id + self.node_id
         payload = bytearray([CanOpcode.AXIS_SPEED, ord(axis_char)])
         payload.extend(struct.pack('<f', float(speed)))
-        payload.append(self._next_seq())
         sent = self.send_frame(target_id, bytes(payload), f"SPEED {axis_char} {speed:g}")
         if sent:
             index = 'CAZ'.index(axis_char)
@@ -446,7 +430,6 @@ class CanClient(BaseClient):
         target_id = self.cmd_base_id + self.node_id
         payload = bytearray([CanOpcode.AXIS_ACCEL, ord(axis_char)])
         payload.extend(struct.pack('<f', float(accel)))
-        payload.append(self._next_seq())
         sent = self.send_frame(target_id, bytes(payload), f"ACCEL {axis_char} {accel:g}")
         if sent:
             index = 'CAZ'.index(axis_char)

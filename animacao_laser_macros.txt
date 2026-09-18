@@ -1,0 +1,29 @@
+# =================================================================
+# ANIMAÇÃO PROCEDURAL EM MACROS: FADE IN + FADE OUT + 200 PISCADAS
+# Nós 1 & 4 (Laser canal 2) - Reduzido de 2.935 linhas para apenas 24 linhas!
+# =================================================================
+
+# Blackout Inicial
+BLACKOUT 1
+BLACKOUT 4
+WAIT 150
+
+# PARTE 1: Fade In Ultra-Suave (1 a 300 @ 10ms nos dois lasers simultaneamente)
+FOR P = 1 TO 300 STEP 1
+  L 1 2 {P}
+  L 4 2 {P}
+  WAIT 10
+END
+
+# PARTE 2: Fade Out no Nó 1 até apagar (300 a 0 @ 10ms)
+FADE 1 2 300 0 10 1
+
+# PARTE 3: Fade Out no Nó 4 até apagar (300 a 0 @ 10ms)
+FADE 4 2 300 0 10 1
+
+# PARTE 4: 200 piscadas intercaladas em X com intervalo de 20ms
+STROBE_CROSS 1 2 4 2 300 20 200
+
+# Blackout Final Limpo
+BLACKOUT 1
+BLACKOUT 4

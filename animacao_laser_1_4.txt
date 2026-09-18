@@ -1,0 +1,425 @@
+# =================================================================
+# SHOW DMX FESTIVAL RAVE: NÓS 01 & 04 (FEIXES CRUZADOS EM "X")
+# =================================================================
+# Geometria física:
+# - Diagonal A (\): Nó 1 Laser 1 + Nó 4 Laser 2
+# - Diagonal B (/): Nó 1 Laser 2 + Nó 4 Laser 1
+# - Faixa útil: 0 (Off) a 300 (Brilho Máximo)
+# =================================================================
+
+# --- PREPARAÇÃO: Blackout Limpo ---
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 150
+
+# =================================================================
+# FASE 1: RESPIRAÇÃO ANALÓGICA ULTRA-SUAVE (Breath Wave)
+# =================================================================
+# Fade In Suave no X Completo (Curva Perceptual Logarítmica)
+L 1 1 20
+L 1 2 20
+L 4 1 20
+L 4 2 20
+WAIT 25
+L 1 1 55
+L 1 2 55
+L 4 1 55
+L 4 2 55
+WAIT 25
+L 1 1 110
+L 1 2 110
+L 4 1 110
+L 4 2 110
+WAIT 25
+L 1 1 180
+L 1 2 180
+L 4 1 180
+L 4 2 180
+WAIT 25
+L 1 1 250
+L 1 2 250
+L 4 1 250
+L 4 2 250
+WAIT 25
+L 1 1 300
+L 1 2 300
+L 4 1 300
+L 4 2 300
+WAIT 80
+
+# Fade Out Suave
+L 1 1 240
+L 1 2 240
+L 4 1 240
+L 4 2 240
+WAIT 25
+L 1 1 170
+L 1 2 170
+L 4 1 170
+L 4 2 170
+WAIT 25
+L 1 1 100
+L 1 2 100
+L 4 1 100
+L 4 2 100
+WAIT 25
+L 1 1 45
+L 1 2 45
+L 4 1 45
+L 4 2 45
+WAIT 25
+L 1 1 15
+L 1 2 15
+L 4 1 15
+L 4 2 15
+WAIT 25
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 80
+
+# =================================================================
+# FASE 2: CROSSFADE DINÂMICO DIAGONAL (Diagonal A vs Diagonal B)
+# =================================================================
+# Diagonal A (\) acende suave
+L 1 1 40
+L 4 2 40
+WAIT 20
+L 1 1 120
+L 4 2 120
+WAIT 20
+L 1 1 220
+L 4 2 220
+WAIT 20
+L 1 1 300
+L 4 2 300
+WAIT 60
+
+# Transição rápida cruzada (A cai / B sobe)
+L 1 1 180
+L 4 2 180
+L 1 2 70
+L 4 1 70
+WAIT 20
+L 1 1 80
+L 4 2 80
+L 1 2 170
+L 4 1 170
+WAIT 20
+L 1 1 0
+L 4 2 0
+L 1 2 300
+L 4 1 300
+WAIT 60
+
+# Diagonal B cai suave
+L 1 2 200
+L 4 1 200
+WAIT 20
+L 1 2 100
+L 4 1 100
+WAIT 20
+L 1 2 30
+L 4 1 30
+WAIT 20
+L 1 2 0
+L 4 1 0
+WAIT 60
+
+# =================================================================
+# FASE 3: STROBO CRUZADO RAVE (14 Hz Diagonal X-Strobe)
+# =================================================================
+# Pulso 1: Diagonal A (\)
+L 1 1 300
+L 4 2 300
+WAIT 35
+L 1 1 0
+L 4 2 0
+WAIT 25
+
+# Pulso 2: Diagonal B (/)
+L 1 2 300
+L 4 1 300
+WAIT 35
+L 1 2 0
+L 4 1 0
+WAIT 25
+
+# Pulso 3: Diagonal A (\)
+L 1 1 300
+L 4 2 300
+WAIT 35
+L 1 1 0
+L 4 2 0
+WAIT 25
+
+# Pulso 4: Diagonal B (/)
+L 1 2 300
+L 4 1 300
+WAIT 35
+L 1 2 0
+L 4 1 0
+WAIT 25
+
+# Pulso 5: Diagonal A (\)
+L 1 1 300
+L 4 2 300
+WAIT 35
+L 1 1 0
+L 4 2 0
+WAIT 25
+
+# Pulso 6: Diagonal B (/)
+L 1 2 300
+L 4 1 300
+WAIT 35
+L 1 2 0
+L 4 1 0
+WAIT 50
+
+# =================================================================
+# FASE 4: CHASER ROTATIVO 3D (Giro Contínuo no X)
+# =================================================================
+# Ciclo 1 (Velocidade Média)
+L 1 1 280
+WAIT 30
+L 1 1 0
+L 4 1 280
+WAIT 30
+L 4 1 0
+L 4 2 280
+WAIT 30
+L 4 2 0
+L 1 2 280
+WAIT 30
+L 1 2 0
+
+# Ciclo 2 (Velocidade Alta)
+L 1 1 300
+WAIT 25
+L 1 1 0
+L 4 1 300
+WAIT 25
+L 4 1 0
+L 4 2 300
+WAIT 25
+L 4 2 0
+L 1 2 300
+WAIT 25
+L 1 2 0
+
+# Ciclo 3 (Turbo)
+L 1 1 300
+WAIT 20
+L 1 1 0
+L 4 1 300
+WAIT 20
+L 4 1 0
+L 4 2 300
+WAIT 20
+L 4 2 0
+L 1 2 300
+WAIT 20
+L 1 2 0
+
+# Ciclo 4 (Reverso Turbo)
+L 1 2 300
+WAIT 20
+L 1 2 0
+L 4 2 300
+WAIT 20
+L 4 2 0
+L 4 1 300
+WAIT 20
+L 4 1 0
+L 1 1 300
+WAIT 20
+L 1 1 0
+WAIT 60
+
+# =================================================================
+# FASE 5: TESOURA SINCRONIZADA (Esquerda vs Direita)
+# =================================================================
+# Nó 1 (Lado Esquerdo do X) dispara duplo flash
+L 1 1 300
+L 1 2 300
+WAIT 35
+L 1 1 0
+L 1 2 0
+WAIT 30
+L 1 1 300
+L 1 2 300
+WAIT 45
+L 1 1 0
+L 1 2 0
+WAIT 50
+
+# Nó 4 (Lado Direito do X) responde duplo flash
+L 4 1 300
+L 4 2 300
+WAIT 35
+L 4 1 0
+L 4 2 0
+WAIT 30
+L 4 1 300
+L 4 2 300
+WAIT 45
+L 4 1 0
+L 4 2 0
+WAIT 60
+
+# =================================================================
+# FASE 6: THE BUILD-UP & THE DROP (Clímax de Festival)
+# =================================================================
+# Batida 1 (Espaçada)
+L 1 1 260
+L 4 2 260
+WAIT 40
+L 1 1 0
+L 4 2 0
+WAIT 100
+
+L 1 2 260
+L 4 1 260
+WAIT 40
+L 1 2 0
+L 4 1 0
+WAIT 100
+
+# Batida 2 (Acelerando)
+L 1 1 280
+L 4 2 280
+WAIT 35
+L 1 1 0
+L 4 2 0
+WAIT 60
+
+L 1 2 280
+L 4 1 280
+WAIT 35
+L 1 2 0
+L 4 1 0
+WAIT 60
+
+# Batida 3 (Metralhadora / Machine Gun)
+L 1 1 300
+L 4 2 300
+WAIT 25
+L 1 1 0
+L 4 2 0
+WAIT 20
+
+L 1 2 300
+L 4 1 300
+WAIT 25
+L 1 2 0
+L 4 1 0
+WAIT 20
+
+L 1 1 300
+L 4 2 300
+WAIT 25
+L 1 1 0
+L 4 2 0
+WAIT 20
+
+L 1 2 300
+L 4 1 300
+WAIT 25
+L 1 2 0
+L 4 1 0
+WAIT 20
+
+# O SILÊNCIO SUSPENSE (Blackout antes do Drop)
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 140
+
+# --- THE DROP: FULL POWER 300 EM TODO O "X" ---
+L 1 1 300
+L 1 2 300
+L 4 1 300
+L 4 2 300
+WAIT 180
+
+# 3 Super Flashes Ceifantes
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 30
+
+L 1 1 300
+L 1 2 300
+L 4 1 300
+L 4 2 300
+WAIT 50
+
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 30
+
+L 1 1 300
+L 1 2 300
+L 4 1 300
+L 4 2 300
+WAIT 50
+
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 30
+
+L 1 1 300
+L 1 2 300
+L 4 1 300
+L 4 2 300
+WAIT 80
+
+# =================================================================
+# FASE 7: DISSOLUÇÃO FINAL (Decaimento Analógico para Loop)
+# =================================================================
+L 1 1 230
+L 1 2 230
+L 4 1 230
+L 4 2 230
+WAIT 25
+
+L 1 1 160
+L 1 2 160
+L 4 1 160
+L 4 2 160
+WAIT 25
+
+L 1 1 95
+L 1 2 95
+L 4 1 95
+L 4 2 95
+WAIT 25
+
+L 1 1 40
+L 1 2 40
+L 4 1 40
+L 4 2 40
+WAIT 25
+
+L 1 1 10
+L 1 2 10
+L 4 1 10
+L 4 2 10
+WAIT 25
+
+# Apagamento completo
+L 1 1 0
+L 1 2 0
+L 4 1 0
+L 4 2 0
+WAIT 200

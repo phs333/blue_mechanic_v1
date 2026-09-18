@@ -37,6 +37,14 @@ Aplicação desktop profissional em Python e PyQt6 para controle, parametrizaç�
 - **Terminal Serial & Sniffer CAN**:
   - Console com histórico de comandos enviados e recebidos com formatação colorida.
   - Tabela de sniffer de frames CAN com decodificação de opcodes em tempo real.
+- **Modo Broadcast Teensy (Node 0 / CAN ID 0x200)**:
+  - Checkbox `📢 Broadcast (Node 0)` no cabeçalho de conexão para disparar todos os comandos de movimentação e periféricos simultaneamente para todos os nós ESP32-S3 do barramento.
+  - Mantém o nó de telemetria selecionado para leituras de status sem gerar colisões no barramento CAN.
+- **Automação de Testes e Sequenciador em Loop (`🔁 Automação & Testes`)**:
+  - Editor de scripts ASCII com suporte a delays temporizados (`WAIT 500`), pausas e comentários.
+  - Execução em **Loop Contínuo (Infinito)**, repetição de N vezes ou passo a passo.
+  - Presets prontos com 1 clique (Varredura Sincronizada C/A/Z, Estresse de Lasers, Ciclo de Homing, Broadcast em Todos os Nós, Escalonamento de Velocidades).
+  - Painel de métricas em tempo real (Loops Concluídos, Passos, Comandos TX, Falhas e Tempo Decorrido) e log detalhado.
 
 ---
 
@@ -70,8 +78,9 @@ python -m python_app.app
 2. **Teensy USB/CAN**:
    - Selecione `Teensy USB/CAN`.
    - Escolha a porta COM USB do Teensy, o baud rate `115200` e o node ESP32-S3 de destino (`1` a `10`).
-   - Clique em **Conectar**. O app solicitará `R <node>` periodicamente para atualizar status e posição.
+   - Marque `📢 Broadcast (Node 0)` se desejar transmitir todos os comandos de atuação para todos os nós simultaneamente via CAN ID `0x200`. O app continuará solicitando `R <node>` periodicamente ao nó monitorado.
    - O terminal muda automaticamente para exemplos do protocolo Teensy. O movimento sincronizado usa `MS/MSF` e o opcode CAN `0x23`; gravação de NVS e perfil individual por eixo continuam reportados como não suportados.
+   - Utilize a aba **`🔁 Automação & Testes`** para executar rotinas e varreduras em loop contínuo.
 
 3. **PeakCAN (PCAN-Basic)**:
    - Certifique-se de ter o driver PCAN instalado no Windows (driver PCAN-USB da PEAK-System).

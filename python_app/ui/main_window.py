@@ -7,17 +7,19 @@ stacked views, and real-time status bar.
 import time
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QStackedWidget, QComboBox, QFrame, QStatusBar, QMessageBox, QSpinBox
+    QStackedWidget, QComboBox, QFrame, QStatusBar, QMessageBox, QSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 
 from python_app.ui.style import DARK_THEME_QSS
 from python_app.ui.views.dashboard_view import DashboardView
+from python_app.ui.views.teensy_dashboard_view import TeensyDashboardView
 from python_app.ui.views.motion_view import MotionView
 from python_app.ui.views.peripherals_view import PeripheralsView
 from python_app.ui.views.parameters_view import ParametersView
 from python_app.ui.views.terminal_view import TerminalView
+from python_app.ui.views.automation_view import AutomationView
 from python_app.ui.widgets.kinematic_3d_view import Kinematic3DView
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState
@@ -104,7 +106,13 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.btn_nav_term)
         self.nav_buttons.append(self.btn_nav_term)
         
-        # 3D Kinematics Widget below Terminal & Sniffer button
+        self.btn_nav_auto = QPushButton("🔁  Automação & Testes")
+        self.btn_nav_auto.setProperty("class", "nav-btn")
+        self.btn_nav_auto.clicked.connect(lambda: self._set_page(5))
+        sidebar_layout.addWidget(self.btn_nav_auto)
+        self.nav_buttons.append(self.btn_nav_auto)
+        
+        # 3D Kinematics Widget below Navigation buttons
         sidebar_layout.addSpacing(8)
         self.kinematic_3d = Kinematic3DView(self.state)
         sidebar_layout.addWidget(self.kinematic_3d)
@@ -186,12 +194,20 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.lbl_can_node)
         top_bar_layout.addWidget(self.spin_can_node)
         
+        self.chk_broadcast = QCheckBox("📢 Broadcast (Node 0)")
+        self.chk_broadcast.setToolTip(
+            "Modo Broadcast Teensy: transmite comandos de atuação (M, MF, MS, H, E, S, L, F) para todos os nós (Node 0 / CAN 0x200)"
+        )
+        self.chk_broadcast.toggled.connect(self._on_broadcast_toggled)
+        top_bar_layout.addWidget(self.chk_broadcast)
+        
         self.lbl_can_chan.setVisible(False)
         self.combo_can_chan.setVisible(False)
         self.lbl_can_bit.setVisible(False)
         self.combo_can_bit.setVisible(False)
         self.lbl_can_node.setVisible(False)
         self.spin_can_node.setVisible(False)
+        self.chk_broadcast.setVisible(False)
         
         top_bar_layout.addStretch()
         
@@ -204,18 +220,25 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(top_bar)
         
         # --- Stacked Pages ---
-        self.stack = QStackedWidget()
+        self.dash_stack = QStackedWidget()
         self.page_dash = DashboardView(self.comm, self.state)
+        self.page_teensy_dash = TeensyDashboardView(self.comm, self.state)
+        self.dash_stack.addWidget(self.page_dash)
+        self.dash_stack.addWidget(self.page_teensy_dash)
+
         self.page_motion = MotionView(self.comm, self.state)
         self.page_periph = PeripheralsView(self.comm, self.state)
         self.page_params = ParametersView(self.comm, self.state)
         self.page_term = TerminalView(self.comm, self.state)
+        self.page_auto = AutomationView(self.comm, self.state)
         
-        self.stack.addWidget(self.page_dash)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.dash_stack)
         self.stack.addWidget(self.page_motion)
         self.stack.addWidget(self.page_periph)
         self.stack.addWidget(self.page_params)
         self.stack.addWidget(self.page_term)
+        self.stack.addWidget(self.page_auto)
         
         content_layout.addWidget(self.stack, 1)
         app_layout.addWidget(content_area, 1)
@@ -229,6 +252,11 @@ class MainWindow(QMainWindow):
         self.lbl_status_conn = QLabel("DESCONECTADO")
         self.lbl_status_conn.setProperty("class", "badge badge-gray")
         status_bar.addPermanentWidget(self.lbl_status_conn)
+        
+        self.lbl_status_nodes = QLabel("🌐 Nós: --/10")
+        self.lbl_status_nodes.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+        self.lbl_status_nodes.setVisible(False)
+        status_bar.addPermanentWidget(self.lbl_status_nodes)
         
         self.lbl_status_hb = QLabel("💓 Heartbeat: --")
         self.lbl_status_hb.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
@@ -247,6 +275,10 @@ class MainWindow(QMainWindow):
         self.state.parameters_updated.connect(
             lambda params: self.spin_can_node.setValue(params.node_id)
         )
+        self.state.nodes_summary_updated.connect(self._on_nodes_summary_updated)
+        self.comm.broadcast_changed.connect(self._on_comm_broadcast_changed)
+        self.spin_can_node.valueChanged.connect(self._on_spin_node_changed)
+        self.page_teensy_dash.selected_node_changed.connect(self._on_node_selected_from_teensy_dash)
 
     def _set_page(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -258,9 +290,28 @@ class MainWindow(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+    def _on_spin_node_changed(self, val: int):
+        self.comm.set_target_node(val)
+        self.page_teensy_dash.select_node(val)
+
+    def _on_node_selected_from_teensy_dash(self, node_id: int):
+        self.spin_can_node.blockSignals(True)
+        self.spin_can_node.setValue(node_id)
+        self.spin_can_node.blockSignals(False)
+        self.comm.set_target_node(node_id)
+
+    def _on_nodes_summary_updated(self, online_count: int):
+        if self.combo_backend.currentIndex() == 1:
+            self.lbl_status_nodes.setText(f"🌐 Nós Online: {online_count}/10")
+            if online_count > 0:
+                self.lbl_status_nodes.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px; margin-right: 15px;")
+            else:
+                self.lbl_status_nodes.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+
     def _on_backend_change(self, index: int):
         # 0 = ESP32 serial, 1 = Teensy USB/CAN, 2 = PeakCAN, 3 = Simulator
         is_serial = index in (0, 1)
+        is_teensy = index == 1
         is_can = index == 2
         uses_node = index in (1, 2)
         
@@ -276,6 +327,26 @@ class MainWindow(QMainWindow):
         self.combo_can_bit.setVisible(is_can)
         self.lbl_can_node.setVisible(uses_node)
         self.spin_can_node.setVisible(uses_node)
+        self.chk_broadcast.setVisible(is_teensy)
+        self.lbl_status_nodes.setVisible(is_teensy)
+
+        if is_teensy:
+            self.dash_stack.setCurrentWidget(self.page_teensy_dash)
+            self.btn_nav_dash.setText("🌐  Dashboard (10 Nós)")
+        else:
+            self.dash_stack.setCurrentWidget(self.page_dash)
+            self.btn_nav_dash.setText("📊  Dashboard Geral")
+
+    def _on_broadcast_toggled(self, checked: bool):
+        self.comm.set_broadcast_mode(checked)
+        self.lbl_can_node.setText("Node Monit.:" if checked else "Node:")
+
+    def _on_comm_broadcast_changed(self, enabled: bool):
+        if self.chk_broadcast.isChecked() != enabled:
+            self.chk_broadcast.blockSignals(True)
+            self.chk_broadcast.setChecked(enabled)
+            self.chk_broadcast.blockSignals(False)
+            self.lbl_can_node.setText("Node Monit.:" if enabled else "Node:")
 
     def _refresh_ports(self):
         self.combo_ports.clear()
@@ -304,6 +375,8 @@ class MainWindow(QMainWindow):
                         baudrate=baud,
                         node_id=self.spin_can_node.value(),
                     )
+                    if self.chk_broadcast.isChecked():
+                        self.comm.set_broadcast_mode(True)
             elif backend_idx == 2:  # PeakCAN
                 chan = self.combo_can_chan.currentText()
                 bitrate = int(self.combo_can_bit.currentText())
@@ -356,3 +429,13 @@ class MainWindow(QMainWindow):
 
         # Telemetry is event-driven (ESP32 pushes updates on move finish / parameter changes)
         pass
+
+    def closeEvent(self, event):
+        try:
+            if hasattr(self, "page_auto") and hasattr(self.page_auto, "worker"):
+                self.page_auto.worker.stop()
+            if hasattr(self, "comm"):
+                self.comm.disconnect()
+        except Exception:
+            pass
+        super().closeEvent(event)

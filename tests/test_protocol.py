@@ -13,6 +13,7 @@ from python_app.core.protocol_defs import (
 from python_app.core.serial_client import SerialClient
 from python_app.core.state_model import DeviceState
 from python_app.core.teensy_serial_client import TeensySerialClient
+from python_app.core.test_automation import parse_script
 
 
 class RecordingCanClient(CanClient):
@@ -272,6 +273,98 @@ class TeensySerialProtocolTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("MOVE", errors[0])
         self.assertIn("ESP_ERR_INVALID_STATE", errors[0])
+
+    def test_teensy_broadcast_mode_targets_node_zero_for_actuation_only(self):
+        self.client.set_broadcast_mode(True)
+        self.assertTrue(self.client.broadcast_mode)
+        self.assertEqual(self.client.target_node, 0)
+        self.assertEqual(self.client.node_id, 3)
+
+        self.assertTrue(self.client.set_driver_enabled(True))
+        self.assertTrue(self.client.home_axis("C"))
+        self.assertTrue(self.client.move_axis("A", 400))
+        self.assertTrue(self.client.move_axis("Z", -500, force_no_encoder=True))
+        self.assertTrue(self.client.move_sync(800, -400, 1000))
+        self.assertTrue(self.client.set_laser(1, 4095))
+        self.assertTrue(self.client.set_fan(2))
+        self.assertTrue(self.client.set_speed_level(5))
+
+        # Status and ping MUST retain specific node 3 to prevent CAN flood / TEENSY_ERROR
+        self.assertTrue(self.client.request_status())
+        self.assertTrue(self.client.ping(10, 20))
+
+        self.assertEqual(
+            self.client.commands,
+            [
+                "E 0 1",
+                "H 0 C",
+                "M 0 A 400",
+                "MF 0 Z -500",
+                "MS 0 90.0 -45.0 10.00",
+                "L 0 1 4095",
+                "F 0 2",
+                "S 0 5",
+                "R 3",
+                "P 3 10 20",
+            ],
+        )
+
+    def test_automation_script_parser_and_broadcast_override(self):
+        script = """
+        # Test script
+        E {node} 1
+        WAIT 500
+        M 2 C 800
+        DELAY 1.5s
+        MS 1 45.0 -30.0 10.0
+        """
+        # Parsing with force_broadcast=True
+        steps = parse_script(script, default_delay_ms=400, force_broadcast=True, default_node=1)
+
+        # Comments are retained as COMMENT steps
+        comments = [s for s in steps if s.step_type == "COMMENT"]
+        self.assertEqual(len(comments), 1)
+
+        exec_steps = [s for s in steps if s.step_type in ("COMMAND", "DELAY")]
+        self.assertEqual(len(exec_steps), 5)
+
+        # Check commands have node replaced with 0
+        self.assertEqual(exec_steps[0].command, "E 0 1")
+        self.assertEqual(exec_steps[1].step_type, "DELAY")
+        self.assertEqual(exec_steps[1].delay_ms, 500)
+        self.assertEqual(exec_steps[2].command, "M 0 C 800")
+        self.assertEqual(exec_steps[3].step_type, "DELAY")
+        self.assertEqual(exec_steps[3].delay_ms, 1500)
+        self.assertEqual(exec_steps[4].command, "MS 0 45.0 -30.0 10.0")
+
+    def test_automation_script_preserves_explicit_nodes_by_default(self):
+        # Exactly the user's script
+        script = """
+        L 1 2 300
+        WAIT 500
+        L 2 2 300
+        WAIT 500
+        L 3 2 300
+        WAIT 500
+        L 4 2 300
+        WAIT 500
+        L 0 2 0
+        WAIT 500
+        """
+        # force_broadcast=False is the default
+        steps = parse_script(script, default_delay_ms=500, force_broadcast=False, default_node=1)
+        commands = [s.command for s in steps if s.step_type == "COMMAND"]
+
+        self.assertEqual(
+            commands,
+            [
+                "L 1 2 300",
+                "L 2 2 300",
+                "L 3 2 300",
+                "L 4 2 300",
+                "L 0 2 0",
+            ],
+        )
 
 
 if __name__ == "__main__":

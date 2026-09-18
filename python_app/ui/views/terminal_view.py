@@ -120,16 +120,18 @@ class TerminalView(QWidget):
         self.state.raw_message_received.connect(self._append_console_msg)
         self.state.can_frame_received.connect(self._append_can_frame)
         self.state.connection_changed.connect(self._on_connection_changed)
+        self.comm.broadcast_changed.connect(lambda _: self._refresh_presets())
 
     def _send_preset(self, index: int):
         if self._terminal_mode == "TEENSY":
             node = self.comm.teensy_serial_client.node_id
+            act_node = 0 if self.comm.is_broadcast_mode() else node
             commands = [
                 f"R {node}",
                 f"P {node} 10 20",
-                f"E {node} 1",
-                f"S {node} 3",
-                f"F {node} 2",
+                f"E {act_node} 1",
+                f"S {act_node} 3",
+                f"F {act_node} 2",
             ]
             self.comm.send_raw(commands[index])
             return
@@ -141,16 +143,16 @@ class TerminalView(QWidget):
         commands = ["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]
         self.comm.send_raw(commands[index])
 
-    def _on_connection_changed(self, connected: bool, backend: str):
-        if connected and backend.startswith("Teensy USB/CAN"):
-            self._terminal_mode = "TEENSY"
+    def _refresh_presets(self):
+        if self._terminal_mode == "TEENSY":
             node = self.comm.teensy_serial_client.node_id
-            labels = [f"R {node}", f"P {node} 10 20", f"E {node} 1", f"S {node} 3", f"F {node} 2"]
+            act_node = 0 if self.comm.is_broadcast_mode() else node
+            bcast_tag = " [Broadcast]" if self.comm.is_broadcast_mode() else ""
+            labels = [f"R {node}", f"P {node} 10 20", f"E {act_node} 1", f"S {act_node} 3", f"F {act_node} 2"]
             self.txt_cmd.setPlaceholderText(
-                f"Teensy Node {node}: M {node} C 800, MS {node} 90.0 -45.0 10.00, H {node} Z, R {node}..."
+                f"Teensy (Node {act_node}{bcast_tag}): M {act_node} C 800, MS {act_node} 90.0 -45.0 10.00, H {act_node} Z, R {node}..."
             )
         else:
-            self._terminal_mode = "ESP32"
             labels = ["STATUS", "HELP", "TEMP", "DRIVER STATUS", "CAN STATUS"]
             self.txt_cmd.setPlaceholderText(
                 "Digite um comando (ex: STATUS, MOVE C 400, MOVE A -200, DRIVER ENABLED ON)..."
@@ -158,6 +160,13 @@ class TerminalView(QWidget):
 
         for button, label in zip(self.preset_buttons, labels):
             button.setText(label)
+
+    def _on_connection_changed(self, connected: bool, backend: str):
+        if connected and backend.startswith("Teensy USB/CAN"):
+            self._terminal_mode = "TEENSY"
+        else:
+            self._terminal_mode = "ESP32"
+        self._refresh_presets()
 
     def _clear_console(self):
         self.console.clear()

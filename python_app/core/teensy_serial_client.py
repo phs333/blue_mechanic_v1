@@ -42,6 +42,18 @@ class TeensySerialClient(BaseClient):
         self.port_name = ""
         self.baudrate = 115200
         self.node_id = 1
+        self.broadcast_mode = False
+        self.node_offline_until: Dict[int, float] = {}
+        self._last_actuation_time: float = 0.0
+        self._last_tx_time: float = 0.0
+
+    @property
+    def target_node(self) -> int:
+        """Retorna 0 se o modo broadcast estiver ativo; caso contrário, o node_id específico."""
+        return 0 if self.broadcast_mode else self.node_id
+
+    def set_broadcast_mode(self, enable: bool) -> None:
+        self.broadcast_mode = bool(enable)
 
     @staticmethod
     def list_available_ports() -> List[Dict[str, str]]:
@@ -66,8 +78,11 @@ class TeensySerialClient(BaseClient):
             selected_node = int(node_id)
         except (TypeError, ValueError):
             selected_node = 0
-        if not 1 <= selected_node <= 10:
-            self.state.error_occurred.emit("Node CAN do Teensy deve estar entre 1 e 10.")
+        if selected_node == 0:
+            self.broadcast_mode = True
+            selected_node = 1
+        elif not 1 <= selected_node <= 10:
+            self.state.error_occurred.emit("Node CAN do Teensy deve estar entre 1 e 10 (ou 0 para broadcast).")
             return False
 
         try:
@@ -88,10 +103,10 @@ class TeensySerialClient(BaseClient):
             self.poll_thread = threading.Thread(target=self._auto_poll_loop, daemon=True)
             self.poll_thread.start()
 
-            self.state.set_connection_status(
-                True,
-                f"Teensy USB/CAN ({port}, Node {self.node_id})",
-            )
+            label = f"Teensy USB/CAN ({port}, Node {self.node_id})"
+            if self.broadcast_mode:
+                label += " [Broadcast]"
+            self.state.set_connection_status(True, label)
             # A porta USB aberta não garante que o barramento CAN ou o node
             # estejam online; o bit CAN_ONLINE da resposta STATUS é a fonte.
             self.state.update_telemetry(can_online=False)
@@ -150,11 +165,20 @@ class TeensySerialClient(BaseClient):
         if not command:
             return False
 
+        tokens = command.split()
+        op = tokens[0].upper() if tokens else ""
+        if op in ("M", "MF", "MS", "MSF", "L", "E", "H", "S", "CFG"):
+            self._last_actuation_time = time.time()
+
         try:
             with self.lock:
+                now = time.time()
+                elapsed = now - self._last_tx_time
+                if elapsed < 0.012:
+                    time.sleep(0.012 - elapsed)
                 self.serial_port.write((command + "\r\n").encode("ascii"))
                 self.serial_port.flush()
-                time.sleep(0.04)
+                self._last_tx_time = time.time()
             self.state.raw_message_received.emit("TX", command)
             self.state.telemetry.tx_frames += 1
             return True
@@ -197,9 +221,41 @@ class TeensySerialClient(BaseClient):
         self.state.update_telemetry(can_online=False)
 
     def _auto_poll_loop(self) -> None:
-        while not self.stop_event.wait(0.75):
+        """
+        Poll nodes based on heartbeat presence.
+        Connected ESP32 nodes broadcast HEARTBEAT every 1000ms autonomously.
+        We ONLY poll nodes that are confirmed online via heartbeat or recent activity.
+        Background polling automatically yields when actuation commands (moves, lasers,
+        enables, homing) are active, guaranteeing zero bus collisions for automation and manual jog.
+        """
+        idx = 0
+        last_initial_probe = 0.0
+        while not self.stop_event.is_set():
             if self.is_connected:
-                self.request_status()
+                now = time.time()
+                # Yield auto-poll if user or automation sent an actuation command recently (within 600ms)
+                if (now - self._last_actuation_time) < 0.6:
+                    self.stop_event.wait(0.10)
+                    continue
+
+                # Poll ONLY confirmed online nodes (received heartbeat/telemetry in last 3.5s)
+                online_nodes = [
+                    node for node in range(1, 11)
+                    if self.state.is_node_online(node, timeout_sec=3.5)
+                ]
+
+                if online_nodes:
+                    target = online_nodes[idx % len(online_nodes)]
+                    idx = (idx + 1) % len(online_nodes)
+                    self.send_raw(f"R {target}")
+                else:
+                    # If no node has been detected yet, gently probe only the selected node
+                    # at most once every 2.0s until heartbeats start flowing in
+                    if (now - last_initial_probe) >= 2.0:
+                        last_initial_probe = now
+                        self.send_raw(f"R {self.node_id}")
+
+            self.stop_event.wait(0.35)
 
     def _parse_response_line(self, line: str) -> None:
         """Parse the ASCII response contract emitted by the Teensy bridge."""
@@ -211,8 +267,9 @@ class TeensySerialClient(BaseClient):
         try:
             if message_type == "STATUS" and len(fields) == 8:
                 node = int(fields[1])
-                if node != self.node_id:
+                if not (1 <= node <= 10):
                     return
+                self.node_offline_until.pop(node, None)
                 flags = int(fields[2], 0)
                 laser1 = max(0, min(4095, int(fields[3], 0)))
                 laser2 = max(0, min(4095, int(fields[4], 0)))
@@ -225,14 +282,11 @@ class TeensySerialClient(BaseClient):
                     else FanMode.MANUAL_OFF
                 )
                 temp_flag = bool(flags & STATUS_FLAG_TEMP_VALID)
-
-                self.state.update_telemetry(
+                status_updates = dict(
                     drivers_enabled=bool(flags & STATUS_FLAG_DRIVERS_ENABLED),
                     z_bloqueado=bool(flags & STATUS_FLAG_Z_BLOQUEADO),
                     alarme_z_ativo=bool(flags & STATUS_FLAG_ALARME_Z_ATIVO),
-                    temp_valid=(
-                        self.state.telemetry.temp_valid if temp_flag else False
-                    ),
+                    temp_valid=temp_flag,
                     tmc_uart_ready=bool(flags & STATUS_FLAG_TMC_UART_READY),
                     can_online=bool(flags & STATUS_FLAG_CAN_ONLINE),
                     laser1_level=laser1,
@@ -241,12 +295,16 @@ class TeensySerialClient(BaseClient):
                     fan_mode=fan_mode,
                     speed_level=max(1, min(5, speed_level)),
                 )
+                self.state.update_node_telemetry(node, **status_updates)
+                if node == self.node_id:
+                    self.state.update_telemetry(**status_updates)
                 return
 
             if message_type == "POS" and len(fields) == 6:
                 node = int(fields[1])
-                if node != self.node_id:
+                if not (1 <= node <= 10):
                     return
+                self.node_offline_until.pop(node, None)
                 pos_c = float(fields[2])
                 pos_a = float(fields[3])
                 pos_z = int(fields[4], 0)
@@ -267,13 +325,22 @@ class TeensySerialClient(BaseClient):
                     updates["pos_a_deg"] = pos_a
                 if temp_valid:
                     updates["temperature_c"] = temperature
-                self.state.update_telemetry(**updates)
+                self.state.update_node_telemetry(node, **updates)
+                if node == self.node_id:
+                    self.state.update_telemetry(**updates)
                 return
 
             if message_type == "HEARTBEAT" and len(fields) == 2:
                 node = int(fields[1])
-                if node == self.node_id:
-                    self.state.telemetry.last_heartbeat_timestamp = time.time()
+                if 1 <= node <= 10:
+                    self.node_offline_until.pop(node, None)
+                    self.state.update_node_telemetry(
+                        node,
+                        last_heartbeat_timestamp=time.time(),
+                        can_online=True,
+                    )
+                    if node == self.node_id:
+                        self.state.update_telemetry(can_online=True)
                     self.state.heartbeat_received.emit(node)
                 return
 
@@ -281,16 +348,16 @@ class TeensySerialClient(BaseClient):
                 return
 
             if message_type in ("ACK", "DONE") and len(fields) == 3:
-                # Validate the node/opcode here even though the raw line already
-                # carries the event to the terminal.
-                int(fields[1])
-                int(fields[2], 16)
+                node = int(fields[1])
+                if 1 <= node <= 10:
+                    self.state.update_node_telemetry(
+                        node,
+                        last_seen_timestamp=time.time(),
+                    )
                 return
 
             if message_type == "ERROR" and len(fields) == 4:
                 node = int(fields[1])
-                if node != self.node_id:
-                    return
                 opcode = int(fields[2], 16)
                 error_code = int(fields[3], 16)
                 try:
@@ -299,12 +366,29 @@ class TeensySerialClient(BaseClient):
                     opcode_name = f"0x{opcode:02X}"
                 error_name = ESP_ERRORS.get(error_code, f"0x{error_code:02X}")
                 self.state.telemetry.error_count += 1
+                if 1 <= node <= 10:
+                    node_t = self.state.get_node_telemetry(node)
+                    node_t.error_count += 1
                 self.state.error_occurred.emit(
-                    f"Teensy/CAN: comando {opcode_name} falhou: {error_name}"
+                    f"Teensy/CAN Node {node}: comando {opcode_name} falhou: {error_name}"
                 )
                 return
 
             if message_type == "TEENSY_ERROR":
+                # Handle CAN_TX_FAILED gracefully without wiping node state
+                if len(fields) >= 3 and fields[1] == "CAN_TX_FAILED":
+                    try:
+                        failed_node = int(fields[2])
+                        if 1 <= failed_node <= 10:
+                            self.node_offline_until[failed_node] = time.time() + 10.0
+                    except ValueError:
+                        pass
+                    return
+
+                if len(fields) >= 3 and fields[1] == "CAN_TX_BUSY":
+                    # Mailbox temporarily busy during transmit, ignore
+                    return
+
                 self.state.telemetry.error_count += 1
                 detail = " ".join(fields[1:]) or "erro não especificado"
                 self.state.error_occurred.emit(f"Teensy USB/CAN: {detail}")
@@ -314,8 +398,15 @@ class TeensySerialClient(BaseClient):
                 f"Resposta inválida do Teensy USB/CAN: {line}"
             )
 
-    def request_status(self) -> bool:
-        return self.send_raw(f"R {self.node_id}")
+    def request_status(self, node_id: Optional[int] = None) -> bool:
+        target = self.node_id if node_id is None else int(node_id)
+        if 1 <= target <= 10:
+            return self.send_raw(f"R {target}")
+        return False
+
+    def request_status_all(self) -> bool:
+        """Envia solicitação de status para todos os 10 nós."""
+        return all(self.send_raw(f"R {i}") for i in range(1, 11))
 
     def ping(self, arg0: int = 0, arg1: int = 0) -> bool:
         return self.send_raw(
@@ -324,7 +415,7 @@ class TeensySerialClient(BaseClient):
         )
 
     def set_driver_enabled(self, enable: bool) -> bool:
-        return self.send_raw(f"E {self.node_id} {1 if enable else 0}")
+        return self.send_raw(f"E {self.target_node} {1 if enable else 0}")
 
     def set_alarm_z(self, enable: bool) -> bool:
         return self._unsupported("Configuração do alarme Z via Teensy")
@@ -333,13 +424,13 @@ class TeensySerialClient(BaseClient):
         token = axis.strip().upper()
         if token in ("ALL", "CA"):
             axes = ("C", "A", "Z") if token == "ALL" else ("C", "A")
-            return all(self.send_raw(f"H {self.node_id} {item}") for item in axes)
+            return all(self.send_raw(f"H {self.target_node} {item}") for item in axes)
         try:
             canonical = self._canonical_axis(token)
         except ValueError as exc:
             self.state.error_occurred.emit(str(exc))
             return False
-        return self.send_raw(f"H {self.node_id} {canonical}")
+        return self.send_raw(f"H {self.target_node} {canonical}")
 
     def set_home(self, axis: str) -> bool:
         return self._unsupported("SETHOME via Teensy")
@@ -362,7 +453,7 @@ class TeensySerialClient(BaseClient):
             self.state.error_occurred.emit(str(exc))
             return False
         command = "MF" if force_no_encoder else "M"
-        return self.send_raw(f"{command} {self.node_id} {canonical} {int(steps)}")
+        return self.send_raw(f"{command} {self.target_node} {canonical} {int(steps)}")
 
     def move_sync(
         self,
@@ -402,7 +493,7 @@ class TeensySerialClient(BaseClient):
 
         command = "MSF" if force_no_encoder else "MS"
         return self.send_raw(
-            f"{command} {self.node_id} {angle_c_deci / 10.0:.1f} "
+            f"{command} {self.target_node} {angle_c_deci / 10.0:.1f} "
             f"{angle_a_deci / 10.0:.1f} {distance_z_centi / 100.0:.2f}"
         )
 
@@ -412,15 +503,15 @@ class TeensySerialClient(BaseClient):
             self.state.error_occurred.emit("Canal de laser deve ser 1 ou 2.")
             return False
         level = max(0, min(4095, int(level)))
-        return self.send_raw(f"L {self.node_id} {laser_index} {level}")
+        return self.send_raw(f"L {self.target_node} {laser_index} {level}")
 
     def set_fan(self, mode: int) -> bool:
         mode = max(0, min(2, int(mode)))
-        return self.send_raw(f"F {self.node_id} {mode}")
+        return self.send_raw(f"F {self.target_node} {mode}")
 
     def set_speed_level(self, level: int) -> bool:
         level = max(1, min(5, int(level)))
-        return self.send_raw(f"S {self.node_id} {level}")
+        return self.send_raw(f"S {self.target_node} {level}")
 
     def set_axis_speed(self, axis: str, speed: float) -> bool:
         return self._unsupported("Velocidade individual por eixo via Teensy")

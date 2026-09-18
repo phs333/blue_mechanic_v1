@@ -129,6 +129,42 @@ QFrame.metric-card:hover {
     border-color: #38bdf8;
 }
 
+/* Multi-Node Cards & Kinematic Tiles */
+QFrame.node-card-online {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #101c30, stop:1 #0b1322);
+    border: 1px solid #1e3354;
+    border-radius: 12px;
+}
+
+QFrame.node-card-online:hover {
+    border-color: #38bdf8;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #13233d, stop:1 #0d1728);
+}
+
+QFrame.node-card-offline {
+    background: #080d17;
+    border: 1px solid #141f30;
+    border-radius: 12px;
+}
+
+QFrame.node-card-offline:hover {
+    border-color: #24354f;
+}
+
+QFrame.node-tile {
+    background-color: rgba(15, 23, 42, 0.75);
+    border: 1px solid rgba(56, 189, 248, 0.12);
+    border-radius: 8px;
+    padding: 6px 4px;
+}
+
+QFrame.node-tile-offline {
+    background-color: rgba(11, 16, 26, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 8px;
+    padding: 6px 4px;
+}
+
 /* Typography & Section Titles */
 QLabel.section-title {
     color: #38bdf8;
@@ -367,6 +403,12 @@ QLabel.badge-yellow {
     background-color: rgba(245, 158, 11, 0.15);
     color: #fbbf24;
     border: 1px solid #d97706;
+}
+
+QLabel.badge-amber {
+    background-color: rgba(217, 119, 6, 0.18);
+    color: #f59e0b;
+    border: 1px solid #b45309;
 }
 
 QLabel.badge-blue {

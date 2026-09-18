@@ -7,6 +7,7 @@ Eixo A: Pivot dos Lasers
 Eixo Z: Atuador Linear
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -51,6 +52,8 @@ class HardwareTelemetry:
     tx_frames: int = 0
     error_count: int = 0
     last_heartbeat_timestamp: float = 0.0
+    last_seen_timestamp: float = 0.0
+    online: bool = False
     
     # Backward compatibility properties
     @property
@@ -149,11 +152,14 @@ class HardwareParameters:
 class DeviceState(QObject):
     """
     Thread-safe reactive store for hardware status and parameters.
+    Supports single-node monitoring as well as 10-node fleet tracking.
     """
-    telemetry_updated = pyqtSignal(object)  # Emits HardwareTelemetry
+    telemetry_updated = pyqtSignal(object)  # Emits HardwareTelemetry (active/focused node)
     parameters_updated = pyqtSignal(object) # Emits HardwareParameters
     connection_changed = pyqtSignal(bool, str) # connected, backend_name
     heartbeat_received = pyqtSignal(int)    # node_id
+    node_telemetry_updated = pyqtSignal(int, object) # node_id, HardwareTelemetry
+    nodes_summary_updated = pyqtSignal(int) # total_online_nodes
     raw_message_received = pyqtSignal(str, str) # direction ('TX'/'RX'), text
     can_frame_received = pyqtSignal(dict)   # raw CAN frame info dictionary
     error_occurred = pyqtSignal(str)        # error message
@@ -162,6 +168,9 @@ class DeviceState(QObject):
         super().__init__(parent)
         self.telemetry = HardwareTelemetry()
         self.parameters = HardwareParameters()
+        self.nodes_telemetry: Dict[int, HardwareTelemetry] = {
+            i: HardwareTelemetry() for i in range(1, 11)
+        }
         self.is_connected = False
         self.backend_name = "None"
         
@@ -173,6 +182,60 @@ class DeviceState(QObject):
                 changed = True
         if changed:
             self.telemetry_updated.emit(self.telemetry)
+
+    def update_node_telemetry(self, node_id: int, **kwargs):
+        """Update telemetry for a specific node (1..10) in the fleet."""
+        if not (1 <= node_id <= 10):
+            return
+        node_t = self.nodes_telemetry.get(node_id)
+        if not node_t:
+            node_t = HardwareTelemetry()
+            self.nodes_telemetry[node_id] = node_t
+
+        now = time.time()
+        if kwargs.get("online", True):
+            if "last_seen_timestamp" not in kwargs:
+                kwargs["last_seen_timestamp"] = now
+            kwargs["online"] = True
+
+        changed = False
+        for key, value in kwargs.items():
+            if hasattr(node_t, key) and getattr(node_t, key) != value:
+                setattr(node_t, key, value)
+                changed = True
+
+        if changed:
+            self.node_telemetry_updated.emit(node_id, node_t)
+            self.nodes_summary_updated.emit(self.get_online_nodes_count())
+
+    def mark_node_offline(self, node_id: int):
+        """Explicitly mark a node as offline in the fleet."""
+        if not (1 <= node_id <= 10):
+            return
+        node_t = self.nodes_telemetry.get(node_id)
+        if not node_t:
+            return
+        node_t.online = False
+        node_t.can_online = False
+        node_t.last_heartbeat_timestamp = 0.0
+        node_t.last_seen_timestamp = 0.0
+        self.node_telemetry_updated.emit(node_id, node_t)
+        self.nodes_summary_updated.emit(self.get_online_nodes_count())
+
+    def get_node_telemetry(self, node_id: int) -> HardwareTelemetry:
+        if node_id not in self.nodes_telemetry:
+            self.nodes_telemetry[node_id] = HardwareTelemetry()
+        return self.nodes_telemetry[node_id]
+
+    def is_node_online(self, node_id: int, timeout_sec: float = 3.5) -> bool:
+        node_t = self.nodes_telemetry.get(node_id)
+        if not node_t:
+            return False
+        last_time = max(node_t.last_heartbeat_timestamp, node_t.last_seen_timestamp)
+        return (time.time() - last_time) <= timeout_sec if last_time > 0 else False
+
+    def get_online_nodes_count(self, timeout_sec: float = 3.5) -> int:
+        return sum(1 for i in range(1, 11) if self.is_node_online(i, timeout_sec))
             
     def update_parameters(self, **kwargs):
         changed = False

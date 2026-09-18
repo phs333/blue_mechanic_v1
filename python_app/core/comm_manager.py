@@ -14,6 +14,8 @@ from .can_client import CanClient
 from .simulator import SimulatorClient
 
 class CommManager(QObject):
+    broadcast_changed = pyqtSignal(bool)
+
     def __init__(self, state: Optional[DeviceState] = None, parent=None):
         super().__init__(parent)
         self.state = state or DeviceState()
@@ -25,6 +27,25 @@ class CommManager(QObject):
         
         self.active_client: Optional[BaseClient] = None
         self.backend_type: str = "None"
+
+    def set_broadcast_mode(self, enable: bool) -> None:
+        if hasattr(self.active_client, "set_broadcast_mode"):
+            self.active_client.set_broadcast_mode(enable)
+        elif hasattr(self.teensy_serial_client, "set_broadcast_mode"):
+            self.teensy_serial_client.set_broadcast_mode(enable)
+        self.broadcast_changed.emit(bool(enable))
+
+    def is_broadcast_mode(self) -> bool:
+        if self.active_client and hasattr(self.active_client, "broadcast_mode"):
+            return bool(self.active_client.broadcast_mode)
+        return bool(getattr(self.teensy_serial_client, "broadcast_mode", False))
+
+    def set_target_node(self, node_id: int) -> None:
+        if hasattr(self.active_client, "node_id"):
+            self.active_client.node_id = int(node_id)
+        self.teensy_serial_client.node_id = int(node_id)
+        self.can_client.node_id = int(node_id)
+        self.state.parameters.node_id = int(node_id)
 
     def get_available_com_ports(self) -> List[Dict[str, str]]:
         return SerialClient.list_available_ports()

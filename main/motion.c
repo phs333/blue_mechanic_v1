@@ -917,6 +917,14 @@ static void motion_task(void *arg)
     while (true) {
         if (xQueueReceive(ctx->motion_queue, &cmd, portMAX_DELAY) == pdTRUE) {
             esp_err_t err = ESP_OK;
+            bool is_homing = (cmd.type == MOTION_CMD_HOME);
+
+            if (ctx->state_mutex && xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                ctx->state.in_motion = true;
+                ctx->state.in_homing = is_homing;
+                xSemaphoreGive(ctx->state_mutex);
+            }
+
             ESP_LOGI(APP_TAG, "motion_task recebeu cmd type=%d axis=%c steps=%d opcode=0x%02X", (int)cmd.type, cmd.axis, (int)cmd.steps, cmd.opcode);
             switch (cmd.type) {
             case MOTION_CMD_MOVE_REL:
@@ -938,6 +946,22 @@ static void motion_task(void *arg)
                     err = do_motion_adjust_axis_to_home(ctx, cmd.axis);
                 }
                 break;
+            }
+
+            if (ctx->state_mutex && xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                ctx->state.in_motion = false;
+                ctx->state.in_homing = false;
+                if (err == ESP_OK && cmd.type == MOTION_CMD_HOME) {
+                    char ax = (char)toupper((unsigned char)cmd.axis);
+                    if (ax == 'C' || ax == 'X') {
+                        ctx->state.homed[0] = true;
+                    } else if (ax == 'A' || ax == 'Y') {
+                        ctx->state.homed[1] = true;
+                    } else if (ax == 'Z') {
+                        ctx->state.homed[2] = true;
+                    }
+                }
+                xSemaphoreGive(ctx->state_mutex);
             }
 
             ESP_LOGI(APP_TAG, "motion_task cmd type=%d axis=%c finalizado err=%s", (int)cmd.type, cmd.axis, esp_err_to_name(err));

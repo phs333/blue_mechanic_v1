@@ -231,3 +231,24 @@ class CommManager(QObject):
         if self.active_client:
             return self.active_client.write_tmc_reg(axis, reg, val)
         return False
+
+    # --- OTA Update Delegation ---
+    def ota_start(self, target_node: int, image_size: int) -> bool:
+        if self.active_client and hasattr(self.active_client, 'ota_start'):
+            return self.active_client.ota_start(target_node, image_size)
+        return False
+
+    def ota_send_chunk(self, seq_num: int, chunk: bytes, target_node: int = 0) -> bool:
+        if self.active_client and hasattr(self.active_client, 'ota_send_chunk'):
+            return self.active_client.ota_send_chunk(seq_num, chunk, target_node)
+        return False
+
+    def ota_end(self, target_node: int, checksum: int = 0) -> bool:
+        if self.active_client and hasattr(self.active_client, 'ota_end'):
+            return self.active_client.ota_end(target_node, checksum)
+        return False
+
+    def ota_abort(self, target_node: int = 0) -> bool:
+        if self.active_client and hasattr(self.active_client, 'ota_abort'):
+            return self.active_client.ota_abort(target_node)
+        return False

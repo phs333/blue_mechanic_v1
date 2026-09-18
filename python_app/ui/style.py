@@ -106,6 +106,12 @@ QPushButton.nav-btn:checked, QPushButton.nav-btn.active {
     border: 1px solid #38bdf8;
 }
 
+QPushButton.nav-btn:disabled {
+    background-color: transparent;
+    color: #334155;
+    border: 1px solid transparent;
+}
+
 /* Cards & Glassmorphism Containers */
 QFrame.card {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f172a, stop:1 #0c1322);

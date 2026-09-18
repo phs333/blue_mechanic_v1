@@ -50,6 +50,9 @@
 #define TMC_UART_TX_PIN GPIO_NUM_8
 #define TMC_UART_RX_PIN GPIO_NUM_8
 
+#define BOARD_RGB_LED_PIN GPIO_NUM_48
+#define DEFAULT_STATUS_LED_BRIGHTNESS 20U // 20% de brilho padrao para WS2812 integrado
+
 // =================================================================
 // --- CONFIGURACAO ---
 // =================================================================
@@ -238,6 +241,10 @@ typedef struct {
     volatile uint32_t can_last_error_flags;
     volatile uint32_t last_cmd_seq;
     volatile bool inverter[AXIS_COUNT];
+    volatile bool homed[AXIS_COUNT]; // Indicador de home realizado com sucesso por eixo (C, A, Z)
+    volatile bool in_motion;         // Indicador de movimento ativo
+    volatile bool in_homing;         // Indicador de busca de home ativa
+    volatile bool ota_in_progress;   // Modo de atualizacao OTA ativo (bloqueia movimentos e lasers)
 } runtime_state_t;
 
 typedef enum {
@@ -327,5 +334,9 @@ typedef struct {
         .can_rx_count = 0,                \
         .can_tx_count = 0,                \
         .can_last_error_flags = 0,        \
-        .inverter = {false, false, false} \
+        .inverter = {false, false, false}, \
+        .homed = {false, false, false},   \
+        .in_motion = false,               \
+        .in_homing = false,               \
+        .ota_in_progress = false          \
     }

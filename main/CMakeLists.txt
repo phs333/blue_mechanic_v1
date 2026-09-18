@@ -8,6 +8,8 @@ idf_component_register(
         "tmc2209.c"
         "can_bus.c"
         "stepper_motor_encoder.c"
+        "status_led.c"
+        "ota_update.c"
     INCLUDE_DIRS "."
     REQUIRES
         nvs_flash
@@ -19,4 +21,6 @@ idf_component_register(
         esp_driver_rmt
         esp_rom
         esp_timer
+        app_update
+        esp_partition
 )

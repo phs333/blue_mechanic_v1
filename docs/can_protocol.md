@@ -298,6 +298,70 @@ Perfis `CAN_OP_MOVE_PROFILE` opcionais podem ser enviados para C, A e Z imediata
 
 ---
 
+### `0x40` — `CAN_OP_OTA_START`
+
+Prepara o nó para atualização de firmware (OTA). Desliga lasers, desabilita drivers de motores, drena filas de movimento pendentes, suspende leitura 1-Wire e suprime transmissões periódicas para liberar a largura de banda do barramento CAN. Abre a partição OTA de destino (`ota_0` ou `ota_1`) via `esp_ota_begin()` e sinaliza LED RGB em laranja pulsante.
+
+**DLC esperado:** 6 ou 7 bytes
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Opcode (`0x40`) |
+| 1    | Target Node (`0x00` = broadcast para os 10 nós; `1..10` = nó individual) |
+| 2–5  | Tamanho total do binário em bytes (`uint32_t`, little-endian; `0` = tamanho indeterminado) |
+| 6    | Flags opcionais (reservado `0x00`) |
+
+**Resposta:** `CAN_EVT_OTA_READY` (sucesso) ou `CAN_EVT_OTA_ERROR` em caso de falha de inicialização/flash.
+
+---
+
+### `0x41` — `CAN_OP_OTA_DATA`
+
+Transmite um bloco de bytes do firmware compilado para gravação direta na partição flash do nó via `esp_ota_write()`.
+
+**DLC esperado:** 3 a 8 bytes (contendo 1 a 6 bytes de dados por frame)
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Opcode (`0x41`) |
+| 1    | Número de sequência incremental (`seq_num`, `uint8_t`, 0–255 wrap-around) |
+| 2–7  | Fragmento binário do arquivo `.bin` (1 a 6 bytes) |
+
+**Resposta:** Não responde a cada frame para manter vazão máxima no barramento. A cada 16 KB gravados com sucesso, o nó emite `CAN_EVT_OTA_PROGRESS` com a porcentagem concluída. Emite `CAN_EVT_OTA_ERROR` imediatamente se a gravação flash falhar.
+
+---
+
+### `0x42` — `CAN_OP_OTA_END`
+
+Finaliza a gravação, valida a integridade da imagem do aplicativo na partição (`esp_ota_end()`) e configura a partição recém-gravada como próxima de boot (`esp_ota_set_boot_partition()`).
+
+**DLC esperado:** 2 ou 4 bytes
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Opcode (`0x42`) |
+| 1    | Target Node (`0x00` = todos os 10 nós; `1..10` = nó individual) |
+| 2–3  | Checksum / CRC opcional (`uint16_t`, little-endian) |
+
+**Resposta:** `CAN_EVT_OTA_DONE` quando validado com sucesso (seguido de reboot em 1 segundo com LED verde), ou `CAN_EVT_OTA_ERROR` se a validação da imagem ou a configuração da tabela de partição falhar.
+
+---
+
+### `0x43` — `CAN_OP_OTA_ABORT`
+
+Aborta imediatamente o processo de OTA em andamento (`esp_ota_abort()`), descarta os dados pendentes e restaura a operação normal do nó.
+
+**DLC esperado:** 2 bytes
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Opcode (`0x43`) |
+| 1    | Target Node (`0x00` = todos os 10 nós; `1..10` = nó individual) |
+
+**Resposta:** `CAN_EVT_OTA_ERROR` com código `0xFF` indicando cancelamento.
+
+---
+
 ## Eventos e Respostas (ESP32 → Teensy)
 
 ### `0x80` — `CAN_EVT_HEARTBEAT`
@@ -387,6 +451,62 @@ Indica que o processamento de um comando de movimento ou homing terminou. Para m
 | 2    | Opcode do comando |
 | 3    | 0 (sucesso)       |
 | 4–7  | Reservado (0)     |
+
+---
+
+### `0x90` — `CAN_EVT_OTA_READY`
+
+Emitido pelo nó confirmando que o comando `CAN_OP_OTA_START` foi aceito, a fila de movimentos foi drenada, atuadores desligados e a partição flash de destino inicializada (`esp_ota_begin()`). O nó está pronto para receber frames de dados `CAN_OP_OTA_DATA`.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Evento (`0x90`) |
+| 1    | Node ID |
+| 2    | Node ID repetido |
+| 3    | Código de status (`0x00` = `ESP_OK`) |
+| 4–7  | Reservado (0) |
+
+---
+
+### `0x91` — `CAN_EVT_OTA_PROGRESS`
+
+Emitido periodicamente (a cada 16 KB gravados) pelo nó durante o recebimento dos blocos `CAN_OP_OTA_DATA`.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Evento (`0x91`) |
+| 1    | Node ID |
+| 2    | Node ID repetido |
+| 3    | Progresso estimado da gravação em porcentagem (`0..100%`) |
+| 4–7  | Reservado (0) |
+
+---
+
+### `0x92` — `CAN_EVT_OTA_DONE`
+
+Emitido pelo nó após o recebimento de `CAN_OP_OTA_END`, validação completa da imagem do firmware na partição e atualização do ponteiro de boot (`otadata`). O nó reiniciará em 1 segundo.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Evento (`0x92`) |
+| 1    | Node ID |
+| 2    | Node ID repetido |
+| 3    | Status (`100` = 100% concluído) |
+| 4–7  | Reservado (0) |
+
+---
+
+### `0x93` — `CAN_EVT_OTA_ERROR`
+
+Emitido pelo nó caso ocorra falha ao abrir a partição, erro de escrita na flash (`esp_ota_write`), erro de validação de imagem (`esp_ota_end`) ou aborto manual.
+
+| Byte | Conteúdo |
+|------|----------|
+| 0    | Evento (`0x93`) |
+| 1    | Node ID |
+| 2    | Node ID repetido |
+| 3    | Código de erro (`esp_err_t` mascarado ou `0xFF` para aborto) |
+| 4–7  | Reservado (0) |
 
 ---
 

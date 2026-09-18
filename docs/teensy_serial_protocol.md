@@ -65,6 +65,10 @@ flowchart LR
 | **Ventoinha (Cooler)** | `F <node> <modo>` | `<node>`: 0..10<br>`<modo>`: `0` (Off), `1` (On), `2` (Auto) | Define o modo de controle da ventoinha de resfriamento. | `F 0 2` *(modo térmico automático em todos)*<br>`F 1 1` *(força cooler ligado no node 1)* |
 | **Solicitação de Status** | `R <node>` | `<node>`: 1..10 *(não usar 0)* | Solicita o envio imediato dos frames de **Status** e **Posição** do nó. | `R 1` *(solicita status do node 1)* |
 | **Ping** | `P <node> [arg0] [arg1]` | `<node>`: 1..10<br>`arg0`, `arg1`: uint8 opcionais | Teste de conectividade. Quando omitidos, o Teensy envia ambos como zero. | `P 1 10 20` |
+| **OTA Iniciar** | `OTA_START <node> <tamanho>` | `<node>`: 0..10<br>`<tamanho>`: uint32 bytes | Inicia sessão OTA no nó (ou 0 para broadcast em todos os 10 nós). O Teensy emite CAN_OP_OTA_START (0x40). | `OTA_START 0 1048576` |
+| **OTA Dados** | `OTA_DATA <node> <seq> <hex_data>` | `<node>`: 0..10<br>`<seq>`: 0..255<br>`<hex_data>`: até 12 chars hex (6 bytes) | Transmite bloco binário de firmware em hexadecimal. O Teensy emite CAN_OP_OTA_DATA (0x41). | `OTA_DATA 0 1 48656C6C6F21` |
+| **OTA Finalizar** | `OTA_END <node> <checksum>` | `<node>`: 0..10<br>`<checksum>`: uint16 | Finaliza gravação, comanda validação e reinicia nós. O Teensy emite CAN_OP_OTA_END (0x42). | `OTA_END 0 54321` |
+| **OTA Abortar** | `OTA_ABORT <node>` | `<node>`: 0..10 | Cancela a sessão OTA imediatamente. O Teensy emite CAN_OP_OTA_ABORT (0x43). | `OTA_ABORT 0` |
 
 ---
 

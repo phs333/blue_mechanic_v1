@@ -10,12 +10,17 @@ import sys
 import os
 
 # Ensure package is resolvable
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+if getattr(sys, "frozen", False):
+    bundle_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    if bundle_dir not in sys.path:
+        sys.path.insert(0, bundle_dir)
+else:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt

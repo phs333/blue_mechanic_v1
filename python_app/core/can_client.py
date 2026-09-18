@@ -299,6 +299,31 @@ class CanClient(BaseClient):
                         op_name = f"0x{op:02X}"
                     desc = f"DONE: Movimento ({op_name}) concluído!"
                     self.state.raw_message_received.emit("RX", f"CAN DONE: {op_name}")
+
+                elif evt_type == CanEvent.OTA_READY:
+                    err = data[3] if dlc > 3 else 0
+                    desc = f"OTA_READY: Node {node_id} pronto (Status={err})"
+                    self.state.raw_message_received.emit("RX", f"CAN OTA_READY: Node {node_id} (err={err})")
+                    self.state.ota_ready.emit(node_id, err)
+
+                elif evt_type == CanEvent.OTA_PROGRESS:
+                    pct = data[3] if dlc > 3 else 0
+                    desc = f"OTA_PROGRESS: Node {node_id} ({pct}%)"
+                    self.state.raw_message_received.emit("RX", f"CAN OTA_PROGRESS: Node {node_id} {pct}%")
+                    self.state.ota_progress.emit(node_id, pct)
+
+                elif evt_type == CanEvent.OTA_DONE:
+                    desc = f"OTA_DONE: Node {node_id} gravado e validado com sucesso! Reiniciando..."
+                    self.state.raw_message_received.emit("RX", f"CAN OTA_DONE: Node {node_id}")
+                    self.state.ota_done.emit(node_id)
+
+                elif evt_type == CanEvent.OTA_ERROR:
+                    err = data[3] if dlc > 3 else 0
+                    err_name = ESP_ERRORS.get(err, f"0x{err:02X}")
+                    desc = f"OTA_ERROR: Node {node_id} erro na gravação: {err_name}"
+                    self.state.telemetry.error_count += 1
+                    self.state.raw_message_received.emit("RX", f"CAN OTA_ERROR: Node {node_id} ({err_name})")
+                    self.state.ota_error.emit(node_id, err)
                     
                 elif evt_type == CanEvent.ERROR:
                     op = data[2] if dlc > 2 else 0
@@ -520,3 +545,41 @@ class CanClient(BaseClient):
 
     def set_z_pulley_teeth(self, teeth: int) -> bool:
         return self._unsupported("Configuração da polia Z via CAN")
+
+    # --- OTA Update Methods ---
+    def ota_start(self, target_node: int, image_size: int) -> bool:
+        """Inicia sessão OTA no nó específico (1..10) ou broadcast (0)."""
+        target_id = self.cmd_base_id if target_node == 0 else (self.cmd_base_id + target_node)
+        payload = bytes([
+            CanOpcode.OTA_START,
+            target_node & 0xFF,
+            image_size & 0xFF,
+            (image_size >> 8) & 0xFF,
+            (image_size >> 16) & 0xFF,
+            (image_size >> 24) & 0xFF,
+            0x00,  # flags
+        ])
+        return self.send_frame(target_id, payload, f"OTA_START (Node {target_node}, {image_size}B)")
+
+    def ota_send_chunk(self, seq_num: int, chunk: bytes, target_node: int = 0) -> bool:
+        """Transmite fatia de dados binários (até 6 bytes) com número de sequência."""
+        target_id = self.cmd_base_id if target_node == 0 else (self.cmd_base_id + target_node)
+        payload = bytes([CanOpcode.OTA_DATA, seq_num & 0xFF]) + chunk
+        return self.send_frame(target_id, payload, f"OTA_DATA (Seq {seq_num}, {len(chunk)}B)", log=False)
+
+    def ota_end(self, target_node: int, checksum: int = 0) -> bool:
+        """Finaliza gravação OTA e solicita validação da imagem flash."""
+        target_id = self.cmd_base_id if target_node == 0 else (self.cmd_base_id + target_node)
+        payload = bytes([
+            CanOpcode.OTA_END,
+            target_node & 0xFF,
+            checksum & 0xFF,
+            (checksum >> 8) & 0xFF,
+        ])
+        return self.send_frame(target_id, payload, f"OTA_END (Node {target_node}, CRC=0x{checksum:04X})")
+
+    def ota_abort(self, target_node: int = 0) -> bool:
+        """Aborta sessão OTA em andamento."""
+        target_id = self.cmd_base_id if target_node == 0 else (self.cmd_base_id + target_node)
+        payload = bytes([CanOpcode.OTA_ABORT, target_node & 0xFF])
+        return self.send_frame(target_id, payload, f"OTA_ABORT (Node {target_node})")

@@ -5,3 +5,4 @@ from .parameters_view import ParametersView
 from .terminal_view import TerminalView
 from .automation_view import AutomationView
 from .teensy_dashboard_view import TeensyDashboardView
+from .ota_view import OtaView

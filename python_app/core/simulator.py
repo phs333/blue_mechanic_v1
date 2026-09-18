@@ -362,3 +362,38 @@ class SimulatorClient(BaseClient):
     def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int) -> bool:
         self.state.update_parameters(node_id=node_id, can_bitrate=bitrate, can_command_base_id=cmd_base, can_status_base_id=status_base, can_event_base_id=event_base)
         return True
+
+    # --- Simulated OTA Methods ---
+    def ota_start(self, target_node: int, image_size: int) -> bool:
+        self.state.raw_message_received.emit("TX", f"SIM CAN OTA_START (Node {target_node}, {image_size}B)")
+        self.state.telemetry.tx_frames += 1
+        nodes = [target_node] if target_node != 0 else list(range(1, 11))
+        for nid in nodes:
+            t = threading.Timer(0.05, lambda n=nid: self.state.ota_ready.emit(n, 0))
+            t.daemon = True
+            t.start()
+        return True
+
+    def ota_send_chunk(self, seq_num: int, chunk: bytes, target_node: int = 0) -> bool:
+        self.state.telemetry.tx_frames += 1
+        return True
+
+    def ota_end(self, target_node: int, checksum: int = 0) -> bool:
+        self.state.raw_message_received.emit("TX", f"SIM CAN OTA_END (Node {target_node})")
+        self.state.telemetry.tx_frames += 1
+        nodes = [target_node] if target_node != 0 else list(range(1, 11))
+        for nid in nodes:
+            t = threading.Timer(0.1, lambda n=nid: self.state.ota_done.emit(n))
+            t.daemon = True
+            t.start()
+        return True
+
+    def ota_abort(self, target_node: int = 0) -> bool:
+        self.state.raw_message_received.emit("TX", f"SIM CAN OTA_ABORT (Node {target_node})")
+        self.state.telemetry.tx_frames += 1
+        nodes = [target_node] if target_node != 0 else list(range(1, 11))
+        for nid in nodes:
+            t = threading.Timer(0.05, lambda n=nid: self.state.ota_error.emit(n, 0xFF))
+            t.daemon = True
+            t.start()
+        return True

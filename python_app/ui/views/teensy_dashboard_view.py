@@ -142,9 +142,15 @@ class NodeCardWidget(QFrame):
         self.lbl_heartbeat = QLabel("💓 Sem resposta")
         self.lbl_heartbeat.setStyleSheet("color: #475569; font-size: 10px;")
         card_layout.addWidget(self.lbl_heartbeat)
+        
+        self.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self.setToolTip(f"Nó {node_id} Offline — foco bloqueado")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if not self.is_online:
+                # Bloqueia foco em nós offline
+                return
             self.on_select(self.node_id)
         super().mousePressEvent(event)
 
@@ -179,6 +185,13 @@ class NodeCardWidget(QFrame):
             self.setProperty("class", target_class)
             self.style().unpolish(self)
             self.style().polish(self)
+
+        if is_online:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip(f"Nó {self.node_id} Online — clique para focar")
+        else:
+            self.setCursor(Qt.CursorShape.ForbiddenCursor)
+            self.setToolTip(f"Nó {self.node_id} Offline — foco bloqueado")
 
         # Title color when not focused
         if not self.is_selected:
@@ -476,12 +489,27 @@ class TeensyDashboardView(QWidget):
         # Set default focus
         self.select_node(1)
 
-    def select_node(self, node_id: int):
+    def select_node(self, node_id: int, force: bool = False):
         node_id = max(1, min(10, int(node_id)))
+        # Se houver nós online e o requisitado estiver offline, bloqueia seleção de foco
+        if not force and self.state.get_online_nodes_count() > 0:
+            if not self.state.is_node_online(node_id):
+                return
+
         self.selected_node = node_id
         for nid, card in self.node_cards.items():
             card.set_selected(nid == node_id)
-        self.lbl_focus_title.setText(f"Controle Manual do Node {self.selected_node}:")
+
+        is_online = self.state.is_node_online(node_id)
+        if not is_online and self.state.get_online_nodes_count() > 0:
+            self.lbl_focus_title.setText(f"Controle Manual do Node {self.selected_node} (⚠️ OFFLINE — BLOQUEADO):")
+            self.lbl_focus_title.setStyleSheet("color: #f87171; font-weight: 800; font-size: 14px;")
+            self.focus_frame.setEnabled(False)
+        else:
+            self.lbl_focus_title.setText(f"Controle Manual do Node {self.selected_node}:")
+            self.lbl_focus_title.setStyleSheet("color: #38bdf8; font-weight: 800; font-size: 14px;")
+            self.focus_frame.setEnabled(True)
+
         self._update_fleet_mode_label()
         self.selected_node_changed.emit(node_id)
 
@@ -512,6 +540,17 @@ class TeensyDashboardView(QWidget):
                 online_count += 1
             card.update_data(t, is_online)
         self.lbl_fleet_online.setText(f"🟢 Nós Online: {online_count} / 10")
+
+        # Se o nó atualmente focado estiver offline enquanto há nós online, bloqueia controles de foco
+        focused_online = self.state.is_node_online(self.selected_node)
+        if not focused_online and online_count > 0:
+            self.lbl_focus_title.setText(f"Controle Manual do Node {self.selected_node} (⚠️ OFFLINE — BLOQUEADO):")
+            self.lbl_focus_title.setStyleSheet("color: #f87171; font-weight: 800; font-size: 14px;")
+            self.focus_frame.setEnabled(False)
+        else:
+            self.lbl_focus_title.setText(f"Controle Manual do Node {self.selected_node}:")
+            self.lbl_focus_title.setStyleSheet("color: #38bdf8; font-weight: 800; font-size: 14px;")
+            self.focus_frame.setEnabled(True)
 
     def _on_focused_jog(self, axis: str, steps: int, force: bool = False):
         target = 0 if self.comm.is_broadcast_mode() else self.selected_node

@@ -13,6 +13,7 @@
 #include "hardware.h"
 #include "motion.h"
 #include "storage.h"
+#include "ota_update.h"
 
 #define CAN_RX_POOL_DEPTH 16
 #define CAN_HEARTBEAT_PERIOD_MS 1000
@@ -122,6 +123,10 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     fan_mode_t fan_mode = FAN_MODE_MANUAL_OFF;
     float last_temp_c = 0.0f;
     int32_t current_z = 0;
+
+    if (ctx->state.ota_in_progress) {
+        return ESP_OK;
+    }
 
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         drivers_enabled = ctx->state.drivers_enabled;
@@ -290,7 +295,7 @@ static void can_task(void *arg)
             xSemaphoreGive(ctx->state_mutex);
         }
 
-        if (can_online && (xTaskGetTickCount() - last_heartbeat) >= pdMS_TO_TICKS(CAN_HEARTBEAT_PERIOD_MS)) {
+        if (can_online && !ctx->state.ota_in_progress && (xTaskGetTickCount() - last_heartbeat) >= pdMS_TO_TICKS(CAN_HEARTBEAT_PERIOD_MS)) {
             (void)can_send_event(ctx, CAN_EVT_HEARTBEAT, ctx->settings.node_id, 0);
             last_heartbeat = xTaskGetTickCount();
         }
@@ -543,6 +548,22 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
     ctx->state.can_rx_count++;
     if (len == 0U) {
         xSemaphoreGive(ctx->state_mutex);
+        return;
+    }
+
+    // Intercepta comandos de atualizacao OTA prioritariamente
+    if (buf[0] == CAN_OP_OTA_START || buf[0] == CAN_OP_OTA_DATA ||
+        buf[0] == CAN_OP_OTA_END || buf[0] == CAN_OP_OTA_ABORT) {
+        xSemaphoreGive(ctx->state_mutex);
+        (void)ota_handle_can_cmd(ctx, buf[0], buf, len);
+        return;
+    }
+
+    // Se uma sessao OTA estiver ativa, bloqueia quaisquer outros comandos para evitar corrupcao/interrupcao
+    if (ctx->state.ota_in_progress) {
+        xSemaphoreGive(ctx->state_mutex);
+        ESP_LOGW(APP_TAG, "Comando CAN 0x%02X rejeitado: sessao OTA em andamento", buf[0]);
+        (void)can_send_event(ctx, CAN_EVT_ERROR, buf[0], (uint8_t)(ESP_ERR_INVALID_STATE & 0xFF));
         return;
     }
 

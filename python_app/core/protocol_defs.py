@@ -70,6 +70,10 @@ class CanOpcode(IntEnum):
     MOVE_SYNC = 0x23
     LASER = 0x30
     FAN = 0x31
+    OTA_START = 0x40
+    OTA_DATA = 0x41
+    OTA_END = 0x42
+    OTA_ABORT = 0x43
 
 # --- CAN Protocol Events / Responses (ESP32 -> Teensy/host) ---
 class CanEvent(IntEnum):
@@ -78,6 +82,10 @@ class CanEvent(IntEnum):
     STATUS = 0x82
     ACK = 0x83
     DONE = 0x84
+    OTA_READY = 0x90
+    OTA_PROGRESS = 0x91
+    OTA_DONE = 0x92
+    OTA_ERROR = 0x93
     ERROR = 0xE0
 
 # --- Status Byte 2 Bitmask Flags ---

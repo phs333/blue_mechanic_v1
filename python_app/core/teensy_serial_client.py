@@ -46,6 +46,7 @@ class TeensySerialClient(BaseClient):
         self.node_offline_until: Dict[int, float] = {}
         self._last_actuation_time: float = 0.0
         self._last_tx_time: float = 0.0
+        self._ota_active: bool = False
 
     @property
     def target_node(self) -> int:
@@ -148,6 +149,7 @@ class TeensySerialClient(BaseClient):
             self.serial_port = None
 
         self.is_connected = False
+        self._ota_active = False
         self.state.set_connection_status(False, "Teensy USB/CAN")
         self.state.update_telemetry(
             can_online=False,
@@ -167,7 +169,7 @@ class TeensySerialClient(BaseClient):
 
         tokens = command.split()
         op = tokens[0].upper() if tokens else ""
-        if op in ("M", "MF", "MS", "MSF", "L", "E", "H", "S", "CFG"):
+        if op in ("M", "MF", "MS", "MSF", "L", "E", "H", "S", "CFG", "OTA_START", "OTA_END", "OTA_ABORT"):
             self._last_actuation_time = time.time()
 
         try:
@@ -233,8 +235,8 @@ class TeensySerialClient(BaseClient):
         while not self.stop_event.is_set():
             if self.is_connected:
                 now = time.time()
-                # Yield auto-poll if user or automation sent an actuation command recently (within 600ms)
-                if (now - self._last_actuation_time) < 0.6:
+                # Yield auto-poll if OTA is active or actuation command was sent recently (within 600ms)
+                if self._ota_active or (now - self._last_actuation_time) < 0.6:
                     self.stop_event.wait(0.10)
                     continue
 
@@ -354,6 +356,42 @@ class TeensySerialClient(BaseClient):
                         node,
                         last_seen_timestamp=time.time(),
                     )
+                # Intercepta eventos OTA refletidos via ACK / DONE
+                try:
+                    opcode_val = int(fields[2], 0)
+                    if message_type == "ACK" and opcode_val == CanOpcode.OTA_START:
+                        self.state.ota_ready.emit(node, 0)
+                    elif message_type == "DONE" and opcode_val == CanOpcode.OTA_END:
+                        self.state.ota_done.emit(node)
+                except ValueError:
+                    pass
+                return
+
+            if message_type == "OTA_READY" and len(fields) >= 3:
+                node = int(fields[1])
+                status = int(fields[2], 0)
+                self.state.ota_ready.emit(node, status)
+                self.state.raw_message_received.emit("RX", f"TEENSY OTA_READY: Node {node} (status={status})")
+                return
+
+            if message_type == "OTA_PROGRESS" and len(fields) >= 3:
+                node = int(fields[1])
+                pct = int(fields[2], 0)
+                self.state.ota_progress.emit(node, pct)
+                self.state.raw_message_received.emit("RX", f"TEENSY OTA_PROGRESS: Node {node} {pct}%")
+                return
+
+            if message_type == "OTA_DONE" and len(fields) >= 2:
+                node = int(fields[1])
+                self.state.ota_done.emit(node)
+                self.state.raw_message_received.emit("RX", f"TEENSY OTA_DONE: Node {node}")
+                return
+
+            if message_type == "OTA_ERROR" and len(fields) >= 3:
+                node = int(fields[1])
+                err = int(fields[2], 0)
+                self.state.ota_error.emit(node, err)
+                self.state.raw_message_received.emit("RX", f"TEENSY OTA_ERROR: Node {node} (err={err})")
                 return
 
             if message_type == "ERROR" and len(fields) == 4:
@@ -529,3 +567,43 @@ class TeensySerialClient(BaseClient):
         if token == "Z":
             return "Z"
         raise ValueError(f"Eixo inválido: {axis!r}; use C, A ou Z.")
+
+    # --- OTA Update Methods (via Teensy USB CDC-ACM) ---
+    def ota_start(self, target_node: int, image_size: int) -> bool:
+        """Inicia sessão OTA no nó via Teensy (CAN ID 0x200 ou 0x200+node)."""
+        self._ota_active = True
+        self._last_actuation_time = time.time()
+        cmd = f"OTA_START {int(target_node)} {int(image_size)}"
+        return self.send_raw(cmd)
+
+    def ota_send_chunk(self, seq_num: int, chunk: bytes, target_node: int = 0) -> bool:
+        """Transmite bloco de firmware binário sem throttling artificial de jog."""
+        if not self.is_connected or not self.serial_port:
+            return False
+        self._last_actuation_time = time.time()
+        hex_data = chunk.hex().upper()
+        cmd = f"OTA_DATA {int(target_node)} {int(seq_num)} {hex_data}\r\n"
+        try:
+            with self.lock:
+                self.serial_port.write(cmd.encode("ascii"))
+                self.serial_port.flush()
+            self.state.telemetry.tx_frames += 1
+            return True
+        except Exception as exc:
+            self.state.telemetry.error_count += 1
+            self.state.error_occurred.emit(f"Erro ao transmitir bloco OTA via Teensy: {exc}")
+            return False
+
+    def ota_end(self, target_node: int, checksum: int = 0) -> bool:
+        """Finaliza gravação OTA e comanda validação e reboot dos nós via Teensy."""
+        self._ota_active = False
+        self._last_actuation_time = time.time()
+        cmd = f"OTA_END {int(target_node)} {int(checksum)}"
+        return self.send_raw(cmd)
+
+    def ota_abort(self, target_node: int = 0) -> bool:
+        """Cancela sessão OTA em andamento via Teensy."""
+        self._ota_active = False
+        self._last_actuation_time = time.time()
+        cmd = f"OTA_ABORT {int(target_node)}"
+        return self.send_raw(cmd)

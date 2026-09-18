@@ -163,6 +163,10 @@ class DeviceState(QObject):
     raw_message_received = pyqtSignal(str, str) # direction ('TX'/'RX'), text
     can_frame_received = pyqtSignal(dict)   # raw CAN frame info dictionary
     error_occurred = pyqtSignal(str)        # error message
+    ota_ready = pyqtSignal(int, int)        # node_id, error_code (0=OK)
+    ota_progress = pyqtSignal(int, int)     # node_id, pct (0..100)
+    ota_done = pyqtSignal(int)              # node_id
+    ota_error = pyqtSignal(int, int)        # node_id, error_code
     
     def __init__(self, parent=None):
         super().__init__(parent)

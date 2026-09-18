@@ -20,6 +20,7 @@ from python_app.ui.views.peripherals_view import PeripheralsView
 from python_app.ui.views.parameters_view import ParametersView
 from python_app.ui.views.terminal_view import TerminalView
 from python_app.ui.views.automation_view import AutomationView
+from python_app.ui.views.ota_view import OtaView
 from python_app.ui.widgets.kinematic_3d_view import Kinematic3DView
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState
@@ -111,6 +112,12 @@ class MainWindow(QMainWindow):
         self.btn_nav_auto.clicked.connect(lambda: self._set_page(5))
         sidebar_layout.addWidget(self.btn_nav_auto)
         self.nav_buttons.append(self.btn_nav_auto)
+
+        self.btn_nav_ota = QPushButton("🚀  Atualização OTA")
+        self.btn_nav_ota.setProperty("class", "nav-btn")
+        self.btn_nav_ota.clicked.connect(lambda: self._set_page(6))
+        sidebar_layout.addWidget(self.btn_nav_ota)
+        self.nav_buttons.append(self.btn_nav_ota)
         
         # 3D Kinematics Widget below Navigation buttons
         sidebar_layout.addSpacing(8)
@@ -231,6 +238,7 @@ class MainWindow(QMainWindow):
         self.page_params = ParametersView(self.comm, self.state)
         self.page_term = TerminalView(self.comm, self.state)
         self.page_auto = AutomationView(self.comm, self.state)
+        self.page_ota = OtaView(self.comm, self.state)
         
         self.stack = QStackedWidget()
         self.stack.addWidget(self.dash_stack)
@@ -239,6 +247,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.page_params)
         self.stack.addWidget(self.page_term)
         self.stack.addWidget(self.page_auto)
+        self.stack.addWidget(self.page_ota)
         
         content_layout.addWidget(self.stack, 1)
         app_layout.addWidget(content_area, 1)
@@ -281,6 +290,11 @@ class MainWindow(QMainWindow):
         self.page_teensy_dash.selected_node_changed.connect(self._on_node_selected_from_teensy_dash)
 
     def _set_page(self, index: int):
+        if not (0 <= index < len(self.nav_buttons)):
+            return
+        if not self.nav_buttons[index].isEnabled():
+            # Bloqueia navegação para telas sem suporte no modo atual
+            return
         self.stack.setCurrentIndex(index)
         for i, btn in enumerate(self.nav_buttons):
             if i == index:
@@ -291,6 +305,14 @@ class MainWindow(QMainWindow):
             btn.style().polish(btn)
 
     def _on_spin_node_changed(self, val: int):
+        if self.combo_backend.currentIndex() == 1:
+            if self.state.get_online_nodes_count() > 0 and not self.state.is_node_online(val):
+                # Bloqueia foco em nó offline
+                self.spin_can_node.blockSignals(True)
+                self.spin_can_node.setValue(self.page_teensy_dash.selected_node)
+                self.spin_can_node.blockSignals(False)
+                self.statusBar().showMessage(f"⚠️ Nó {val} está offline. Foco bloqueado.", 3000)
+                return
         self.comm.set_target_node(val)
         self.page_teensy_dash.select_node(val)
 
@@ -330,12 +352,44 @@ class MainWindow(QMainWindow):
         self.chk_broadcast.setVisible(is_teensy)
         self.lbl_status_nodes.setVisible(is_teensy)
 
+        # Bloqueio de telas sem suporte no modo Teensy
         if is_teensy:
             self.dash_stack.setCurrentWidget(self.page_teensy_dash)
             self.btn_nav_dash.setText("🌐  Dashboard (10 Nós)")
+            
+            # Telas não suportadas no modo Teensy (Motion, Periph, Params)
+            self.btn_nav_motion.setEnabled(False)
+            self.btn_nav_motion.setToolTip("Indisponível no modo Teensy (Use o Painel dos 10 Nós)")
+            self.btn_nav_periph.setEnabled(False)
+            self.btn_nav_periph.setToolTip("Indisponível no modo Teensy (Use o Painel dos 10 Nós)")
+            self.btn_nav_params.setEnabled(False)
+            self.btn_nav_params.setToolTip("Indisponível no modo Teensy (Bridge não suporta NVS/TMC)")
+
+            # Atualização OTA dos Nós é plenamente suportada via Teensy!
+            self.btn_nav_ota.setEnabled(True)
+            self.btn_nav_ota.setToolTip("")
+
+            # Se a página atual for uma das bloqueadas (1=Motion, 2=Periph, 3=Params), retorna ao Dashboard
+            if self.stack.currentIndex() in (1, 2, 3):
+                self._set_page(0)
         else:
             self.dash_stack.setCurrentWidget(self.page_dash)
             self.btn_nav_dash.setText("📊  Dashboard Geral")
+
+            # Reabilita telas
+            self.btn_nav_motion.setEnabled(True)
+            self.btn_nav_motion.setToolTip("")
+            self.btn_nav_periph.setEnabled(True)
+            self.btn_nav_periph.setToolTip("")
+            self.btn_nav_params.setEnabled(True)
+            self.btn_nav_params.setToolTip("")
+            
+            # OTA é suportado em Teensy (1), PeakCAN (2) e Simulador (3)
+            ota_supported = index in (1, 2, 3)
+            self.btn_nav_ota.setEnabled(ota_supported)
+            self.btn_nav_ota.setToolTip("" if ota_supported else "OTA via CAN requer Teensy, PeakCAN ou Simulador")
+            if not ota_supported and self.stack.currentIndex() == 6:
+                self._set_page(0)
 
     def _on_broadcast_toggled(self, checked: bool):
         self.comm.set_broadcast_mode(checked)

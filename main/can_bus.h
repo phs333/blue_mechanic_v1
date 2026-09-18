@@ -21,6 +21,11 @@ typedef enum {
     CAN_OP_MOVE_SYNC = 0x23,
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
+    // Comandos de Atualizacao OTA (Teensy -> Nodes)
+    CAN_OP_OTA_START = 0x40, // Inicia sessao OTA (payload: [0x40, target_node (0=todos 10 nos, 1..10=especifico), size_b0..b3, flags])
+    CAN_OP_OTA_DATA  = 0x41, // Bloco de dados binarios de firmware (payload: [0x41, seq_num, d0..d5])
+    CAN_OP_OTA_END   = 0x42, // Finaliza e valida particao flash (payload: [0x42, target_node, crc_lo, crc_hi])
+    CAN_OP_OTA_ABORT = 0x43, // Aborta sessao OTA e cancela gravacao
 } can_opcode_t;
 
 typedef enum {
@@ -29,6 +34,11 @@ typedef enum {
     CAN_EVT_STATUS = 0x82,
     CAN_EVT_ACK = 0x83,
     CAN_EVT_DONE = 0x84,
+    // Eventos de Resposta OTA (Nodes -> Teensy)
+    CAN_EVT_OTA_READY    = 0x90, // No pronto para receber dados (motores parados, flash aberta)
+    CAN_EVT_OTA_PROGRESS = 0x91, // Progresso de gravacao (arg0: progresso %, arg1: status)
+    CAN_EVT_OTA_DONE     = 0x92, // Gravacao e verificacao concluidas com sucesso, reiniciando
+    CAN_EVT_OTA_ERROR    = 0x93, // Erro na gravacao ou verificacao da imagem flash
     CAN_EVT_ERROR = 0xE0,
 } can_event_t;
 

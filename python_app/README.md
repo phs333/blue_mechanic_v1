@@ -66,6 +66,14 @@ ou
 python -m python_app.app
 ```
 
+### 3. Compilar para Executável Standalone (.exe)
+Para gerar o executável autônomo sem dependências externas (tudo empacotado em um único `.exe`):
+```bash
+pyinstaller --noconfirm --clean blue_mechanic.spec
+```
+O executável final estará disponível em:
+`dist/BlueMechanic.exe` (ou `dist/app.exe`).
+
 ---
 
 ## 🔌 Modos de Conexão

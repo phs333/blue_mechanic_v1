@@ -11,6 +11,8 @@
 #include "motion.h"
 #include "storage.h"
 #include "tmc2209.h"
+#include "status_led.h"
+#include "ota_update.h"
 
 static app_context_t g_app = {
     .settings = APP_SETTINGS_DEFAULT_INIT,
@@ -69,24 +71,50 @@ static void safety_task(void *arg) {
 static void thermal_task(void *arg) {
   app_context_t *ctx = (app_context_t *)arg;
   uint8_t consecutive_failures = 0U;
+  bool reported_offline = false;
 
   while (true) {
+    if (ctx->state.ota_in_progress) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
     float temp_c = 0.0f;
     esp_err_t err = hardware_read_temperature_c(&temp_c);
+    bool log_online = false;
+    bool log_offline = false;
+
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       if (err == ESP_OK) {
+        if (!ctx->state.temp_valid || reported_offline) {
+          log_online = true;
+        }
         ctx->state.last_temp_c = temp_c;
         ctx->state.temp_valid = true;
         consecutive_failures = 0U;
+        reported_offline = false;
       } else {
         if (consecutive_failures < 3U) {
           ++consecutive_failures;
-        }
-        if (consecutive_failures >= 3U) {
-          ctx->state.temp_valid = false;
+          ESP_LOGD(APP_TAG, "Tentativa de leitura DS18B20 falhou (%s), %u/3",
+                   esp_err_to_name(err), (unsigned)consecutive_failures);
+          if (consecutive_failures >= 3U) {
+            ctx->state.temp_valid = false;
+            if (!reported_offline) {
+              log_offline = true;
+              reported_offline = true;
+            }
+          }
         }
       }
       xSemaphoreGive(ctx->state_mutex);
+    }
+
+    if (log_online) {
+      ESP_LOGI(APP_TAG, "Sensor DS18B20 detectado/online. Temperatura: %.2f C", temp_c);
+    } else if (log_offline) {
+      ESP_LOGW(APP_TAG,
+               "Sensor DS18B20 nao detectado (%s). Telemetria termica desativada (logs suprimidos).",
+               esp_err_to_name(err));
     }
 
     if (err == ESP_OK && ctx->state.fan_mode == FAN_MODE_AUTO) {
@@ -97,12 +125,8 @@ static void thermal_task(void *arg) {
       }
     }
 
-    if (err != ESP_OK) {
-      ESP_LOGW(APP_TAG, "Falha ao ler DS18B20 (%s), tentativa consecutiva %u/3",
-               esp_err_to_name(err), (unsigned)consecutive_failures);
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // Se o sensor nao esta presente/conectado, faz a sondagem em intervalo mais espacado (3s)
+    vTaskDelay(pdMS_TO_TICKS(consecutive_failures >= 3U ? 3000 : 1000));
   }
 }
 
@@ -123,6 +147,7 @@ void app_main(void) {
   }
 
   ESP_ERROR_CHECK(storage_init());
+  (void)ota_update_boot_check(&g_app);
   esp_err_t store_err = storage_load_settings(&g_app.settings);
   if (store_err != ESP_OK) {
       ESP_LOGE(APP_TAG, "Aviso ao carregar settings da NVS (%s). Usando padroes.", esp_err_to_name(store_err));
@@ -133,6 +158,9 @@ void app_main(void) {
       g_app.state.inverter[i] = (bool)g_app.settings.inverter[i];
   }
   ESP_ERROR_CHECK(hardware_init(&g_app));
+  if (status_led_init(&g_app) != ESP_OK) {
+    ESP_LOGW(APP_TAG, "LED de status (GPIO %d) nao inicializou.", BOARD_RGB_LED_PIN);
+  }
   g_app.state.driver_mode_requested =
       (driver_bus_mode_t)g_app.settings.driver_bus_mode;
 

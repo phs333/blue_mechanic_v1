@@ -13,6 +13,8 @@
 #include "motion.h"
 #include "storage.h"
 #include "tmc2209.h"
+#include "status_led.h"
+#include "ota_update.h"
 
 static esp_err_t persist_settings(app_context_t *ctx);
 static bool parse_u32_token(const char *text, uint32_t *value);
@@ -82,6 +84,16 @@ void commands_print_help(void)
     puts("CAN BITRATE <125000|250000|500000|1000000>");
     puts("CAN BASE CMD|STATUS|EVENT <id>");
     puts("CAN SEND STATUS");
+    puts("LED [STATUS]");
+    puts("LED AUTO (modo automatico de status do no)");
+    puts("LED OFF | RED | GREEN | BLUE | YELLOW | CYAN | MAGENTA | WHITE");
+    puts("LED RGB <r> <g> <b> (0..255)");
+    puts("LED BRIGHTNESS <0..100>");
+    puts("OTA [STATUS] (exibe particao ativa, rollback e proxima particao)");
+    puts("OTA WAIT / OTA PREPARE (entra em modo seguro de espera por gravacao OTA)");
+    puts("OTA ABORT / OTA CANCEL (cancela OTA e restaura operacao normal)");
+    puts("OTA CONFIRM (valida firmware atual e cancela rollback)");
+    puts("OTA ROLLBACK (forca rollback para versao anterior e reinicia)");
 }
 
 void commands_print_status(app_context_t *ctx)
@@ -137,6 +149,9 @@ void commands_print_status(app_context_t *ctx)
     }
     tmc2209_print_status(ctx);
     can_bus_print_status(ctx);
+    char led_buf[128];
+    status_led_get_current_status(led_buf, sizeof(led_buf));
+    printf("LED RGB (GPIO %d): %s\n", BOARD_RGB_LED_PIN, led_buf);
     printf("================\n");
 }
 
@@ -205,6 +220,129 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     if (strcmp(cmd, "STATUS") == 0) {
         commands_print_status(ctx);
+        return;
+    }
+
+    if (strcmp(cmd, "LED") == 0 || strcmp(cmd, "LED STATUS") == 0) {
+        char st_buf[128];
+        status_led_get_current_status(st_buf, sizeof(st_buf));
+        printf("LED STATUS: %s\n", st_buf);
+        return;
+    }
+
+    if (strcmp(cmd, "LED AUTO") == 0) {
+        status_led_set_mode(STATUS_LED_MODE_AUTO);
+        puts("LED: Modo AUTO ativado (status do no).");
+        return;
+    }
+
+    if (strcmp(cmd, "LED OFF") == 0) {
+        status_led_set_color(0, 0, 0);
+        puts("LED: Desligado.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED RED") == 0) {
+        status_led_set_color(255, 0, 0);
+        puts("LED: Vermelho manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED GREEN") == 0) {
+        status_led_set_color(0, 255, 0);
+        puts("LED: Verde manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED BLUE") == 0) {
+        status_led_set_color(0, 0, 255);
+        puts("LED: Azul manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED YELLOW") == 0) {
+        status_led_set_color(255, 180, 0);
+        puts("LED: Amarelo manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED CYAN") == 0) {
+        status_led_set_color(0, 255, 255);
+        puts("LED: Ciano manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED MAGENTA") == 0) {
+        status_led_set_color(255, 0, 255);
+        puts("LED: Magenta manual.");
+        return;
+    }
+
+    if (strcmp(cmd, "LED WHITE") == 0) {
+        status_led_set_color(255, 255, 255);
+        puts("LED: Branco manual.");
+        return;
+    }
+
+    if (strncmp(cmd, "LED RGB ", 8) == 0) {
+        unsigned r = 0, g = 0, b = 0;
+        if (sscanf(cmd + 8, "%u %u %u", &r, &g, &b) == 3) {
+            status_led_set_color((uint8_t)(r > 255 ? 255 : r),
+                                 (uint8_t)(g > 255 ? 255 : g),
+                                 (uint8_t)(b > 255 ? 255 : b));
+            printf("LED: Cor RGB (%u, %u, %u) definida.\n", r, g, b);
+        } else {
+            puts("Uso: LED RGB <0..255> <0..255> <0..255>");
+        }
+        return;
+    }
+
+    if (strncmp(cmd, "LED BRIGHTNESS ", 15) == 0 || strncmp(cmd, "LED BRIGHT ", 11) == 0) {
+        const char *p = (strncmp(cmd, "LED BRIGHTNESS ", 15) == 0) ? (cmd + 15) : (cmd + 11);
+        unsigned br = 0;
+        if (sscanf(p, "%u", &br) == 1 && br <= 100) {
+            status_led_set_brightness((uint8_t)br);
+            printf("LED: Brilho ajustado para %u%%.\n", br);
+        } else {
+            puts("Uso: LED BRIGHTNESS <0..100>");
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "OTA") == 0 || strcmp(cmd, "OTA STATUS") == 0) {
+        ota_print_status();
+        return;
+    }
+
+    if (strcmp(cmd, "OTA WAIT") == 0 || strcmp(cmd, "OTA PREPARE") == 0 || strcmp(cmd, "OTA START") == 0) {
+        esp_err_t err = ota_prepare_for_update(ctx, 0);
+        if (err == ESP_OK) {
+            puts("OTA: Modo de espera segura ativado. Motores e lasers parados. Aguardando dados de firmware...");
+        } else {
+            printf("OTA ERRO: Falha ao preparar para atualizacao: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "OTA ABORT") == 0 || strcmp(cmd, "OTA CANCEL") == 0) {
+        ota_abort(ctx);
+        puts("OTA: Sessao cancelada. Operacao normal restaurada.");
+        return;
+    }
+
+    if (strcmp(cmd, "OTA CONFIRM") == 0 || strcmp(cmd, "OTA VALID") == 0) {
+        esp_err_t err = ota_mark_valid();
+        if (err == ESP_OK) {
+            puts("OTA: Firmware validado com sucesso! Rollback cancelado.");
+        } else {
+            printf("OTA ERRO: Falha ao validar firmware: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "OTA ROLLBACK") == 0) {
+        puts("OTA: Executando rollback para versao anterior...");
+        (void)ota_rollback_and_reboot();
         return;
     }
 

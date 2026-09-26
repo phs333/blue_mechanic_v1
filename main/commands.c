@@ -476,7 +476,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         parse_axis_token(raw_axis, NULL, &axis);
         esp_err_t err = motion_post_home_axis(ctx, axis, 0, 0);
         if (err == ESP_OK) {
-            printf("Home %c finalizado.\n", axis);
+            printf("Home %c enfileirado.\n", axis);
         } else {
             printf("ERRO no home %c: %s\n", axis, esp_err_to_name(err));
         }

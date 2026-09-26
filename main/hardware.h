@@ -6,6 +6,10 @@
 
 #include "app_defs.h"
 
+#define RMT_MIN_STEP_FREQ_HZ 16U
+#define RMT_MAX_STEP_FREQ_HZ 60000U
+#define RMT_MAX_RAMP_SAMPLES 1024U
+
 esp_err_t hardware_init(app_context_t *ctx);
 void hardware_deinit(void);
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us);

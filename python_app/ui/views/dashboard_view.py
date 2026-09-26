@@ -327,6 +327,10 @@ class DashboardView(QWidget):
 
         self.comm.move_sync(
             steps_c, steps_a, steps_z,
+            speed_c=params.speed[0] if params.speed[0] > 0 else None,
+            speed_a=params.speed[1] if params.speed[1] > 0 else None,
+            speed_z=params.speed[2] if params.speed[2] > 0 else None,
+            accel=None,
             force_no_encoder=force
         )
 

@@ -20,10 +20,6 @@
 
 #include "stepper_motor_encoder.h"
 
-#define RMT_MIN_STEP_FREQ_HZ 16U
-#define RMT_MAX_STEP_FREQ_HZ 60000U
-#define RMT_MAX_RAMP_SAMPLES 1024U
-
 static rmt_channel_handle_t s_rmt_chan[AXIS_COUNT] = {NULL, NULL, NULL};
 
 static esp_err_t init_rmt_channels(void)
@@ -229,6 +225,7 @@ void hardware_rmt_reacquire_pin(gpio_num_t step_pin)
 {
     uint32_t sig = (step_pin == STEP_C) ? RMT_SIG_OUT0_IDX :
                    (step_pin == STEP_A) ? RMT_SIG_OUT1_IDX : RMT_SIG_OUT2_IDX;
+    gpio_set_direction(step_pin, GPIO_MODE_OUTPUT);
     esp_rom_gpio_connect_out_signal(step_pin, sig, false, false);
 }
 
@@ -300,7 +297,13 @@ uint32_t hardware_compute_step_delay(uint32_t start_delay, uint32_t end_delay, u
 
     if (step_num < ramp_steps) {
         float t = (float)step_num / (float)ramp_steps;
-        float speed = start_speed + (end_speed - start_speed) * t;
+        if (t > 1.0f) {
+            t = 1.0f;
+        }
+        // Smoothstep S-curve (cubic Hermite: 3t^2 - 2t^3)
+        // First derivative is zero at both t=0 and t=1, eliminating torque jerk!
+        float t_smooth = t * t * (3.0f - 2.0f * t);
+        float speed = start_speed + (end_speed - start_speed) * t_smooth;
         float delay_f = 1000000.0f / (2.0f * speed);
         if (delay_f < 10.0f) {
             delay_f = 10.0f;
@@ -316,7 +319,9 @@ uint32_t hardware_compute_step_delay(uint32_t start_delay, uint32_t end_delay, u
         if (t > 1.0f) {
             t = 1.0f;
         }
-        float speed = end_speed + (start_speed - end_speed) * t;
+        // Smoothstep S-curve deceleration: smooth descent to zero jerk at stop
+        float t_smooth = t * t * (3.0f - 2.0f * t);
+        float speed = end_speed + (start_speed - end_speed) * t_smooth;
         float delay_f = 1000000.0f / (2.0f * speed);
         if (delay_f < 10.0f) {
             delay_f = 10.0f;
@@ -367,12 +372,8 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
 
     if (use_ramp) {
         if (accel_steps * 2U > total_steps) {
-            accel_steps = total_steps / 4U;
-            if (accel_steps < 2U) accel_steps = 2U;
-            decel_steps = accel_steps;
-        }
-        if (accel_steps * 2U > total_steps) {
             accel_steps = total_steps / 2U;
+            if (accel_steps < 2U) accel_steps = 2U;
             decel_steps = total_steps - accel_steps;
         }
         if ((target_freq_hz - start_freq_hz) < accel_steps) {
@@ -389,6 +390,7 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
 
     rmt_transmit_config_t tx_config = {
         .loop_count = 0,
+        .flags = { .eot_level = 0 },
     };
 
     if (use_ramp) {
@@ -475,6 +477,10 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
         return ESP_OK;
     }
 
+    if (steps_c > 0) hardware_rmt_reacquire_pin(STEP_C);
+    if (steps_a > 0) hardware_rmt_reacquire_pin(STEP_A);
+    if (steps_z > 0) hardware_rmt_reacquire_pin(STEP_Z);
+
     rmt_channel_handle_t chan_c = s_rmt_chan[0];
     rmt_channel_handle_t chan_a = s_rmt_chan[1];
     rmt_channel_handle_t chan_z = s_rmt_chan[2];
@@ -495,17 +501,16 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     if (accel_c > RMT_MAX_RAMP_SAMPLES) accel_c = decel_c = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_c = false;
     if (steps_c > 0) {
-        normalize_rmt_frequencies(&start_freq_c, &target_freq_c, 600U, 3U);
+        if (target_freq_c < RMT_MIN_STEP_FREQ_HZ) target_freq_c = RMT_MIN_STEP_FREQ_HZ;
+        if (target_freq_c > RMT_MAX_STEP_FREQ_HZ) target_freq_c = RMT_MAX_STEP_FREQ_HZ;
+        if (start_freq_c < RMT_MIN_STEP_FREQ_HZ) start_freq_c = RMT_MIN_STEP_FREQ_HZ;
+        if (start_freq_c >= target_freq_c) start_freq_c = target_freq_c / 2U;
 
-        use_ramp_c = (steps_c > 24U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 30U));
+        use_ramp_c = (steps_c > 24U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 20U));
         if (use_ramp_c) {
             if (accel_c * 2U > steps_c) {
-                accel_c = steps_c / 4U;
-                if (accel_c < 2U) accel_c = 2U;
-                decel_c = accel_c;
-            }
-            if (accel_c * 2U > steps_c) {
                 accel_c = steps_c / 2U;
+                if (accel_c < 2U) accel_c = 2U;
                 decel_c = steps_c - accel_c;
             }
             if ((target_freq_c - start_freq_c) < accel_c) {
@@ -522,17 +527,16 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     if (accel_a > RMT_MAX_RAMP_SAMPLES) accel_a = decel_a = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_a = false;
     if (steps_a > 0) {
-        normalize_rmt_frequencies(&start_freq_a, &target_freq_a, 600U, 3U);
+        if (target_freq_a < RMT_MIN_STEP_FREQ_HZ) target_freq_a = RMT_MIN_STEP_FREQ_HZ;
+        if (target_freq_a > RMT_MAX_STEP_FREQ_HZ) target_freq_a = RMT_MAX_STEP_FREQ_HZ;
+        if (start_freq_a < RMT_MIN_STEP_FREQ_HZ) start_freq_a = RMT_MIN_STEP_FREQ_HZ;
+        if (start_freq_a >= target_freq_a) start_freq_a = target_freq_a / 2U;
 
-        use_ramp_a = (steps_a > 24U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 30U));
+        use_ramp_a = (steps_a > 24U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 20U));
         if (use_ramp_a) {
             if (accel_a * 2U > steps_a) {
-                accel_a = steps_a / 4U;
-                if (accel_a < 2U) accel_a = 2U;
-                decel_a = accel_a;
-            }
-            if (accel_a * 2U > steps_a) {
                 accel_a = steps_a / 2U;
+                if (accel_a < 2U) accel_a = 2U;
                 decel_a = steps_a - accel_a;
             }
             if ((target_freq_a - start_freq_a) < accel_a) {
@@ -549,17 +553,16 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     if (accel_z > RMT_MAX_RAMP_SAMPLES) accel_z = decel_z = RMT_MAX_RAMP_SAMPLES;
     bool use_ramp_z = false;
     if (steps_z > 0) {
-        normalize_rmt_frequencies(&start_freq_z, &target_freq_z, 400U, 2U);
+        if (target_freq_z < RMT_MIN_STEP_FREQ_HZ) target_freq_z = RMT_MIN_STEP_FREQ_HZ;
+        if (target_freq_z > RMT_MAX_STEP_FREQ_HZ) target_freq_z = RMT_MAX_STEP_FREQ_HZ;
+        if (start_freq_z < RMT_MIN_STEP_FREQ_HZ) start_freq_z = RMT_MIN_STEP_FREQ_HZ;
+        if (start_freq_z >= target_freq_z) start_freq_z = target_freq_z / 2U;
 
-        use_ramp_z = (steps_z > 24U) && (accel_z >= 2U) && (target_freq_z > (start_freq_z + 30U));
+        use_ramp_z = (steps_z >= 10U) && (accel_z >= 2U) && (target_freq_z > (start_freq_z + 20U));
         if (use_ramp_z) {
             if (accel_z * 2U > steps_z) {
-                accel_z = steps_z / 4U;
-                if (accel_z < 2U) accel_z = 2U;
-                decel_z = accel_z;
-            }
-            if (accel_z * 2U > steps_z) {
                 accel_z = steps_z / 2U;
+                if (accel_z < 2U) accel_z = 2U;
                 decel_z = steps_z - accel_z;
             }
             if ((target_freq_z - start_freq_z) < accel_z) {
@@ -578,12 +581,18 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 .resolution = 1000000, .sample_points = accel_c,
                 .start_freq_hz = start_freq_c, .end_freq_hz = target_freq_c
             };
-            rmt_new_stepper_motor_curve_encoder(&ac_cfg, &accel_enc_c);
+            esp_err_t err_ac = rmt_new_stepper_motor_curve_encoder(&ac_cfg, &accel_enc_c);
             stepper_motor_curve_encoder_config_t dc_cfg = {
                 .resolution = 1000000, .sample_points = decel_c,
                 .start_freq_hz = target_freq_c, .end_freq_hz = start_freq_c
             };
-            rmt_new_stepper_motor_curve_encoder(&dc_cfg, &decel_enc_c);
+            esp_err_t err_dc = rmt_new_stepper_motor_curve_encoder(&dc_cfg, &decel_enc_c);
+            if (err_ac != ESP_OK || err_dc != ESP_OK) {
+                if (accel_enc_c) { rmt_del_encoder(accel_enc_c); accel_enc_c = NULL; }
+                if (decel_enc_c) { rmt_del_encoder(decel_enc_c); decel_enc_c = NULL; }
+                use_ramp_c = false;
+                cruise_c = steps_c;
+            }
         }
         rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_c);
     }
@@ -595,12 +604,18 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 .resolution = 1000000, .sample_points = accel_a,
                 .start_freq_hz = start_freq_a, .end_freq_hz = target_freq_a
             };
-            rmt_new_stepper_motor_curve_encoder(&aa_cfg, &accel_enc_a);
+            esp_err_t err_aa = rmt_new_stepper_motor_curve_encoder(&aa_cfg, &accel_enc_a);
             stepper_motor_curve_encoder_config_t da_cfg = {
                 .resolution = 1000000, .sample_points = decel_a,
                 .start_freq_hz = target_freq_a, .end_freq_hz = start_freq_a
             };
-            rmt_new_stepper_motor_curve_encoder(&da_cfg, &decel_enc_a);
+            esp_err_t err_da = rmt_new_stepper_motor_curve_encoder(&da_cfg, &decel_enc_a);
+            if (err_aa != ESP_OK || err_da != ESP_OK) {
+                if (accel_enc_a) { rmt_del_encoder(accel_enc_a); accel_enc_a = NULL; }
+                if (decel_enc_a) { rmt_del_encoder(decel_enc_a); decel_enc_a = NULL; }
+                use_ramp_a = false;
+                cruise_a = steps_a;
+            }
         }
         rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_a);
     }
@@ -612,18 +627,24 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 .resolution = 1000000, .sample_points = accel_z,
                 .start_freq_hz = start_freq_z, .end_freq_hz = target_freq_z
             };
-            rmt_new_stepper_motor_curve_encoder(&az_cfg, &accel_enc_z);
+            esp_err_t err_az = rmt_new_stepper_motor_curve_encoder(&az_cfg, &accel_enc_z);
             stepper_motor_curve_encoder_config_t dz_cfg = {
                 .resolution = 1000000, .sample_points = decel_z,
                 .start_freq_hz = target_freq_z, .end_freq_hz = start_freq_z
             };
-            rmt_new_stepper_motor_curve_encoder(&dz_cfg, &decel_enc_z);
+            esp_err_t err_dz = rmt_new_stepper_motor_curve_encoder(&dz_cfg, &decel_enc_z);
+            if (err_az != ESP_OK || err_dz != ESP_OK) {
+                if (accel_enc_z) { rmt_del_encoder(accel_enc_z); accel_enc_z = NULL; }
+                if (decel_enc_z) { rmt_del_encoder(decel_enc_z); decel_enc_z = NULL; }
+                use_ramp_z = false;
+                cruise_z = steps_z;
+            }
         }
         rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_z);
     }
 
     // Transmit Axis C queue in parallel
-    rmt_transmit_config_t tx_c = { .loop_count = 0 };
+    rmt_transmit_config_t tx_c = { .loop_count = 0, .flags = { .eot_level = 0 } };
     if (steps_c > 0) {
         if (use_ramp_c && accel_enc_c) {
             rmt_transmit(chan_c, accel_enc_c, &accel_c, sizeof(accel_c), &tx_c);
@@ -639,7 +660,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     }
 
     // Transmit Axis A queue in parallel
-    rmt_transmit_config_t tx_a = { .loop_count = 0 };
+    rmt_transmit_config_t tx_a = { .loop_count = 0, .flags = { .eot_level = 0 } };
     if (steps_a > 0) {
         if (use_ramp_a && accel_enc_a) {
             rmt_transmit(chan_a, accel_enc_a, &accel_a, sizeof(accel_a), &tx_a);
@@ -655,7 +676,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
     }
 
     // Transmit Axis Z queue in parallel
-    rmt_transmit_config_t tx_z = { .loop_count = 0 };
+    rmt_transmit_config_t tx_z = { .loop_count = 0, .flags = { .eot_level = 0 } };
     if (steps_z > 0) {
         if (use_ramp_z && accel_enc_z) {
             rmt_transmit(chan_z, accel_enc_z, &accel_z, sizeof(accel_z), &tx_z);

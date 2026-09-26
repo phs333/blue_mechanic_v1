@@ -85,7 +85,7 @@
 #define Z_BELT_PULLEY_TEETH 16U
 #define DEFAULT_Z_PULLEY_TEETH 16U
 
-#define INVERTER_C false
+#define INVERTER_C true
 #define INVERTER_A true
 #define INVERTER_X INVERTER_C
 #define INVERTER_Y INVERTER_A
@@ -96,7 +96,7 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 10U
+#define SETTINGS_VERSION 11U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f

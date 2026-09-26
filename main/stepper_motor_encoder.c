@@ -84,9 +84,9 @@ esp_err_t rmt_new_stepper_motor_curve_encoder(const stepper_motor_curve_encoder_
         for (uint32_t i = 0; i < config->sample_points; i++) {
             smooth_freq = convert_to_smooth_freq(config->start_freq_hz, config->end_freq_hz, config->start_freq_hz + curve_step * i);
             symbol_duration = config->resolution / smooth_freq / 2;
-            step_encoder->curve_table[i].level0 = 0;
+            step_encoder->curve_table[i].level0 = 1;
             step_encoder->curve_table[i].duration0 = symbol_duration;
-            step_encoder->curve_table[i].level1 = 1;
+            step_encoder->curve_table[i].level1 = 0;
             step_encoder->curve_table[i].duration1 = symbol_duration;
         }
     } else {
@@ -94,9 +94,9 @@ esp_err_t rmt_new_stepper_motor_curve_encoder(const stepper_motor_curve_encoder_
         for (uint32_t i = 0; i < config->sample_points; i++) {
             smooth_freq = convert_to_smooth_freq(config->end_freq_hz, config->start_freq_hz, config->end_freq_hz + curve_step * i);
             symbol_duration = config->resolution / smooth_freq / 2;
-            step_encoder->curve_table[config->sample_points - i - 1].level0 = 0;
+            step_encoder->curve_table[config->sample_points - i - 1].level0 = 1;
             step_encoder->curve_table[config->sample_points - i - 1].duration0 = symbol_duration;
-            step_encoder->curve_table[config->sample_points - i - 1].level1 = 1;
+            step_encoder->curve_table[config->sample_points - i - 1].level1 = 0;
             step_encoder->curve_table[config->sample_points - i - 1].duration1 = symbol_duration;
         }
     }
@@ -133,9 +133,9 @@ static size_t rmt_encode_stepper_motor_uniform(rmt_encoder_t *encoder, rmt_chann
     uint32_t target_freq_hz = *(uint32_t *)primary_data;
     uint32_t symbol_duration = motor_encoder->resolution / target_freq_hz / 2;
     rmt_symbol_word_t freq_sample = {
-        .level0 = 0,
+        .level0 = 1,
         .duration0 = symbol_duration,
-        .level1 = 1,
+        .level1 = 0,
         .duration1 = symbol_duration,
     };
     size_t encoded_symbols = copy_encoder->encode(copy_encoder, channel, &freq_sample, sizeof(freq_sample), &session_state);

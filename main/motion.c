@@ -18,7 +18,7 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
                                               float speed_override, float accel_override);
 static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested_steps,
                                            float speed_override, float accel_override);
-static void compute_axis_rmt_profile(float step_size, float speed, float accel,
+static void compute_axis_rmt_profile(float step_size, float speed, float accel, float start_speed_cfg, uint32_t total_steps,
                                      uint32_t *start_freq_hz, uint32_t *target_freq_hz,
                                      uint32_t *ramp_steps);
 
@@ -70,36 +70,6 @@ static float get_step_size(app_context_t *ctx, char axis)
     return (float)(teeth * Z_BELT_PITCH_MM) / (spr * (float)msteps);
 }
 
-static uint32_t compute_ramp_steps(app_context_t *ctx, char axis, uint32_t start_delay,
-                                   uint32_t end_delay, uint32_t total_steps,
-                                   float accel_override)
-{
-    if (total_steps == 0) {
-        return 0;
-    }
-
-    size_t axis_index = axis_to_index(axis);
-    float accel = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[axis_index];
-    if (accel <= 0.0f) {
-        return 0;
-    }
-
-    float step_size = get_step_size(ctx, axis);
-    float accel_steps_per_s2 = accel / step_size;
-
-    float start_speed = 1000000.0f / (2.0f * (float)start_delay);
-    float end_speed   = 1000000.0f / (2.0f * (float)end_delay);
-    float ramp_steps_f = (end_speed * end_speed - start_speed * start_speed) / (2.0f * accel_steps_per_s2);
-
-    uint32_t ramp_steps = (uint32_t)(ramp_steps_f + 0.5f);
-    if (ramp_steps < 1) {
-        ramp_steps = 1;
-    }
-    if (ramp_steps > total_steps / 2) {
-        ramp_steps = total_steps / 2;
-    }
-    return ramp_steps;
-}
 
 //
 // Pre-computes the delay for every step in a trapezoidal move profile.
@@ -197,7 +167,7 @@ float motion_delay_us_to_speed(app_context_t *ctx, char axis, uint32_t delay_us)
     return (1000000.0f * get_step_size(ctx, axis)) / (2.0f * (float)delay_us);
 }
 
-static void compute_axis_rmt_profile(float step_size, float speed, float accel,
+static void compute_axis_rmt_profile(float step_size, float speed, float accel, float start_speed_cfg, uint32_t total_steps,
                                      uint32_t *start_freq_hz, uint32_t *target_freq_hz,
                                      uint32_t *ramp_steps)
 {
@@ -205,13 +175,37 @@ static void compute_axis_rmt_profile(float step_size, float speed, float accel,
     float safe_speed = (isfinite(speed) && speed > 0.0f) ? speed : safe_step_size;
     float safe_accel = (isfinite(accel) && accel > 0.0f) ? accel : safe_step_size;
 
-    uint32_t target = (uint32_t)fmaxf(1.0f, floorf((safe_speed / safe_step_size) + 0.5f));
-    uint32_t start = target;
-    if (target > 1U) {
-        start = target / 3U;
-        if (start == 0U) {
-            start = 1U;
-        }
+    uint32_t nominal_target = (uint32_t)fmaxf(1.0f, floorf((safe_speed / safe_step_size) + 0.5f));
+    uint32_t target = nominal_target;
+
+    float safe_start_speed = (isfinite(start_speed_cfg) && start_speed_cfg >= 0.5f) ? start_speed_cfg : 10.0f;
+    if (safe_start_speed > safe_speed * 0.8f) {
+        safe_start_speed = safe_speed * 0.5f;
+    }
+    uint32_t nominal_start = (uint32_t)fmaxf(16.0f, floorf((safe_start_speed / safe_step_size) + 0.5f));
+    uint32_t start = nominal_start;
+
+    // Scale peak speed and start frequency for short displacements on C/A:
+    if (total_steps <= 8) {
+        // <= 0.9 deg (e.g. 0.5 deg = 4-5 steps)
+        if (target > 180U) target = 180U; // max ~20 deg/s
+        if (start > 50U) start = 50U;
+    } else if (total_steps <= 24) {
+        // <= 2.7 deg (e.g. 1.0 deg = 9 steps)
+        if (target > 350U) target = 350U; // max ~39 deg/s
+        if (start > 65U) start = 65U;
+    } else if (total_steps <= 80) {
+        // <= 9.0 deg (e.g. 5.0 deg = 44 steps)
+        if (target > 700U) target = 700U; // max ~78 deg/s
+        if (start > 80U) start = 80U;
+    } else {
+        // Large moves (> 9 deg: 15 deg, 45 deg, 90 deg)
+        target = nominal_target;
+        start = nominal_start;
+    }
+
+    if (start >= target) {
+        start = (target > 30U) ? (target / 2U) : target;
     }
 
     uint32_t ramp = 0U;
@@ -224,80 +218,96 @@ static void compute_axis_rmt_profile(float step_size, float speed, float accel,
         }
     }
 
+    // For short moves, ensure ramp takes at least half or one third of move (triangular S-curve)
+    if (total_steps <= 24) {
+        ramp = total_steps / 2U;
+    } else if (total_steps <= 80) {
+        if (ramp < total_steps / 3U) ramp = total_steps / 3U;
+    } else {
+        // For large moves, ensure at least 40 ramp steps for a perceptible, silky S-curve swell
+        if (ramp < 40U && total_steps > 120U) ramp = 40U;
+    }
+
+    if (ramp < 1U && total_steps > 1U) ramp = 1U;
+    if (ramp > total_steps / 2U) ramp = total_steps / 2U;
+
     *start_freq_hz = start;
     *target_freq_hz = target;
     *ramp_steps = ramp;
 }
 
-
 static void compute_z_motion_profile(app_context_t *ctx, int32_t steps, float speed_override, float accel_override,
                                      uint32_t *out_start_delay, uint32_t *out_target_delay, uint32_t *out_ramp_steps)
 {
-    uint32_t target_delay = (speed_override > 0.0f) ?
-                            motion_speed_to_delay_us(ctx, 'Z', speed_override) :
-                            ctx->state.speed_delay_us[AXIS_Z_ID];
-
-    // For short displacements (<= 400 steps / 4 mm), cap maximum speed and use gentle start delay
-    // to avoid abrupt solavanco / mechanical jerk:
-    uint32_t start_delay;
-    if (steps <= 20) {
-        // <= 0.2 mm: micro-jog, ultra soft
-        start_delay = 6000U; // ~83 steps/s = 0.83 mm/s
-        if (target_delay < 3333U) target_delay = 3333U; // max 1.5 mm/s
-    } else if (steps <= 50) {
-        // <= 0.5 mm: soft jog
-        start_delay = 5500U; // ~90 steps/s = 0.9 mm/s
-        if (target_delay < 2000U) target_delay = 2000U; // max 2.5 mm/s
-    } else if (steps <= 100) {
-        // <= 1.0 mm
-        start_delay = 5000U; // 100 steps/s = 1.0 mm/s
-        if (target_delay < 1250U) target_delay = 1250U; // max 4.0 mm/s
-    } else if (steps <= 200) {
-        // <= 2.0 mm
-        start_delay = 4000U; // 125 steps/s = 1.25 mm/s
-        if (target_delay < 833U)  target_delay = 833U;  // max 6.0 mm/s
-    } else if (steps <= 400) {
-        // <= 4.0 mm
-        start_delay = 3000U; // 166 steps/s = 1.66 mm/s
-        if (target_delay < 625U)  target_delay = 625U;  // max 8.0 mm/s
-    } else {
-        // Long displacements (> 4 mm)
-        start_delay = (target_delay > 2000U) ? target_delay : 2000U;
+    float step_size = get_step_size(ctx, 'Z');
+    if (step_size <= 0.0f) {
+        step_size = 0.01f;
     }
 
-    if (start_delay < target_delay) {
-        start_delay = target_delay;
-    }
+    // 1. Accel: Fully respect user's acceleration configuration (e.g. 1000 mm/s^2)
+    float accel = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[AXIS_Z_ID];
+    if (accel < 50.0f) accel = 50.0f;
+    if (accel > 5000.0f) accel = 5000.0f;
+    float accel_steps_per_s2 = accel / step_size;
 
-    // Accel scaling for short moves to prevent jerky transitions
-    float effective_accel = accel_override;
-    if (effective_accel <= 0.0f) {
-        float base_accel = ctx->settings.accel[AXIS_Z_ID];
-        if (steps <= 50) {
-            effective_accel = (base_accel < 80.0f) ? base_accel : 80.0f; // 80 mm/s^2
-        } else if (steps <= 200) {
-            effective_accel = (base_accel < 120.0f) ? base_accel : 120.0f; // 120 mm/s^2
+    // 2. Cruise Speed: Respect user's speed configuration (e.g. 250 mm/s)
+    float nominal_speed = (speed_override > 0.0f) ? speed_override :
+                          ((ctx->settings.speed[AXIS_Z_ID] > 0.0f) ? ctx->settings.speed[AXIS_Z_ID] : 12.5f);
+    if (nominal_speed < 1.0f) nominal_speed = 1.0f;
+    if (nominal_speed > 400.0f) nominal_speed = 400.0f;
+    float max_speed_steps = nominal_speed / step_size;
+
+    // 3. Start speed: user-configurable start speed from NVS (default 15.0 mm/s)
+    float start_speed_mm = (ctx->settings.z_start_speed_mm >= 0.5f) ? ctx->settings.z_start_speed_mm : 15.0f;
+    if (nominal_speed < start_speed_mm * 1.2f) {
+        start_speed_mm = nominal_speed * 0.4f;
+    }
+    float start_speed_steps = start_speed_mm / step_size;
+    if (start_speed_steps < 30.0f) start_speed_steps = 30.0f;
+
+    // 4. Kinematic calculation: check if move is triangular (steps cannot reach nominal cruise speed)
+    // Needed ramp steps to reach full cruise speed: s_ramp = (v_max^2 - v_start^2) / (2 * a)
+    float v0_sq = start_speed_steps * start_speed_steps;
+    float vmax_sq = max_speed_steps * max_speed_steps;
+    float needed_ramp_steps = (vmax_sq - v0_sq) / (2.0f * accel_steps_per_s2);
+
+    uint32_t total_steps = (uint32_t)abs(steps);
+    uint32_t ramp_steps = 0;
+    float actual_cruise_steps = max_speed_steps;
+
+    if (total_steps <= 2) {
+        ramp_steps = 1;
+        actual_cruise_steps = start_speed_steps;
+    } else if (needed_ramp_steps * 2.0f >= (float)total_steps) {
+        // Triangular profile! Peak speed is dynamically matched to travel:
+        // v_peak^2 = v0^2 + 2 * a * (total_steps / 2)
+        ramp_steps = total_steps / 2;
+        float v_peak_sq = v0_sq + 2.0f * accel_steps_per_s2 * (float)ramp_steps;
+        if (v_peak_sq > v0_sq) {
+            actual_cruise_steps = sqrtf(v_peak_sq);
         } else {
-            effective_accel = base_accel;
+            actual_cruise_steps = start_speed_steps;
         }
+    } else {
+        // Trapezoidal profile: ramp to full cruise speed, then cruise
+        ramp_steps = (uint32_t)floorf(needed_ramp_steps + 0.5f);
+        if (ramp_steps < 1) ramp_steps = 1;
+        if (ramp_steps > total_steps / 2) ramp_steps = total_steps / 2;
+        actual_cruise_steps = max_speed_steps;
     }
 
-    uint32_t z_ramp = compute_ramp_steps(ctx, 'Z', start_delay, target_delay,
-                                         (uint32_t)steps, effective_accel);
+    // Convert speeds (steps/s) to half-period delays (us):
+    // delay_us = 1000000 / (2 * speed_steps_per_s)
+    uint32_t start_delay = (uint32_t)(1000000.0f / (2.0f * start_speed_steps));
+    uint32_t target_delay = (uint32_t)(1000000.0f / (2.0f * actual_cruise_steps));
 
-    if (steps <= 50) {
-        z_ramp = (uint32_t)(steps / 2);
-    }
-    if (z_ramp < 1 && steps > 1) {
-        z_ramp = 1;
-    }
-    if (z_ramp > (uint32_t)(steps / 2)) {
-        z_ramp = (uint32_t)(steps / 2);
-    }
+    if (target_delay < 10U) target_delay = 10U;
+    if (start_delay < target_delay) start_delay = target_delay;
+    if (start_delay > 32767U) start_delay = 32767U;
 
     *out_start_delay = start_delay;
     *out_target_delay = target_delay;
-    *out_ramp_steps = z_ramp;
+    *out_ramp_steps = ramp_steps;
 }
 
 static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
@@ -650,13 +660,17 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
              speed_val = 1.0f;
          }
 
+         float start_speed_cfg = (axis_upper == 'C' || axis_upper == 'X') ?
+                                 ctx->settings.c_start_speed_deg : ctx->settings.a_start_speed_deg;
+         if (start_speed_cfg < 0.5f) start_speed_cfg = 10.0f;
+
+         uint32_t abs_steps = (uint32_t)labs(requested_steps);
          uint32_t start_freq_hz = 0U;
          uint32_t target_freq_hz = 0U;
          uint32_t ramp_steps = 0U;
-         compute_axis_rmt_profile(step_size, speed_val, accel_val,
+         compute_axis_rmt_profile(step_size, speed_val, accel_val, start_speed_cfg, abs_steps,
                                   &start_freq_hz, &target_freq_hz, &ramp_steps);
 
-         uint32_t abs_steps = (uint32_t)labs(requested_steps);
          esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, abs_steps, start_freq_hz, target_freq_hz, ramp_steps);
          ESP_LOGI(APP_TAG, "MOVE_F %c concluido: %s", axis_upper, esp_err_to_name(rmt_err));
 
@@ -899,10 +913,14 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
         speed_val = 1.0f;
     }
 
+    float start_speed_cfg = (axis_upper == 'C' || axis_upper == 'X') ?
+                            ctx->settings.c_start_speed_deg : ctx->settings.a_start_speed_deg;
+    if (start_speed_cfg < 0.5f) start_speed_cfg = 10.0f;
+
     uint32_t start_freq_hz = 0U;
     uint32_t target_freq_hz = 0U;
     uint32_t ramp_steps = 0U;
-    compute_axis_rmt_profile(step_size, speed_val, accel_val,
+    compute_axis_rmt_profile(step_size, speed_val, accel_val, start_speed_cfg, steps_to_execute,
                              &start_freq_hz, &target_freq_hz, &ramp_steps);
 
     esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, steps_to_execute,

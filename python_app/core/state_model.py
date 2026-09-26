@@ -23,7 +23,7 @@ class HardwareTelemetry:
     pos_c_valid: bool = False
     pos_a_valid: bool = False
     pos_z_steps: int = 0    # Atuador Linear
-    max_z_steps: int = 20000
+    max_z_steps: int = 38400
     
     # State flags
     drivers_enabled: bool = False
@@ -97,12 +97,15 @@ class HardwareParameters:
     # Home & Limits
     home_c_deg: float = 0.0  # Base Rotativa
     home_a_deg: float = 0.0  # Pivot dos Lasers
-    limit_min_deg_c: float = 10.0  # Limite angular mínimo Eixo C
-    limit_max_deg_c: float = 190.0 # Limite angular máximo Eixo C
-    limit_min_deg_a: float = 10.0  # Limite angular mínimo Eixo A
-    limit_max_deg_a: float = 190.0 # Limite angular máximo Eixo A
-    max_passos_z: int = 20000
-    z_pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH  # Dentes da polia GT2 motor Z (ex: 16, 20)
+    limit_min_deg_c: float = -540.0  # Limite angular mínimo Eixo C
+    limit_max_deg_c: float = 540.0   # Limite angular máximo Eixo C
+    limit_min_deg_a: float = -540.0  # Limite angular mínimo Eixo A
+    limit_max_deg_a: float = 540.0   # Limite angular máximo Eixo A
+    max_passos_z: int = 38400        # 480 mm @ 80 passos/mm (20T GT2)
+    z_pulley_teeth: int = 20         # Dentes da polia GT2 motor Z (20T padrão)
+    c_start_speed_deg: float = 10.0  # Velocidade inicial da rampa S-Curve C (deg/s)
+    a_start_speed_deg: float = 10.0  # Velocidade inicial da rampa S-Curve A (deg/s)
+    z_start_speed_mm: float = 15.0   # Velocidade inicial da rampa S-Curve Z (mm/s)
     
     # Backward compatibility
     @property
@@ -126,17 +129,17 @@ class HardwareParameters:
     
     # Speeds & Accelerations
     # Keep startup values aligned with APP_SETTINGS_DEFAULT_INIT in firmware.
-    speed: List[float] = field(default_factory=lambda: [140.625, 140.625, 12.5])
-    speed_max: List[float] = field(default_factory=lambda: [720.0, 720.0, 60.0])
-    accel_max: List[float] = field(default_factory=lambda: [3600.0, 3600.0, 800.0])
-    accel: List[float] = field(default_factory=lambda: [1800.0, 1800.0, 300.0])
-    inverter: List[bool] = field(default_factory=lambda: [False, False, False])
+    speed: List[float] = field(default_factory=lambda: [140.0, 140.0, 250.0])
+    speed_max: List[float] = field(default_factory=lambda: [720.0, 720.0, 500.0])
+    accel_max: List[float] = field(default_factory=lambda: [3600.0, 3600.0, 2000.0])
+    accel: List[float] = field(default_factory=lambda: [1800.0, 1800.0, 1000.0])
+    inverter: List[bool] = field(default_factory=lambda: [True, True, False])
     
     # TMC2209 Settings
-    driver_bus_mode: int = 0  # 0=StepDir, 1=UART
+    driver_bus_mode: int = 1  # 0=StepDir, 1=UART Digital
     tmc_slave_addr: List[int] = field(default_factory=lambda: [0, 1, 2])
-    tmc_ihold_ma: List[int] = field(default_factory=lambda: [300, 300, 300])
-    tmc_irun_ma: List[int] = field(default_factory=lambda: [800, 800, 800])
+    tmc_ihold_ma: List[int] = field(default_factory=lambda: [559, 559, 418])
+    tmc_irun_ma: List[int] = field(default_factory=lambda: [897, 897, 957])
     tmc_ihold_delay: List[int] = field(default_factory=lambda: [6, 6, 6])
     tmc_microsteps: List[int] = field(default_factory=lambda: [16, 16, 16])
     tmc_spreadcycle: List[bool] = field(default_factory=lambda: [False, False, False])

@@ -24,6 +24,7 @@ else:
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
 
 from python_app.core.state_model import DeviceState
 from python_app.core.comm_manager import CommManager
@@ -37,6 +38,8 @@ def main():
     )
     
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setFont(QFont("Segoe UI", 10))
     app.setApplicationName("Blue Mechanic V1")
     app.setOrganizationName("Blue Mechanic")
 

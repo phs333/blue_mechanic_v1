@@ -18,7 +18,7 @@ import serial.tools.list_ports
 
 from .base_client import BaseClient
 from .state_model import DeviceState
-from .protocol_defs import FanMode, delay_to_speed_level
+from .protocol_defs import FanMode, delay_to_speed_level, translate_teensy_to_serial
 
 class SerialClient(BaseClient):
     def __init__(self, state: DeviceState):
@@ -95,17 +95,23 @@ class SerialClient(BaseClient):
             self.state.error_occurred.emit("Não conectado à porta serial")
             return False
             
-        cmd_str = cmd.strip() + "\r\n"
-        try:
-            with self.lock:
-                self.serial_port.write(cmd_str.encode('utf-8'))
-                self.serial_port.flush()
-            self.state.raw_message_received.emit("TX", cmd.strip())
-            self.state.telemetry.tx_frames += 1
+        translated_cmds = translate_teensy_to_serial(cmd, self.state)
+        if not translated_cmds:
             return True
-        except Exception as e:
-            self.state.error_occurred.emit(f"Erro ao transmitir comando serial: {e}")
-            return False
+
+        success = True
+        for single_cmd in translated_cmds:
+            cmd_str = single_cmd.strip() + "\r\n"
+            try:
+                with self.lock:
+                    self.serial_port.write(cmd_str.encode('utf-8'))
+                    self.serial_port.flush()
+                self.state.raw_message_received.emit("TX", single_cmd.strip())
+                self.state.telemetry.tx_frames += 1
+            except Exception as e:
+                self.state.error_occurred.emit(f"Erro ao transmitir comando serial: {e}")
+                success = False
+        return success
 
     def _rx_loop(self):
         line_buffer = bytearray()
@@ -297,6 +303,24 @@ class SerialClient(BaseClient):
             self.state.parameters.max_passos_z = max_z
             self.state.telemetry.max_z_steps = max_z
             if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        if "CONFIG RAMP" in line.upper():
+            updated = False
+            m_c = re.search(r'RAMP_C=([\d\.\-]+)', line, re.IGNORECASE)
+            if m_c:
+                self.state.parameters.c_start_speed_deg = float(m_c.group(1))
+                updated = True
+            m_a = re.search(r'RAMP_A=([\d\.\-]+)', line, re.IGNORECASE)
+            if m_a:
+                self.state.parameters.a_start_speed_deg = float(m_a.group(1))
+                updated = True
+            m_z = re.search(r'RAMP_Z=([\d\.\-]+)', line, re.IGNORECASE)
+            if m_z:
+                self.state.parameters.z_start_speed_mm = float(m_z.group(1))
+                updated = True
+            if updated and not self._in_config_dump:
                 self.state.parameters_updated.emit(self.state.parameters)
             return
 
@@ -521,6 +545,22 @@ class SerialClient(BaseClient):
         teeth = max(6, min(200, int(teeth)))
         self.state.update_parameters(z_pulley_teeth=teeth)
         return self.send_raw(f"PULLEY Z {teeth}")
+
+    def set_axis_ramp_speed(self, axis: str, speed: float) -> bool:
+        axis_up = axis.upper()
+        if axis_up == "Z":
+            speed = max(0.5, min(150.0, float(speed)))
+            self.state.update_parameters(z_start_speed_mm=speed)
+        elif axis_up == "C":
+            speed = max(0.5, min(100.0, float(speed)))
+            self.state.update_parameters(c_start_speed_deg=speed)
+        elif axis_up == "A":
+            speed = max(0.5, min(100.0, float(speed)))
+            self.state.update_parameters(a_start_speed_deg=speed)
+        return self.send_raw(f"RAMP {axis_up} {speed:.2f}")
+
+    def set_z_ramp_speed(self, speed_mm_s: float) -> bool:
+        return self.set_axis_ramp_speed("Z", speed_mm_s)
 
     def set_driver_invert(self, axis: str, inverted: bool) -> bool:
         return self.send_raw(f"DRIVER INVERT {axis.upper()} {'ON' if inverted else 'OFF'}")

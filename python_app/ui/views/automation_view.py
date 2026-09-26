@@ -67,7 +67,7 @@ class AutomationView(QWidget):
         title_box = QVBoxLayout()
         lbl_title = QLabel("🔁 Automação de Testes & Sequenciador em Loop")
         lbl_title.setStyleSheet("color: #38bdf8; font-size: 16px; font-weight: 800;")
-        lbl_desc = QLabel("Execução contínua de comandos ASCII/CAN via Teensy 4.1 com delays e suporte a broadcast.")
+        lbl_desc = QLabel("Execução contínua de comandos ASCII/CAN com suporte a ESP32-S3 Serial Direta, Teensy 4.1 e Simulador.")
         lbl_desc.setStyleSheet("color: #64748b; font-size: 11px;")
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_desc)
@@ -467,7 +467,7 @@ class AutomationView(QWidget):
 
     def _start_automation(self):
         if not self.comm.is_connected:
-            QMessageBox.warning(self, "Aviso", "Conecte-se ao hardware (Teensy ou Simulador) antes de iniciar a automação.")
+            QMessageBox.warning(self, "Aviso", "Conecte-se ao hardware (ESP32-S3 Serial, Teensy ou Simulador) antes de iniciar a automação.")
             return
 
         script_text = self.txt_script.toPlainText()

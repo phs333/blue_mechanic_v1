@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt
 from python_app.ui.widgets.jog_pad import JogPad
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, HardwareParameters, DeviceState
-from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm
+from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm, DEFAULT_Z_PULLEY_TEETH
 
 class MotionView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -361,7 +361,7 @@ class MotionView(QWidget):
 
     def update_telemetry(self, t: HardwareTelemetry):
         params = self.state.parameters
-        teeth = params.z_pulley_teeth or 16
+        teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
         pos_z_mm = t.get_pos_z_mm(
             teeth,
             params.steps_per_rev[2],

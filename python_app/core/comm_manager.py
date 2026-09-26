@@ -212,6 +212,16 @@ class CommManager(QObject):
             return self.active_client.set_z_pulley_teeth(teeth)
         return False
 
+    def set_axis_ramp_speed(self, axis: str, speed: float) -> bool:
+        if self.active_client and hasattr(self.active_client, 'set_axis_ramp_speed'):
+            return self.active_client.set_axis_ramp_speed(axis, speed)
+        return False
+
+    def set_z_ramp_speed(self, speed_mm_s: float) -> bool:
+        if self.active_client and hasattr(self.active_client, 'set_z_ramp_speed'):
+            return self.active_client.set_z_ramp_speed(speed_mm_s)
+        return False
+
     def set_driver_mode(self, mode: str) -> bool:
         if self.active_client:
             return self.active_client.set_driver_mode(mode)

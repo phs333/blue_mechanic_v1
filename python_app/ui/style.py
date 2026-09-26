@@ -10,7 +10,7 @@ QWidget {
     background-color: #080c14;
     color: #e2e8f0;
     font-family: 'Segoe UI', 'Roboto', 'Inter', -apple-system, sans-serif;
-    font-size: 13px;
+    font-size: 14px;
     selection-background-color: #0284c7;
     selection-color: #ffffff;
 }
@@ -174,14 +174,14 @@ QFrame.node-tile-offline {
 /* Typography & Section Titles */
 QLabel.section-title {
     color: #38bdf8;
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 800;
     letter-spacing: 0.4px;
 }
 
 QLabel.card-title {
     color: #94a3b8;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.6px;
@@ -196,7 +196,7 @@ QLabel.metric-value {
 
 QLabel.metric-unit {
     color: #64748b;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
 }
 
@@ -207,9 +207,9 @@ QPushButton {
     border: 1px solid #23334d;
     border-radius: 8px;
     padding: 8px 16px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    min-height: 22px;
+    min-height: 24px;
 }
 
 QPushButton:hover {
@@ -336,7 +336,7 @@ QPushButton.step-pill {
     border: 1px solid #202e47;
     border-radius: 14px;
     padding: 5px 12px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
 }
 
@@ -351,28 +351,32 @@ QPushButton.step-pill-active {
     border: 1px solid #38bdf8;
     border-radius: 14px;
     padding: 5px 12px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
 }
 
 /* Input Fields & Combos */
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+QLineEdit, QSpinBox, QDoubleSpinBox {
     background-color: #0b1220;
     color: #f1f5f9;
     border: 1px solid #1f2e47;
-    border-radius: 8px;
-    padding: 7px 12px;
-    font-size: 12px;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+QComboBox {
+    background-color: #0b1220;
+    color: #f1f5f9;
+    border: 1px solid #1f2e47;
+    border-radius: 6px;
+    padding: 4px 24px 4px 8px;
+    font-size: 13px;
 }
 
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border: 1px solid #38bdf8;
     background-color: #0e172a;
-}
-
-QComboBox::drop-down {
-    border: none;
-    padding-right: 8px;
 }
 
 QComboBox QAbstractItemView {
@@ -388,7 +392,7 @@ QComboBox QAbstractItemView {
 QLabel.badge {
     border-radius: 6px;
     padding: 2px 6px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.4px;
 }
@@ -468,7 +472,7 @@ QProgressBar {
     border-radius: 4px;
     text-align: center;
     color: #e2e8f0;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
 }
 
@@ -482,7 +486,7 @@ QStatusBar {
     background-color: #090e1a;
     border-top: 1px solid #1e293b;
     color: #94a3b8;
-    font-size: 11px;
+    font-size: 12px;
     padding: 4px;
 }
 
@@ -503,7 +507,7 @@ QFrame.jog-module:hover {
 
 QLabel.jog-module-title {
     color: #38bdf8;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 800;
     letter-spacing: 0.5px;
     padding-bottom: 2px;
@@ -511,7 +515,7 @@ QLabel.jog-module-title {
 
 QLabel.jog-module-title-z {
     color: #34d399;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 800;
     letter-spacing: 0.5px;
     padding-bottom: 2px;
@@ -519,7 +523,7 @@ QLabel.jog-module-title-z {
 
 QLabel.jog-module-sub {
     color: #64748b;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
 }
 
@@ -530,9 +534,9 @@ QPushButton.jog-btn {
     border-radius: 10px;
     color: #e2e8f0;
     font-weight: 700;
-    font-size: 12px;
+    font-size: 13px;
     padding: 10px 14px;
-    min-height: 38px;
+    min-height: 40px;
 }
 
 QPushButton.jog-btn:hover {

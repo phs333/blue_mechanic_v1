@@ -169,7 +169,7 @@ class TeensySerialClient(BaseClient):
 
         tokens = command.split()
         op = tokens[0].upper() if tokens else ""
-        if op in ("M", "MF", "MS", "MSF", "L", "E", "H", "S", "CFG", "OTA_START", "OTA_END", "OTA_ABORT"):
+        if op in ("M", "MF", "MSM", "MSMF", "MS", "MSF", "L", "E", "H", "S", "CFG", "OTA_START", "OTA_END", "OTA_ABORT"):
             self._last_actuation_time = time.time()
 
         try:

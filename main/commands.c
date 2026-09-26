@@ -184,6 +184,10 @@ void commands_print_config(const app_context_t *ctx)
            (unsigned)ctx->settings.z_pulley_teeth,
            (unsigned long)ctx->settings.max_passos_z,
            z_max_mm);
+    printf("CONFIG RAMP_C=%.2f RAMP_A=%.2f RAMP_Z=%.2f\n",
+           ctx->settings.c_start_speed_deg,
+           ctx->settings.a_start_speed_deg,
+           ctx->settings.z_start_speed_mm);
     printf("CONFIG HOME_DEG C=%.2f A=%.2f\n",
            ctx->settings.home_c_deg, ctx->settings.home_a_deg);
     printf("CONFIG LIMITS C=%.2f..%.2f A=%.2f..%.2f\n",
@@ -541,6 +545,62 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             float mm_rev = (float)teeth_z * Z_BELT_PITCH_MM;
             printf("Polia do motor Z configurada para %ld dentes GT2 (passo %.1fmm -> %.2f mm/volta).\n",
                    teeth_z, Z_BELT_PITCH_MM, mm_rev);
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    char ramp_axis = '\0';
+    float ramp_speed = 0.0f;
+    if (sscanf(cmd, "RAMP %c %f", &ramp_axis, &ramp_speed) == 2 ||
+        sscanf(cmd, "SET_RAMP %c %f", &ramp_axis, &ramp_speed) == 2 ||
+        sscanf(cmd, "SPEED_START %c %f", &ramp_axis, &ramp_speed) == 2) {
+        size_t axis_index = 0;
+        char canonical_axis = '\0';
+        if (!parse_axis_token(ramp_axis, &axis_index, &canonical_axis)) {
+            puts("Eixo invalido para rampa. Use C, A ou Z.");
+            return;
+        }
+        if (canonical_axis == 'Z') {
+            if (ramp_speed < 0.5f || ramp_speed > 150.0f) {
+                puts("Velocidade inicial de rampa Z invalida (use entre 0.5 e 150.0 mm/s).");
+                return;
+            }
+            ctx->settings.z_start_speed_mm = ramp_speed;
+        } else if (canonical_axis == 'C') {
+            if (ramp_speed < 0.5f || ramp_speed > 100.0f) {
+                puts("Velocidade inicial de rampa C invalida (use entre 0.5 e 100.0 deg/s).");
+                return;
+            }
+            ctx->settings.c_start_speed_deg = ramp_speed;
+        } else if (canonical_axis == 'A') {
+            if (ramp_speed < 0.5f || ramp_speed > 100.0f) {
+                puts("Velocidade inicial de rampa A invalida (use entre 0.5 e 100.0 deg/s).");
+                return;
+            }
+            ctx->settings.a_start_speed_deg = ramp_speed;
+        }
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            printf("Rampa inicial %c definida para %.2f %s.\n",
+                   canonical_axis, ramp_speed, (canonical_axis == 'Z') ? "mm/s" : "deg/s");
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    float z_ramp_speed = 0.0f;
+    if (sscanf(cmd, "RAMP_Z %f", &z_ramp_speed) == 1) {
+        if (z_ramp_speed < 0.5f || z_ramp_speed > 150.0f) {
+            puts("Velocidade inicial de rampa Z invalida (use entre 0.5 e 150.0 mm/s).");
+            return;
+        }
+        ctx->settings.z_start_speed_mm = z_ramp_speed;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            printf("Rampa inicial Z definida para %.2f mm/s.\n", z_ramp_speed);
         } else {
             printf("Erro ao salvar: %s\n", esp_err_to_name(err));
         }
@@ -1064,120 +1124,125 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    long steps = 0;
-    float move_speed_val = -1.0f;
-    float move_accel_val = -1.0f;
-    char suffix[64];
-    suffix[0] = '\0';
-    char raw_axis_move = '\0';
+    bool is_move_cmd = false;
+    bool is_force_move = false;
+    const char *p_move_args = NULL;
 
-    if (sscanf(cmd, "MOVE %c %ld %63[^\n]", &raw_axis_move, &steps, suffix) >= 2) {
-        size_t axis_index = 0;
-        char axis = '\0';
-        if (!parse_axis_token(raw_axis_move, &axis_index, &axis)) {
-            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
-            return;
-        }
-        // Parse optional S=<speed> F=<accel> params
-        char *sp = suffix;
-        while (sp && *sp) {
-            while (*sp && isspace((unsigned char)*sp)) sp++;
-            if (*sp == 'S') {
-                sp++;
-                if (*sp == '=') sp++;
-                char *endptr = NULL;
-                move_speed_val = strtof(sp, &endptr);
-                if (endptr == sp) {
-                    move_speed_val = -1.0f;
-                }
-                sp = endptr;
-            } else if (*sp == 'F') {
-                sp++;
-                if (*sp == '=') sp++;
-                char *endptr = NULL;
-                move_accel_val = strtof(sp, &endptr);
-                if (endptr == sp) {
-                    move_accel_val = -1.0f;
-                }
-                sp = endptr;
-            } else {
-                break;
-            }
-        }
-        esp_err_t err;
-        if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
-            err = motion_post_move_axis_profile(ctx, axis, (int32_t)steps,
-                                                move_speed_val, move_accel_val,
-                                                false, 0, 0);
-        } else {
-            err = motion_post_move_axis(ctx, axis, (int32_t)steps, 0, 0);
-        }
-        if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
-            puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
-            return;
-        }
-
-        if (err == ESP_OK) {
-            printf("MOVE %c enfileirado.\n", axis);
-        } else {
-            printf("ERRO no MOVE %c: %s\n", axis, esp_err_to_name(err));
-        }
-        return;
+    if (strncmp(cmd, "MOVE_F ", 7) == 0) {
+        is_move_cmd = true;
+        is_force_move = true;
+        p_move_args = cmd + 7;
+    } else if (strncmp(cmd, "MSMF ", 5) == 0) {
+        is_move_cmd = true;
+        is_force_move = true;
+        p_move_args = cmd + 5;
+    } else if (strncmp(cmd, "MF ", 3) == 0) {
+        is_move_cmd = true;
+        is_force_move = true;
+        p_move_args = cmd + 3;
+    } else if (strncmp(cmd, "MOVE ", 5) == 0) {
+        is_move_cmd = true;
+        is_force_move = false;
+        p_move_args = cmd + 5;
+    } else if (strncmp(cmd, "MSM ", 4) == 0) {
+        is_move_cmd = true;
+        is_force_move = false;
+        p_move_args = cmd + 4;
+    } else if (strncmp(cmd, "M ", 2) == 0) {
+        is_move_cmd = true;
+        is_force_move = false;
+        p_move_args = cmd + 2;
     }
 
-    if (sscanf(cmd, "MOVE_F %c %ld %63[^\n]", &raw_axis_move, &steps, suffix) >= 2) {
-        size_t axis_index = 0;
-        char axis = '\0';
-        if (!parse_axis_token(raw_axis_move, &axis_index, &axis)) {
-            puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
-            return;
-        }
-        ESP_LOGI(APP_TAG, "PARSER MOVE_F axis=%c raw_steps=%ld", axis, steps);
+    if (is_move_cmd && p_move_args != NULL) {
+        while (*p_move_args && isspace((unsigned char)*p_move_args)) p_move_args++;
 
-        // Parse optional S=<speed> F=<accel> params
-        char *sp = suffix;
-        while (sp && *sp) {
-            while (*sp && isspace((unsigned char)*sp)) sp++;
-            if (*sp == 'S') {
-                sp++;
-                if (*sp == '=') sp++;
-                char *endptr = NULL;
-                move_speed_val = strtof(sp, &endptr);
-                if (endptr == sp) {
-                    move_speed_val = -1.0f;
-                }
-                sp = endptr;
-            } else if (*sp == 'F') {
-                sp++;
-                if (*sp == '=') sp++;
-                char *endptr = NULL;
-                move_accel_val = strtof(sp, &endptr);
-                if (endptr == sp) {
-                    move_accel_val = -1.0f;
-                }
-                sp = endptr;
+        unsigned target_node = 0;
+        char raw_axis_move = '\0';
+        long steps = 0;
+        char suffix[64] = {0};
+        bool matched = false;
+
+        // Tenta primeiro formato com node ID: "<node> <axis> <steps> [suffix]"
+        if (sscanf(p_move_args, "%u %c %ld %63[^\n]", &target_node, &raw_axis_move, &steps, suffix) >= 3) {
+            // Se target_node for 0 (broadcast) ou igual ao nosso node_id, executamos
+            if (target_node == 0 || target_node == (unsigned)ctx->settings.node_id) {
+                matched = true;
             } else {
-                break;
+                // Comando direcionado a outro no especifico; em conexao serial direta com este no, ignora
+                return;
             }
+        } else if (sscanf(p_move_args, "%c %ld %63[^\n]", &raw_axis_move, &steps, suffix) >= 2) {
+            matched = true;
         }
 
-        esp_err_t err;
-        if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
-            err = motion_post_move_axis_with_params(ctx, axis, (int32_t)steps, move_speed_val, move_accel_val, 0, 0);
-        } else {
-            err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
-        }
-        if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
-            puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
+        if (matched) {
+            size_t axis_index = 0;
+            char axis = '\0';
+            if (!parse_axis_token(raw_axis_move, &axis_index, &axis)) {
+                puts("Eixo invalido. Use C, A ou Z (ou X, Y).");
+                return;
+            }
+
+            // Parse optional S=<speed> F=<accel> params
+            float move_speed_val = -1.0f;
+            float move_accel_val = -1.0f;
+            char *sp = suffix;
+            while (sp && *sp) {
+                while (*sp && isspace((unsigned char)*sp)) sp++;
+                if (*sp == 'S') {
+                    sp++;
+                    if (*sp == '=') sp++;
+                    char *endptr = NULL;
+                    move_speed_val = strtof(sp, &endptr);
+                    if (endptr == sp) {
+                        move_speed_val = -1.0f;
+                    }
+                    sp = endptr;
+                } else if (*sp == 'F') {
+                    sp++;
+                    if (*sp == '=') sp++;
+                    char *endptr = NULL;
+                    move_accel_val = strtof(sp, &endptr);
+                    if (endptr == sp) {
+                        move_accel_val = -1.0f;
+                    }
+                    sp = endptr;
+                } else {
+                    break;
+                }
+            }
+
+            esp_err_t err;
+            if (is_force_move) {
+                ESP_LOGI(APP_TAG, "PARSER MOVE_F axis=%c raw_steps=%ld", axis, steps);
+                if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
+                    err = motion_post_move_axis_with_params(ctx, axis, (int32_t)steps, move_speed_val, move_accel_val, 0, 0);
+                } else {
+                    err = motion_post_move_axis_force(ctx, axis, (int32_t)steps, 0, 0);
+                }
+            } else {
+                if (move_speed_val > 0.0f || move_accel_val > 0.0f) {
+                    err = motion_post_move_axis_profile(ctx, axis, (int32_t)steps,
+                                                        move_speed_val, move_accel_val,
+                                                        false, 0, 0);
+                } else {
+                    err = motion_post_move_axis(ctx, axis, (int32_t)steps, 0, 0);
+                }
+            }
+
+            if (axis == 'Z' && err == ESP_ERR_INVALID_STATE) {
+                puts("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.");
+                return;
+            }
+
+            if (err == ESP_OK) {
+                printf("%s %c enfileirado%s.\n", is_force_move ? "MOVE_F" : "MOVE", axis, is_force_move ? " (sem encoder)" : "");
+            } else {
+                printf("ERRO no %s %c: %s\n", is_force_move ? "MOVE_F" : "MOVE", axis, esp_err_to_name(err));
+            }
             return;
         }
-
-        if (err == ESP_OK) {
-            printf("MOVE_F %c enfileirado (sem encoder).\n", axis);
-        } else {
-            printf("ERRO no MOVE_F %c: %s\n", axis, esp_err_to_name(err));
-        }
-        return;
     }
 
     if (strncmp(cmd, "MOVE_SYNC", 9) == 0) {

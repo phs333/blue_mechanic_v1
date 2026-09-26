@@ -46,6 +46,18 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         settings->z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH;
     }
 
+    if (settings->z_start_speed_mm < 0.5f || settings->z_start_speed_mm > 150.0f) {
+        settings->z_start_speed_mm = 15.0f;
+    }
+
+    if (settings->c_start_speed_deg < 0.5f || settings->c_start_speed_deg > 100.0f) {
+        settings->c_start_speed_deg = 10.0f;
+    }
+
+    if (settings->a_start_speed_deg < 0.5f || settings->a_start_speed_deg > 100.0f) {
+        settings->a_start_speed_deg = 10.0f;
+    }
+
     if (settings->limit_max_c_deg <= settings->limit_min_c_deg || settings->limit_min_c_deg < -3600.0f || settings->limit_max_c_deg > 3600.0f) {
         settings->limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG;
         settings->limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG;

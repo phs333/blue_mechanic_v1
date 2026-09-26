@@ -25,7 +25,7 @@ class JogPad(QFrame):
         self.setProperty("class", "card")
         
         self.current_step_deg = 15.0
-        self.current_step_z_mm = 4.0
+        self.current_step_z_mm = 5.0
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(14, 10, 14, 10)
@@ -74,11 +74,11 @@ class JogPad(QFrame):
         
         self.z_step_group = QButtonGroup(self)
         self.z_pills = {}
-        z_presets = [0.5, 1.0, 4.0, 10.0, 20.0, 50.0, 100.0, 200.0]
+        z_presets = [0.5, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0]
         for mm in z_presets:
             lbl = f"{mm:g} mm"
             btn = QPushButton(lbl)
-            btn.setProperty("class", "step-pill-active-z" if mm == 4.0 else "step-pill")
+            btn.setProperty("class", "step-pill-active-z" if mm == 5.0 else "step-pill")
             btn.clicked.connect(lambda checked, value=mm: self._set_z_step(value))
             self.z_step_group.addButton(btn)
             self.z_pills[mm] = btn

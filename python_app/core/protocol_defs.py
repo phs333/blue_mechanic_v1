@@ -25,8 +25,8 @@ GRAUS_POR_PASSO_CA = 360.0 / PASSOS_POR_VOLTA_MOTOR  # 0.1125 deg/step (Eixos C 
 GRAUS_POR_PASSO_XY = GRAUS_POR_PASSO_CA  # Alias retrocompatibilidade
 
 Z_BELT_PITCH_MM = 2.0  # Correia GT2 = 2.0 mm passo
-DEFAULT_Z_PULLEY_TEETH = 16
-PASSOS_POR_MM_Z = PASSOS_POR_VOLTA_MOTOR / (Z_BELT_PITCH_MM * DEFAULT_Z_PULLEY_TEETH) # 100 steps/mm para 16T
+DEFAULT_Z_PULLEY_TEETH = 20
+PASSOS_POR_MM_Z = PASSOS_POR_VOLTA_MOTOR / (Z_BELT_PITCH_MM * DEFAULT_Z_PULLEY_TEETH) # 80 steps/mm para 20T
 
 def calc_z_mm_per_rev(pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH) -> float:
     teeth = pulley_teeth if pulley_teeth > 0 else DEFAULT_Z_PULLEY_TEETH
@@ -164,3 +164,172 @@ def percent_to_laser_level(percent: int) -> int:
     if percent >= 100:
         return LASER_MAX_USEFUL_DUTY
     return int(round(LASER_MIN_USEFUL_DUTY + ((percent - 1) / 99.0) * (LASER_MAX_USEFUL_DUTY - LASER_MIN_USEFUL_DUTY)))
+
+
+def translate_teensy_to_serial(cmd_str: str, state=None) -> list:
+    """
+    Traduz comandos ASCII do formato Teensy 4.1 / automação para comandos seriais nativos do ESP32-S3.
+    Permite que o sequenciador de testes, automação, presets e comandos diretos funcionem perfeitamente
+    em conexão Serial, suportando comandos com nó (ex: MSM 0 Z 400) ou sem nó (ex: MSM Z 400).
+    """
+    trimmed = cmd_str.strip()
+    if not trimmed:
+        return []
+    parts = trimmed.split()
+    if not parts:
+        return []
+
+    op = parts[0].upper()
+
+    # Pass-through para comandos nativos do ESP32
+    if op in ("STATUS", "TEMP", "LIMITS", "HELP"):
+        return [trimmed]
+    if op == "DRIVER" and len(parts) >= 3 and parts[1].upper() == "ENABLED":
+        return [trimmed]
+
+    params = state.parameters if state and hasattr(state, "parameters") else None
+    spr_c = params.steps_per_rev[0] if params else 200
+    usteps_c = params.tmc_microsteps[0] if params else 16
+    spr_a = params.steps_per_rev[1] if params else 200
+    usteps_a = params.tmc_microsteps[1] if params else 16
+    spr_z = params.steps_per_rev[2] if params else 200
+    usteps_z = params.tmc_microsteps[2] if params else 16
+    teeth = params.z_pulley_teeth if (params and params.z_pulley_teeth > 0) else DEFAULT_Z_PULLEY_TEETH
+
+    # 1. Enable / Disable: E [<target>] <0|1|ON|OFF>
+    if op == "E":
+        val = ""
+        if len(parts) >= 3 and parts[1].isdigit():
+            val = parts[2].strip().upper()
+        elif len(parts) >= 2:
+            val = parts[1].strip().upper()
+        if val in ("1", "ON", "TRUE"):
+            return ["DRIVER ENABLED ON"]
+        elif val in ("0", "OFF", "FALSE"):
+            return ["DRIVER ENABLED OFF"]
+        return [trimmed]
+
+    # 2. Homing: H [<target>] <axis>
+    if op == "H":
+        ax = ""
+        if len(parts) >= 3 and parts[1].isdigit():
+            ax = parts[2].upper()
+        elif len(parts) >= 2:
+            ax = parts[1].upper()
+        if ax == "ALL":
+            return ["HOME C", "HOME A", "HOME Z"]
+        elif ax == "CA":
+            return ["HOME C", "HOME A"]
+        elif ax in ("C", "X", "A", "Y", "Z"):
+            canonical = "C" if ax in ("C", "X") else ("A" if ax in ("A", "Y") else "Z")
+            return [f"HOME {canonical}"]
+        return [trimmed]
+
+    # 3. Lasers: L [<target>] <index> <level>
+    if op == "L":
+        try:
+            if len(parts) >= 4 and parts[1].isdigit():
+                l_idx = int(parts[2])
+                l_val = max(0, min(4095, int(parts[3])))
+                return [f"LASER {l_idx} {l_val}"]
+            elif len(parts) >= 3 and not parts[1].isdigit():
+                l_idx = int(parts[1])
+                l_val = max(0, min(4095, int(parts[2])))
+                return [f"LASER {l_idx} {l_val}"]
+        except ValueError:
+            pass
+        return [trimmed]
+
+    # 4. Fan: F [<target>] <mode>
+    if op == "F":
+        m = ""
+        if len(parts) >= 3 and parts[1].isdigit():
+            m = parts[2].upper()
+        elif len(parts) >= 2:
+            m = parts[1].upper()
+        if m in ("2", "AUTO"):
+            return ["FAN AUTO"]
+        elif m in ("1", "ON"):
+            return ["FAN 1"]
+        elif m in ("0", "OFF"):
+            return ["FAN 0"]
+        return [trimmed]
+
+    # 5. Speed level: S [<target>] <level>
+    if op == "S":
+        try:
+            if len(parts) >= 3 and parts[1].isdigit():
+                lvl = max(1, min(5, int(parts[2])))
+                return [f"VELOCIDADE {lvl}"]
+            elif len(parts) >= 2 and not parts[1].isdigit():
+                lvl = max(1, min(5, int(parts[1])))
+                return [f"VELOCIDADE {lvl}"]
+        except ValueError:
+            pass
+        return [trimmed]
+
+    # 6. Single Axis Move: M / MF / MSM / MSMF / MOVE / MOVE_F [<target>] <axis> <steps> [suffix...]
+    if op in ("M", "MF", "MSM", "MSMF", "MOVE", "MOVE_F"):
+        is_force = op in ("MF", "MSMF", "MOVE_F")
+        cmd_name = "MOVE_F" if is_force else "MOVE"
+        ax = ""
+        steps_str = ""
+        suffix_parts = []
+        if len(parts) >= 4 and parts[1].isdigit():
+            ax = parts[2].upper()
+            steps_str = parts[3]
+            suffix_parts = parts[4:]
+        elif len(parts) >= 3 and not parts[1].isdigit():
+            ax = parts[1].upper()
+            steps_str = parts[2]
+            suffix_parts = parts[3:]
+
+        if ax in ("C", "X", "A", "Y", "Z"):
+            try:
+                steps = int(steps_str)
+                canonical = "C" if ax in ("C", "X") else ("A" if ax in ("A", "Y") else "Z")
+                res = f"{cmd_name} {canonical} {steps}"
+                if suffix_parts:
+                    res += " " + " ".join(suffix_parts)
+                return [res]
+            except ValueError:
+                pass
+        return [trimmed]
+
+    # 7. Synchronized Move: MS / MSF [<target>] <deg_c> <deg_a> <mm_z>
+    if op in ("MS", "MSF"):
+        is_force = (op == "MSF")
+        cmd_name = "MOVE_SYNC_F" if is_force else "MOVE_SYNC"
+        c_str, a_str, z_str = "", "", ""
+        suffix_parts = []
+        if len(parts) >= 5 and parts[1].isdigit():
+            c_str, a_str, z_str = parts[2], parts[3], parts[4]
+            suffix_parts = parts[5:]
+        elif len(parts) >= 4 and not parts[1].isdigit():
+            c_str, a_str, z_str = parts[1], parts[2], parts[3]
+            suffix_parts = parts[4:]
+
+        try:
+            deg_c = float(c_str)
+            deg_a = float(a_str)
+            mm_z = float(z_str)
+            steps_c = calc_ca_steps_for_degrees(deg_c, spr_c, usteps_c)
+            steps_a = calc_ca_steps_for_degrees(deg_a, spr_a, usteps_a)
+            steps_z = calc_z_steps_for_mm(mm_z, teeth, spr_z, usteps_z)
+            res = f"{cmd_name} C {steps_c} A {steps_a} Z {steps_z}"
+            if suffix_parts:
+                res += " " + " ".join(suffix_parts)
+            return [res]
+        except ValueError:
+            pass
+        return [trimmed]
+
+    # 8. Status request: R [<target>]
+    if op == "R":
+        return ["STATUS"]
+
+    # 9. Ping: P [<target>] ...
+    if op == "P":
+        return ["STATUS"]
+
+    return [trimmed]

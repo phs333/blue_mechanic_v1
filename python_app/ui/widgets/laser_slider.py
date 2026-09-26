@@ -32,61 +32,68 @@ class LaserSlider(QFrame):
         self._throttle_timer.timeout.connect(self._flush_throttled_change)
         
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(14, 12, 14, 12)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 6, 10, 6)
+        main_layout.setSpacing(5)
         
         # Header (Title & Status)
         header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
         default_title = "Laser Esquerdo" if laser_index == 1 else "Laser Direito"
         self.lbl_title = QLabel(title or default_title)
-        self.lbl_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 14px;")
+        self.lbl_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
         header_layout.addWidget(self.lbl_title)
         
         header_layout.addStretch()
         
         self.lbl_status = QLabel("0% (0/4095)")
-        self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 13px;")
+        self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
         header_layout.addWidget(self.lbl_status)
         
         main_layout.addLayout(header_layout)
         
         # Slider & Spinbox Row (0% .. 100%, passo de 1 em 1)
         slider_layout = QHBoxLayout()
-        slider_layout.setSpacing(12)
+        slider_layout.setContentsMargins(0, 0, 0, 0)
+        slider_layout.setSpacing(10)
         
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(0)
         self.slider.setSingleStep(1)
         self.slider.setPageStep(10)
+        self.slider.setStyleSheet("min-height: 22px;")
         self.slider.setToolTip("Ajuste de potência do laser de 0% a 100% (Passo de 1%)")
         self.slider.valueChanged.connect(self._on_slider_change)
         self.slider.sliderReleased.connect(self._on_slider_released)
-        slider_layout.addWidget(self.slider, 4)
+        slider_layout.addWidget(self.slider, 1)
         
         self.spin_val = QSpinBox()
         self.spin_val.setRange(0, 100)
         self.spin_val.setValue(0)
         self.spin_val.setSingleStep(1)
         self.spin_val.setSuffix(" %")
+        self.spin_val.setStyleSheet("font-size: 12px; font-weight: 600; min-height: 24px; max-height: 26px; min-width: 65px; padding: 1px 4px;")
         self.spin_val.setToolTip("Digite a porcentagem desejada (0% a 100%)")
         self.spin_val.valueChanged.connect(self._on_spin_change)
-        slider_layout.addWidget(self.spin_val, 1)
+        slider_layout.addWidget(self.spin_val)
         
         main_layout.addLayout(slider_layout)
         
         # Quick Presets Buttons Row
         preset_layout = QHBoxLayout()
+        preset_layout.setContentsMargins(0, 0, 0, 0)
         preset_layout.setSpacing(6)
         
-        self.btn_off = QPushButton("DESLIGAR")
+        self.btn_off = QPushButton("DESL.")
         self.btn_off.setProperty("class", "btn-danger")
+        self.btn_off.setStyleSheet("font-size: 11px; font-weight: 700; min-height: 24px; max-height: 26px; padding: 2px 10px;")
         self.btn_off.setToolTip("Desligar laser (0%)")
         self.btn_off.clicked.connect(lambda: self.set_percent(0))
         preset_layout.addWidget(self.btn_off)
         
         for pct in [10, 25, 50, 75, 100]:
             btn = QPushButton(f"{pct}%")
+            btn.setStyleSheet("font-size: 11px; font-weight: 600; min-height: 24px; max-height: 26px; padding: 2px 8px;")
             raw_lvl = percent_to_laser_level(pct)
             btn.setToolTip(f"Definir {pct}% ({raw_lvl}/4095)")
             btn.clicked.connect(lambda checked, p=pct: self.set_percent(p))
@@ -99,9 +106,9 @@ class LaserSlider(QFrame):
         self.current_raw_level = raw_level
         self.lbl_status.setText(f"{percent}% ({raw_level}/4095)")
         if percent > 0:
-            self.lbl_status.setStyleSheet("color: #f87171; font-weight: 700; font-size: 13px;")
+            self.lbl_status.setStyleSheet("color: #f87171; font-weight: 700; font-size: 12px;")
         else:
-            self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 13px;")
+            self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
 
     def _flush_throttled_change(self):
         if self._pending_raw_level is not None:

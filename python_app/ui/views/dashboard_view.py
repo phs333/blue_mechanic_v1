@@ -10,7 +10,7 @@ Kinematics Architecture:
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox, QMessageBox,
-    QTabWidget
+    QTabWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt
 from python_app.ui.widgets.status_card import StatusCard
@@ -18,7 +18,7 @@ from python_app.ui.widgets.jog_pad import JogPad
 from python_app.ui.widgets.laser_slider import LaserSlider
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, DeviceState
-from python_app.core.protocol_defs import FanMode, calc_ca_steps_for_degrees, calc_z_steps_for_mm
+from python_app.core.protocol_defs import FanMode, calc_ca_steps_for_degrees, calc_z_steps_for_mm, DEFAULT_Z_PULLEY_TEETH
 
 class DashboardView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -133,95 +133,125 @@ class DashboardView(QWidget):
         
         # Right Column: Direct Move + Lasers & Fan Controls
         right_vbox = QVBoxLayout()
-        right_vbox.setSpacing(14)
+        right_vbox.setSpacing(8)
         right_vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 3A. Precise Move Card (Individual & Synchronized Move Tabs)
+        # 3A. Precise Move Card (Compact Individual & Synchronized Move Tabs)
         move_card = QFrame()
         move_card.setProperty("class", "card")
+        move_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         move_card_layout = QVBoxLayout(move_card)
-        move_card_layout.setContentsMargins(12, 10, 12, 10)
-        move_card_layout.setSpacing(8)
+        move_card_layout.setContentsMargins(10, 6, 10, 6)
+        move_card_layout.setSpacing(4)
 
         move_tabs = QTabWidget()
+        move_tabs.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         # --- Tab 1: Individual Axis Move ---
         tab_indiv = QWidget()
         tab_indiv_layout = QVBoxLayout(tab_indiv)
-        tab_indiv_layout.setContentsMargins(4, 6, 4, 4)
-        tab_indiv_layout.setSpacing(8)
+        tab_indiv_layout.setContentsMargins(6, 6, 6, 6)
+        tab_indiv_layout.setSpacing(6)
+        tab_indiv_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         form_grid = QGridLayout()
+        form_grid.setContentsMargins(0, 0, 0, 0)
         form_grid.setSpacing(6)
 
-        form_grid.addWidget(QLabel("Eixo Alvo:"), 0, 0)
+        lbl_eixo = QLabel("Eixo:")
+        lbl_eixo.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        form_grid.addWidget(lbl_eixo, 0, 0)
         self.combo_axis = QComboBox()
         self.combo_axis.addItems(["Eixo C (Base Rotativa)", "Eixo A (Pivot Lasers)", "Eixo Z (Linear)"])
+        self.combo_axis.setStyleSheet("max-height: 26px; font-size: 11px;")
         form_grid.addWidget(self.combo_axis, 0, 1)
 
-        form_grid.addWidget(QLabel("Passos:"), 1, 0)
+        lbl_passos = QLabel("Passos:")
+        lbl_passos.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        form_grid.addWidget(lbl_passos, 0, 2)
         self.spin_steps = QSpinBox()
         self.spin_steps.setRange(-2000000, 2000000)
         self.spin_steps.setValue(1000)
         self.spin_steps.setSingleStep(100)
-        form_grid.addWidget(self.spin_steps, 1, 1)
+        self.spin_steps.setStyleSheet("max-height: 26px; font-size: 11px;")
+        form_grid.addWidget(self.spin_steps, 0, 3)
 
-        form_grid.addWidget(QLabel("Velocidade:"), 2, 0)
+        lbl_vel = QLabel("Velocidade:")
+        lbl_vel.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        form_grid.addWidget(lbl_vel, 1, 0)
         self.spin_speed = QDoubleSpinBox()
         self.spin_speed.setRange(0.0, 5000.0)
         self.spin_speed.setValue(0.0)
         self.spin_speed.setSpecialValueText("Padrão NVS")
-        form_grid.addWidget(self.spin_speed, 2, 1)
+        self.spin_speed.setStyleSheet("max-height: 26px; font-size: 11px;")
+        form_grid.addWidget(self.spin_speed, 1, 1)
 
         self.chk_force_direct = QCheckBox("Forçar sem encoder (MOVE_F)")
-        form_grid.addWidget(self.chk_force_direct, 3, 0, 1, 2)
+        self.chk_force_direct.setStyleSheet("color: #f59e0b; font-size: 11px;")
+        form_grid.addWidget(self.chk_force_direct, 1, 2, 1, 2)
 
         tab_indiv_layout.addLayout(form_grid)
 
         move_btn_row = QHBoxLayout()
+        move_btn_row.setContentsMargins(0, 0, 0, 0)
+        move_btn_row.setSpacing(6)
         self.btn_execute_move = QPushButton("🚀 Executar Movimento")
         self.btn_execute_move.setProperty("class", "btn-primary")
+        self.btn_execute_move.setStyleSheet("max-height: 28px; font-size: 11px; font-weight: 700; padding: 4px 8px;")
         self.btn_execute_move.clicked.connect(self._execute_direct_move)
         move_btn_row.addWidget(self.btn_execute_move)
 
         self.btn_set_zero_direct = QPushButton("📍 Gravar Zero (SETHOME)")
+        self.btn_set_zero_direct.setStyleSheet("max-height: 28px; font-size: 11px; padding: 4px 8px;")
         self.btn_set_zero_direct.clicked.connect(self._execute_direct_sethome)
         move_btn_row.addWidget(self.btn_set_zero_direct)
         tab_indiv_layout.addLayout(move_btn_row)
+        tab_indiv_layout.addStretch()
 
         move_tabs.addTab(tab_indiv, "🎯 Eixo Individual")
 
         # --- Tab 2: Simultaneous Move C+A+Z ---
         tab_sync = QWidget()
         tab_sync_layout = QVBoxLayout(tab_sync)
-        tab_sync_layout.setContentsMargins(4, 6, 4, 4)
-        tab_sync_layout.setSpacing(8)
+        tab_sync_layout.setContentsMargins(6, 6, 6, 6)
+        tab_sync_layout.setSpacing(6)
+        tab_sync_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         sync_grid = QGridLayout()
+        sync_grid.setContentsMargins(0, 0, 0, 0)
         sync_grid.setSpacing(6)
 
-        sync_grid.addWidget(QLabel("Graus C:"), 0, 0)
+        lbl_sync_c = QLabel("Graus C:")
+        lbl_sync_c.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        sync_grid.addWidget(lbl_sync_c, 0, 0)
         self.spin_sync_c = QDoubleSpinBox()
         self.spin_sync_c.setRange(-360.0, 360.0)
         self.spin_sync_c.setValue(0.0)
         self.spin_sync_c.setSingleStep(5.0)
         self.spin_sync_c.setSuffix(" °")
+        self.spin_sync_c.setStyleSheet("max-height: 26px; font-size: 11px;")
         sync_grid.addWidget(self.spin_sync_c, 0, 1)
 
-        sync_grid.addWidget(QLabel("Graus A:"), 0, 2)
+        lbl_sync_a = QLabel("Graus A:")
+        lbl_sync_a.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        sync_grid.addWidget(lbl_sync_a, 0, 2)
         self.spin_sync_a = QDoubleSpinBox()
         self.spin_sync_a.setRange(-360.0, 360.0)
         self.spin_sync_a.setValue(0.0)
         self.spin_sync_a.setSingleStep(5.0)
         self.spin_sync_a.setSuffix(" °")
+        self.spin_sync_a.setStyleSheet("max-height: 26px; font-size: 11px;")
         sync_grid.addWidget(self.spin_sync_a, 0, 3)
 
-        sync_grid.addWidget(QLabel("Desloc. Z:"), 1, 0)
+        lbl_sync_z = QLabel("Desloc. Z:")
+        lbl_sync_z.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        sync_grid.addWidget(lbl_sync_z, 1, 0)
         self.spin_sync_z = QDoubleSpinBox()
         self.spin_sync_z.setRange(-500.0, 500.0)
         self.spin_sync_z.setValue(0.0)
         self.spin_sync_z.setSingleStep(5.0)
         self.spin_sync_z.setSuffix(" mm")
+        self.spin_sync_z.setStyleSheet("max-height: 26px; font-size: 11px;")
         sync_grid.addWidget(self.spin_sync_z, 1, 1)
 
         self.chk_sync_force = QCheckBox("Forçar sem encoder (MOVE_SYNC_F)")
@@ -232,25 +262,29 @@ class DashboardView(QWidget):
 
         self.btn_sync_move = QPushButton("⚡ Mover C, A e Z Simultaneamente (MOVE_SYNC)")
         self.btn_sync_move.setProperty("class", "btn-warning")
+        self.btn_sync_move.setStyleSheet("max-height: 28px; font-size: 11px; font-weight: 700; padding: 4px 8px;")
         self.btn_sync_move.clicked.connect(self._execute_sync_move)
         tab_sync_layout.addWidget(self.btn_sync_move)
+        tab_sync_layout.addStretch()
 
         move_tabs.addTab(tab_sync, "⚡ Simultâneo (C+A+Z)")
 
         move_card_layout.addWidget(move_tabs)
         right_vbox.addWidget(move_card)
 
-        # 3B. Lasers & Fan Controls Card
+        # 3B. Lasers & Fan Controls Card (Stacked layout, full-width comfort)
         periph_card = QFrame()
         periph_card.setProperty("class", "card")
         periph_vbox = QVBoxLayout(periph_card)
-        periph_vbox.setContentsMargins(14, 12, 14, 12)
-        periph_vbox.setSpacing(10)
+        periph_vbox.setContentsMargins(10, 8, 10, 8)
+        periph_vbox.setSpacing(6)
         
         periph_title = QLabel("Lasers no Pivot & Ventoinha")
         periph_title.setProperty("class", "section-title")
+        periph_title.setStyleSheet("font-size: 13px; font-weight: 700; margin-bottom: 2px;")
         periph_vbox.addWidget(periph_title)
         
+        # Stacked layout (um sobre o outro): full horizontal width for each laser slider
         self.laser1_ctrl = LaserSlider(1, "Laser 1 Esquerdo (PWM)")
         self.laser1_ctrl.laser_level_changed.connect(self.comm.set_laser)
         periph_vbox.addWidget(self.laser1_ctrl)
@@ -259,28 +293,37 @@ class DashboardView(QWidget):
         self.laser2_ctrl.laser_level_changed.connect(self.comm.set_laser)
         periph_vbox.addWidget(self.laser2_ctrl)
 
-        # Fan Controls
+        # Fan Controls Row (Generous and easy to click)
         fan_row = QHBoxLayout()
+        fan_row.setContentsMargins(0, 0, 0, 0)
+        fan_row.setSpacing(8)
         fan_lbl = QLabel("Ventoinha:")
-        fan_lbl.setStyleSheet("color: #94a3b8; font-weight: 600; font-size: 11px;")
+        fan_lbl.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
         fan_row.addWidget(fan_lbl)
 
         self.btn_fan_off = QPushButton("Desligada")
+        self.btn_fan_off.setProperty("class", "btn-fan")
+        self.btn_fan_off.setStyleSheet("font-size: 12px; min-height: 26px; max-height: 28px; padding: 3px 12px;")
         self.btn_fan_off.clicked.connect(lambda: self._set_fan_mode(0))
         fan_row.addWidget(self.btn_fan_off)
 
         self.btn_fan_on = QPushButton("Ligada")
+        self.btn_fan_on.setProperty("class", "btn-fan")
+        self.btn_fan_on.setStyleSheet("font-size: 12px; min-height: 26px; max-height: 28px; padding: 3px 12px;")
         self.btn_fan_on.clicked.connect(lambda: self._set_fan_mode(1))
         fan_row.addWidget(self.btn_fan_on)
 
         self.btn_fan_auto = QPushButton("Auto (≥45°C)")
         self.btn_fan_auto.setProperty("class", "btn-fan-active")
+        self.btn_fan_auto.setStyleSheet("font-size: 12px; min-height: 26px; max-height: 28px; padding: 3px 12px;")
         self.btn_fan_auto.clicked.connect(lambda: self._set_fan_mode(2))
         fan_row.addWidget(self.btn_fan_auto)
+        fan_row.addStretch()
 
         periph_vbox.addLayout(fan_row)
         
         right_vbox.addWidget(periph_card)
+        right_vbox.addStretch()
         row_layout.addLayout(right_vbox, 2)
         self.main_layout.addLayout(row_layout)
         
@@ -321,7 +364,7 @@ class DashboardView(QWidget):
         mm_z = self.spin_sync_z.value()
         steps_c = calc_ca_steps_for_degrees(deg_c, params.steps_per_rev[0], params.tmc_microsteps[0])
         steps_a = calc_ca_steps_for_degrees(deg_a, params.steps_per_rev[1], params.tmc_microsteps[1])
-        teeth = params.z_pulley_teeth or 16
+        teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
         steps_z = calc_z_steps_for_mm(mm_z, teeth, params.steps_per_rev[2], params.tmc_microsteps[2])
         force = self.chk_sync_force.isChecked()
 
@@ -399,7 +442,7 @@ class DashboardView(QWidget):
         
         # Update Z
         params = self.state.parameters
-        teeth = params.z_pulley_teeth or 16
+        teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
         pos_z_mm = t.get_pos_z_mm(
             teeth,
             params.steps_per_rev[2],

@@ -164,10 +164,11 @@ static void normalize_rmt_frequencies(uint32_t *start_freq_hz, uint32_t *target_
     }
 
     uint32_t start = *start_freq_hz;
-    if (target <= ramp_threshold_hz) {
+    if (target <= 40U) {
         start = target;
     } else if (start < RMT_MIN_STEP_FREQ_HZ || start >= target) {
-        start = target / start_divisor;
+        // Soft launch frequency (50-80 Hz = 5.6-9.0 deg/s) for smooth stepper engagement
+        start = (target > 200U) ? 75U : (target / 2U);
         if (start < RMT_MIN_STEP_FREQ_HZ) {
             start = RMT_MIN_STEP_FREQ_HZ;
         }
@@ -358,7 +359,7 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         return ESP_ERR_INVALID_STATE;
     }
 
-    normalize_rmt_frequencies(&start_freq_hz, &target_freq_hz, 600U, 3U);
+    normalize_rmt_frequencies(&start_freq_hz, &target_freq_hz, 40U, 3U);
 
     uint32_t accel_steps = ramp_steps;
     uint32_t decel_steps = ramp_steps;
@@ -367,8 +368,8 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         decel_steps = RMT_MAX_RAMP_SAMPLES;
     }
 
-    // For short moves (like JOGs <= 24 steps), run directly with uniform speed
-    bool use_ramp = (total_steps > 24U) && (accel_steps >= 2U) && (target_freq_hz > (start_freq_hz + 30U));
+    // Enable S-curve ramp even on short displacements down to 4 steps:
+    bool use_ramp = (total_steps > 4U) && (accel_steps >= 2U) && (target_freq_hz > (start_freq_hz + 10U));
 
     if (use_ramp) {
         if (accel_steps * 2U > total_steps) {
@@ -506,7 +507,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
         if (start_freq_c < RMT_MIN_STEP_FREQ_HZ) start_freq_c = RMT_MIN_STEP_FREQ_HZ;
         if (start_freq_c >= target_freq_c) start_freq_c = target_freq_c / 2U;
 
-        use_ramp_c = (steps_c > 24U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 20U));
+        use_ramp_c = (steps_c > 4U) && (accel_c >= 2U) && (target_freq_c > (start_freq_c + 15U));
         if (use_ramp_c) {
             if (accel_c * 2U > steps_c) {
                 accel_c = steps_c / 2U;
@@ -532,7 +533,7 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
         if (start_freq_a < RMT_MIN_STEP_FREQ_HZ) start_freq_a = RMT_MIN_STEP_FREQ_HZ;
         if (start_freq_a >= target_freq_a) start_freq_a = target_freq_a / 2U;
 
-        use_ramp_a = (steps_a > 24U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 20U));
+        use_ramp_a = (steps_a > 4U) && (accel_a >= 2U) && (target_freq_a > (start_freq_a + 15U));
         if (use_ramp_a) {
             if (accel_a * 2U > steps_a) {
                 accel_a = steps_a / 2U;

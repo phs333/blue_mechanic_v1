@@ -206,6 +206,43 @@ class AutomationWorkerTests(unittest.TestCase):
         with self.assertRaises(ScriptExpansionError):
             parse_script(script)
 
+    def test_serial_client_translates_automation_teensy_commands(self):
+        from unittest.mock import MagicMock
+        from python_app.core.serial_client import SerialClient
+        client = SerialClient(self.state)
+        mock_port = MagicMock()
+        mock_port.is_open = True
+        client.serial_port = mock_port
+        client.is_connected = True
+
+        # Test Teensy enable command
+        client.send_raw("E 0 1")
+        mock_port.write.assert_called_with(b"DRIVER ENABLED ON\r\n")
+
+        # Test Teensy Home Z command
+        client.send_raw("H 0 Z")
+        mock_port.write.assert_called_with(b"HOME Z\r\n")
+
+        # Test Teensy laser command
+        client.send_raw("L 0 1 1024")
+        mock_port.write.assert_called_with(b"LASER 1 1024\r\n")
+
+        # Test Teensy fan command
+        client.send_raw("F 0 1")
+        mock_port.write.assert_called_with(b"FAN 1\r\n")
+
+        # Test Teensy speed command
+        client.send_raw("S 0 4")
+        mock_port.write.assert_called_with(b"VELOCIDADE 4\r\n")
+
+        # Test RAMP Z config command
+        client.set_z_ramp_speed(25.5)
+        mock_port.write.assert_called_with(b"RAMP Z 25.50\r\n")
+
+        # Test RAMP Z parsing from config dump
+        client._parse_response_line("CONFIG RAMP_Z=35.00")
+        self.assertEqual(self.state.parameters.z_start_speed_mm, 35.0)
+
 
 if __name__ == "__main__":
     unittest.main()

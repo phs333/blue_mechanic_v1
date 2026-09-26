@@ -116,6 +116,14 @@ class BaseClient(ABC):
     def set_length_z(self, steps: int) -> bool:
         return self._unsupported("Limite do eixo Z")
 
+    def set_axis_ramp_speed(self, axis: str, speed: float) -> bool:
+        """Set axis S-Curve start/ramp speed (deg/s for C/A, mm/s for Z)."""
+        return self._unsupported(f"Rampa do eixo {axis}")
+
+    def set_z_ramp_speed(self, speed_mm_s: float) -> bool:
+        """Legacy helper for setting Z ramp speed."""
+        return self.set_axis_ramp_speed("Z", speed_mm_s)
+
     def set_driver_mode(self, mode: str) -> bool:
         """Set driver bus mode (STEPDIR or UART)."""
         return self._unsupported("Modo do driver")

@@ -82,8 +82,8 @@
 #define PASSOS_ALIVIO_EXTRA_Z 400
 
 #define Z_BELT_PITCH_MM 2.0f
-#define Z_BELT_PULLEY_TEETH 16U
-#define DEFAULT_Z_PULLEY_TEETH 16U
+#define Z_BELT_PULLEY_TEETH 20U
+#define DEFAULT_Z_PULLEY_TEETH 20U
 
 #define INVERTER_C true
 #define INVERTER_A true
@@ -96,7 +96,7 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 11U
+#define SETTINGS_VERSION 15U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
@@ -106,11 +106,11 @@
 #define DEFAULT_LIMIT_MAX_C_DEG 540.0f
 #define DEFAULT_LIMIT_MIN_A_DEG -540.0f
 #define DEFAULT_LIMIT_MAX_A_DEG 540.0f
-#define DEFAULT_MAX_Z_STEPS 20000
-#define DEFAULT_Z_PULLEY_TEETH 16U // Polia padrão GT2 16 dentes no motor Z
+#define DEFAULT_MAX_Z_STEPS 38400
+#define DEFAULT_Z_PULLEY_TEETH 20U // Polia padrão GT2 20 dentes no motor Z
 
 #define DEFAULT_NODE_ID 1
-#define DEFAULT_CAN_ENABLED 1
+#define DEFAULT_CAN_ENABLED 0
 #define DEFAULT_CAN_COMMAND_BASE_ID 0x200
 #define DEFAULT_CAN_STATUS_BASE_ID 0x280
 #define DEFAULT_CAN_EVENT_BASE_ID 0x300
@@ -130,11 +130,11 @@
 // Velocidade máxima em deg/s para C/A (1..2 rev/s), mm/s para Z (GT2 16T = 32mm/rev)
 #define DEFAULT_SPEED_MAX_DEG_S_CA 720.0f
 #define DEFAULT_SPEED_MAX_DEG_S_XY DEFAULT_SPEED_MAX_DEG_S_CA
-#define DEFAULT_SPEED_MAX_MM_S_Z   60.0f
+#define DEFAULT_SPEED_MAX_MM_S_Z   300.0f
 // Aceleração máxima em deg/s² para C/A, mm/s² para Z
 #define DEFAULT_ACCEL_MAX_DEG_S2_CA 3600.0f
 #define DEFAULT_ACCEL_MAX_DEG_S2_XY DEFAULT_ACCEL_MAX_DEG_S2_CA
-#define DEFAULT_ACCEL_MAX_MM_S2_Z    800.0f
+#define DEFAULT_ACCEL_MAX_MM_S2_Z    2000.0f
 
 // --- Limites mínimos/máximos para validação ---
 #define SPEED_MIN_DEG_S_CA 0.1f
@@ -202,6 +202,9 @@ typedef struct {
     float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     uint16_t z_pulley_teeth;       // número de dentes da polia GT2 no motor Z (ex: 16, 20)
+    float c_start_speed_deg;       // velocidade inicial de partida da rampa S-Curve C (deg/s)
+    float a_start_speed_deg;       // velocidade inicial de partida da rampa S-Curve A (deg/s)
+    float z_start_speed_mm;        // velocidade inicial de partida da rampa S-Curve Z (mm/s)
     uint8_t inverter[AXIS_COUNT];  // inversão de direção persistida por eixo (C, A, Z)
     union {
         struct {
@@ -297,23 +300,26 @@ typedef struct {
         .can_bitrate = DEFAULT_CAN_BITRATE, \
         .driver_bus_mode = DRIVER_BUS_MODE_UART_OPTIONAL, \
         .tmc_slave_addr = {0, 1, 2},        \
-        .tmc_ihold = {5, 5, 6},             \
+        .tmc_ihold = {8, 8, 6},             \
         .tmc_irun = {14, 14, 15},           \
         .tmc_ihold_delay = {6, 6, 6},       \
         .tmc_microsteps = {16, 16, 16},      \
         .tmc_spreadcycle = {0, 0, 0},        \
         .steps_per_rev = {200, 200, 200},    \
         .speed_delay_us = {400, 400, 400},   \
-        .accel = {1800.0f, 1800.0f, 300.0f}, \
+        .accel = {1800.0f, 1800.0f, 1000.0f}, \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH, \
+        .c_start_speed_deg = 10.0f, \
+        .a_start_speed_deg = 10.0f, \
+        .z_start_speed_mm = 15.0f, \
         .inverter = {INVERTER_C, INVERTER_A, false}, \
         .limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG, \
         .limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG, \
         .limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG, \
         .limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG, \
-        .speed = {140.0f, 140.0f, 12.5f}, \
+        .speed = {140.0f, 140.0f, 250.0f}, \
         .home_raw = {0, 0} \
     }
 

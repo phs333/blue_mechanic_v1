@@ -139,7 +139,7 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(opcode, CanOpcode.MOVE_SYNC)
         self.assertEqual(angle_c_deci, 900)
         self.assertEqual(angle_a_deci, -450)
-        self.assertEqual(distance_z_centi, 1000)
+        self.assertEqual(distance_z_centi, 1250)
         self.assertEqual(flags, 0x01)
 
     def test_move_sync_sends_axis_profiles_before_trigger_when_requested(self):
@@ -227,7 +227,7 @@ class TeensySerialProtocolTests(unittest.TestCase):
                 force_no_encoder=True,
             )
         )
-        self.assertEqual(self.client.commands, ["MSF 3 90.0 -45.0 10.00"])
+        self.assertEqual(self.client.commands, ["MSF 3 90.0 -45.0 12.50"])
 
     def test_status_and_position_lines_update_selected_node(self):
         self.client._parse_response_line("STATUS 3 61 4095 2048 1 2 4")
@@ -303,7 +303,7 @@ class TeensySerialProtocolTests(unittest.TestCase):
                 "H 0 C",
                 "M 0 A 400",
                 "MF 0 Z -500",
-                "MS 0 90.0 -45.0 10.00",
+                "MS 0 90.0 -45.0 12.50",
                 "L 0 1 4095",
                 "F 0 2",
                 "S 0 5",
@@ -533,6 +533,75 @@ class SerialProtocolTests(unittest.TestCase):
         slider._last_user_time = time.time() - 2.0
         slider.update_from_telemetry(0)
         self.assertEqual(slider.current_percent, 0) # Now accepted!
+
+    def test_translate_teensy_to_serial_move_variants(self):
+        from python_app.core.protocol_defs import translate_teensy_to_serial
+
+        # Format MSM with target node
+        self.assertEqual(translate_teensy_to_serial("MSM 0 Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MSM 1 C -200"), ["MOVE C -200"])
+        self.assertEqual(translate_teensy_to_serial("MSMF 0 Z 400"), ["MOVE_F Z 400"])
+
+        # Format MSM without target node
+        self.assertEqual(translate_teensy_to_serial("MSM Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MSM A 150"), ["MOVE A 150"])
+        self.assertEqual(translate_teensy_to_serial("MSMF Z -300"), ["MOVE_F Z -300"])
+
+        # Standard M / MF with or without node
+        self.assertEqual(translate_teensy_to_serial("M 0 Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("M Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MF 0 Z 400"), ["MOVE_F Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MF Z 400"), ["MOVE_F Z 400"])
+
+        # Native MOVE / MOVE_F with or without node
+        self.assertEqual(translate_teensy_to_serial("MOVE 0 Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MOVE Z 400"), ["MOVE Z 400"])
+        self.assertEqual(translate_teensy_to_serial("MOVE_F 0 Z 400"), ["MOVE_F Z 400"])
+
+        # With speed and accel suffixes
+        self.assertEqual(translate_teensy_to_serial("MSM 0 C 400 S=100 F=500"), ["MOVE C 400 S=100 F=500"])
+
+    def test_multi_axis_ramp_speed_serial_and_parser(self):
+        state = DeviceState()
+        client = SerialClient(state)
+        sent = []
+        client.send_raw = lambda cmd: sent.append(cmd) or True
+
+        # Test setting ramp speeds
+        client.set_axis_ramp_speed("C", 12.5)
+        self.assertEqual(sent[-1], "RAMP C 12.50")
+        self.assertEqual(state.parameters.c_start_speed_deg, 12.5)
+
+        client.set_axis_ramp_speed("A", 25.0)
+        self.assertEqual(sent[-1], "RAMP A 25.00")
+        self.assertEqual(state.parameters.a_start_speed_deg, 25.0)
+
+        client.set_axis_ramp_speed("Z", 18.0)
+        self.assertEqual(sent[-1], "RAMP Z 18.00")
+        self.assertEqual(state.parameters.z_start_speed_mm, 18.0)
+
+        # Test parsing CONFIG RAMP with multi-axis values
+        client._parse_response_line("CONFIG RAMP_C=14.50 RAMP_A=22.30 RAMP_Z=35.00")
+        self.assertEqual(state.parameters.c_start_speed_deg, 14.50)
+        self.assertEqual(state.parameters.a_start_speed_deg, 22.30)
+        self.assertEqual(state.parameters.z_start_speed_mm, 35.00)
+
+    def test_simulator_multi_axis_ramp_speed(self):
+        from python_app.core.simulator import SimulatorClient
+        state = DeviceState()
+        sim = SimulatorClient(state)
+
+        sim.set_axis_ramp_speed("C", 8.0)
+        sim.set_axis_ramp_speed("A", 12.0)
+        sim.set_axis_ramp_speed("Z", 20.0)
+
+        self.assertEqual(state.parameters.c_start_speed_deg, 8.0)
+        self.assertEqual(state.parameters.a_start_speed_deg, 12.0)
+        self.assertEqual(state.parameters.z_start_speed_mm, 20.0)
+
+        # Test sending command through send_raw
+        sim.send_raw("RAMP C 16.5")
+        self.assertEqual(state.parameters.c_start_speed_deg, 16.5)
 
 
 if __name__ == "__main__":

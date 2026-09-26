@@ -16,7 +16,7 @@ import random
 from typing import Optional
 from .base_client import BaseClient
 from .state_model import DeviceState
-from .protocol_defs import FanMode, calc_ca_degrees_per_step, calc_z_mm_per_step
+from .protocol_defs import FanMode, calc_ca_degrees_per_step, calc_z_mm_per_step, translate_teensy_to_serial, DEFAULT_Z_PULLEY_TEETH
 
 class SimulatorClient(BaseClient):
     def __init__(self, state: DeviceState):
@@ -28,7 +28,7 @@ class SimulatorClient(BaseClient):
         self.sim_c_deg = 0.0  # Base Rotativa
         self.sim_a_deg = 0.0  # Pivot dos Lasers
         self.sim_z_steps = 0  # Atuador Linear
-        self.max_z_steps = 20000
+        self.max_z_steps = 38400
         self.target_c_deg = 0.0
         self.target_a_deg = 0.0
         self.target_z_steps = 0
@@ -155,37 +155,65 @@ class SimulatorClient(BaseClient):
 
     def send_raw(self, cmd: str) -> bool:
         self.state.raw_message_received.emit("TX", cmd)
-        time.sleep(0.02)
+        time.sleep(0.01)
         
-        cmd_u = cmd.strip().upper()
-        if cmd_u == "STATUS":
-            self.request_status()
-        elif "PULLEY Z" in cmd_u or "SET_PULLEY Z" in cmd_u:
-            parts = cmd_u.split()
-            if len(parts) >= 3:
-                try:
-                    self.set_z_pulley_teeth(int(parts[2]))
-                except ValueError:
-                    pass
-        elif "DRIVER ENABLED ON" in cmd_u:
-            self.set_driver_enabled(True)
-        elif "DRIVER ENABLED OFF" in cmd_u:
-            self.set_driver_enabled(False)
-        elif "ALARM ON" in cmd_u:
-            self.set_alarm_z(True)
-        elif "ALARM OFF" in cmd_u:
-            self.set_alarm_z(False)
-        elif "HOME" in cmd_u:
-            parts = cmd_u.split()
-            if len(parts) > 1:
-                self.home_axis(parts[1])
-        else:
-            self.state.raw_message_received.emit("RX", f"OK: {cmd}")
+        translated_cmds = translate_teensy_to_serial(cmd, self.state)
+        for single_cmd in translated_cmds:
+            cmd_u = single_cmd.strip().upper()
+            if cmd_u == "STATUS":
+                self.request_status()
+            elif "PULLEY Z" in cmd_u or "SET_PULLEY Z" in cmd_u:
+                parts = cmd_u.split()
+                if len(parts) >= 3:
+                    try:
+                        self.set_z_pulley_teeth(int(parts[2]))
+                    except ValueError:
+                        pass
+            elif cmd_u.startswith("RAMP ") or cmd_u.startswith("SET_RAMP ") or cmd_u.startswith("SPEED_START "):
+                parts = cmd_u.split()
+                if len(parts) >= 3:
+                    try:
+                        self.set_axis_ramp_speed(parts[1], float(parts[2]))
+                    except ValueError:
+                        pass
+            elif "DRIVER ENABLED ON" in cmd_u:
+                self.set_driver_enabled(True)
+            elif "DRIVER ENABLED OFF" in cmd_u:
+                self.set_driver_enabled(False)
+            elif "ALARM ON" in cmd_u:
+                self.set_alarm_z(True)
+            elif "ALARM OFF" in cmd_u:
+                self.set_alarm_z(False)
+            elif "HOME" in cmd_u:
+                parts = cmd_u.split()
+                if len(parts) > 1:
+                    self.home_axis(parts[1])
+            elif "MOVE_SYNC" in cmd_u:
+                # Basic simulated sync move response
+                self.state.raw_message_received.emit("RX", f"OK: {single_cmd}")
+            else:
+                self.state.raw_message_received.emit("RX", f"OK: {single_cmd}")
         return True
+
+    def set_axis_ramp_speed(self, axis: str, speed: float) -> bool:
+        axis_up = axis.upper()
+        if axis_up == "Z":
+            speed = max(0.5, min(150.0, float(speed)))
+            self.state.update_parameters(z_start_speed_mm=speed)
+        elif axis_up == "C":
+            speed = max(0.5, min(100.0, float(speed)))
+            self.state.update_parameters(c_start_speed_deg=speed)
+        elif axis_up == "A":
+            speed = max(0.5, min(100.0, float(speed)))
+            self.state.update_parameters(a_start_speed_deg=speed)
+        return True
+
+    def set_z_ramp_speed(self, speed_mm_s: float) -> bool:
+        return self.set_axis_ramp_speed("Z", speed_mm_s)
 
     def request_status(self) -> bool:
         params = self.state.parameters
-        teeth = params.z_pulley_teeth or 16
+        teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
         mm_step = calc_z_mm_per_step(
             teeth,
             params.steps_per_rev[2],

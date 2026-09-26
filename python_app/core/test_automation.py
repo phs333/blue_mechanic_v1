@@ -1166,9 +1166,9 @@ def parse_script(
         # If force_broadcast is true, replace explicit node parameter in standard Teensy actuation commands
         if force_broadcast:
             # Pattern: (COMMAND) <node_number> <args...>
-            # Commands: M, MF, MS, MSF, H, E, S, L, F
+            # Commands: M, MF, MSM, MSMF, MS, MSF, H, E, S, L, F
             teensy_actuation_pattern = re.match(
-                r"^(M|MF|MS|MSF|H|E|S|L|F)\s+(\d+)(\s+.*)?$",
+                r"^(M|MF|MSM|MSMF|MS|MSF|H|E|S|L|F)\s+(\d+)(\s+.*)?$",
                 cmd,
                 re.IGNORECASE,
             )
@@ -1186,6 +1186,8 @@ def parse_script(
                 expected_params = {
                     "M": 3,
                     "MF": 3,
+                    "MSM": 3,
+                    "MSMF": 3,
                     "MS": 4,
                     "MSF": 4,
                     "H": 2,

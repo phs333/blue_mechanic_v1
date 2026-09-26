@@ -232,6 +232,17 @@ class CommManager(QObject):
             return self.active_client.write_tmc_reg(axis, reg, val)
         return False
 
+    def set_can_enabled(self, enabled: bool) -> bool:
+        if self.active_client and hasattr(self.active_client, 'set_can_enabled'):
+            return self.active_client.set_can_enabled(enabled)
+        return False
+
+    def configure_can(self, node_id: int, bitrate: int, cmd_base: int,
+                      status_base: int, event_base: int, enabled: bool = True) -> bool:
+        if self.active_client and hasattr(self.active_client, 'configure_can'):
+            return self.active_client.configure_can(node_id, bitrate, cmd_base, status_base, event_base, enabled=enabled)
+        return False
+
     # --- OTA Update Delegation ---
     def ota_start(self, target_node: int, image_size: int) -> bool:
         if self.active_client and hasattr(self.active_client, 'ota_start'):

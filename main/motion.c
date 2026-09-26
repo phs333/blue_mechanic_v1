@@ -244,13 +244,13 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
     if (axis_upper == 'C' || axis_upper == 'X') {
         dir_pin = DIR_C;
         invert = ctx->state.inverter[AXIS_C_ID];
-        target_deg = ctx->settings.home_c_deg;
+        target_deg = 0.0f; // Home zero relativo
         min_limit_deg = ctx->settings.limit_min_c_deg;
         max_limit_deg = ctx->settings.limit_max_c_deg;
     } else if (axis_upper == 'A' || axis_upper == 'Y') {
         dir_pin = DIR_A;
         invert = ctx->state.inverter[AXIS_A_ID];
-        target_deg = ctx->settings.home_a_deg;
+        target_deg = 0.0f; // Home zero relativo
         min_limit_deg = ctx->settings.limit_min_a_deg;
         max_limit_deg = ctx->settings.limit_max_a_deg;
     } else {
@@ -333,52 +333,107 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
 
     hardware_rmt_release_pin(STEP_Z);
 
-    gpio_set_level(DIR_Z, Z_DIR_DOWN);
-    esp_rom_delay_us(5);
-    int32_t search_steps = 0;
-    while (!hardware_is_z_switch_pressed() && search_steps < Z_HOME_SEARCH_LIMIT_STEPS) {
-        hardware_step_pulse(STEP_Z, 400);
-        ++search_steps;
-        if ((search_steps & 0x3FU) == 0U) {
-            vTaskDelay(pdMS_TO_TICKS(1));
+    bool dir_down = Z_DIR_DOWN;
+    bool dir_up = Z_DIR_UP;
+    if (ctx->state.inverter[AXIS_Z_ID]) {
+        dir_down = !dir_down;
+        dir_up = !dir_up;
+    }
+
+    // Se o switch já estiver pressionado no início, afasta suavemente primeiro
+    if (hardware_is_z_switch_pressed()) {
+        gpio_set_level(DIR_Z, dir_up);
+        esp_rom_delay_us(5);
+        int32_t clear_steps = 0;
+        while (hardware_is_z_switch_pressed() && clear_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
+            hardware_step_pulse(STEP_Z, 600);
+            ++clear_steps;
+            if ((clear_steps & 0x3FU) == 0U) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
-    }
-
-    if (search_steps >= Z_HOME_SEARCH_LIMIT_STEPS && !hardware_is_z_switch_pressed()) {
-        ctx->state.em_homing_z = false;
-        ctx->state.z_bloqueado = true;
-        hardware_rmt_reacquire_pin(STEP_Z);
-        xSemaphoreGive(ctx->motion_mutex);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    gpio_set_level(DIR_Z, Z_DIR_UP);
-    esp_rom_delay_us(5);
-    int32_t release_steps = 0;
-    while (hardware_is_z_switch_pressed() && release_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
-        hardware_step_pulse(STEP_Z, 800);
-        ++release_steps;
-        if ((release_steps & 0x3FU) == 0U) {
-            vTaskDelay(pdMS_TO_TICKS(1));
+        for (int32_t i = 0; i < 400; ++i) {
+            hardware_step_pulse(STEP_Z, 600);
         }
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 
-    if (release_steps >= Z_HOME_RELEASE_LIMIT_STEPS && hardware_is_z_switch_pressed()) {
-        ctx->state.em_homing_z = false;
-        ctx->state.z_bloqueado = true;
-        hardware_rmt_reacquire_pin(STEP_Z);
-        xSemaphoreGive(ctx->motion_mutex);
-        return ESP_ERR_TIMEOUT;
+    // Cálculo dinâmico dos passos correspondentes a 5.0 mm de elevação de segurança do eixo Z:
+    uint16_t teeth = ctx->settings.z_pulley_teeth ? ctx->settings.z_pulley_teeth : DEFAULT_Z_PULLEY_TEETH;
+    float mm_per_rev = (float)teeth * Z_BELT_PITCH_MM;
+    if (mm_per_rev <= 0.0f) {
+        mm_per_rev = 32.0f;
+    }
+    uint32_t spr_z = ctx->settings.steps_per_rev[AXIS_Z_ID] ? ctx->settings.steps_per_rev[AXIS_Z_ID] : 200U;
+    uint32_t usteps_z = ctx->settings.tmc_microsteps[AXIS_Z_ID] ? ctx->settings.tmc_microsteps[AXIS_Z_ID] : 16U;
+    int32_t lift_5mm_steps = (int32_t)lroundf((5.0f * (float)(spr_z * usteps_z)) / mm_per_rev);
+    if (lift_5mm_steps < 200) {
+        lift_5mm_steps = 500;
     }
 
-    for (int32_t i = 0; i < PASSOS_ALIVIO_EXTRA_Z; ++i) {
-        hardware_step_pulse(STEP_Z, 800);
+    // 3 ciclos de testagem do fim de curso Z com velocidades decrescentes para precisão máxima:
+    // Ciclo 1: Busca rápida (450 us) e recuo de 600 passos (~6 mm)
+    // Ciclo 2: Busca intermediária (650 us) e recuo de 400 passos (~4 mm)
+    // Ciclo 3: Busca lenta de precisão (900 us) e elevação final de 5.0 mm de segurança para evitar colisão ao descer
+    const uint32_t approach_delays[3] = { 450, 650, 900 };
+    const int32_t search_limits[3] = { Z_HOME_SEARCH_LIMIT_STEPS, 4000, 2500 };
+    const int32_t extra_backoffs[3] = { 600, 400, lift_5mm_steps };
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        gpio_set_level(DIR_Z, dir_down);
+        esp_rom_delay_us(5);
+        int32_t search_steps = 0;
+        while (!hardware_is_z_switch_pressed() && search_steps < search_limits[cycle]) {
+            hardware_step_pulse(STEP_Z, approach_delays[cycle]);
+            ++search_steps;
+            if ((search_steps & 0x3FU) == 0U) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+
+        if (search_steps >= search_limits[cycle] && !hardware_is_z_switch_pressed()) {
+            ESP_LOGE(APP_TAG, "Home Z falhou no teste %d/3: switch nao acionado", cycle + 1);
+            ctx->state.em_homing_z = false;
+            ctx->state.z_bloqueado = true;
+            hardware_rmt_reacquire_pin(STEP_Z);
+            xSemaphoreGive(ctx->motion_mutex);
+            return ESP_ERR_TIMEOUT;
+        }
+
+        gpio_set_level(DIR_Z, dir_up);
+        esp_rom_delay_us(5);
+        int32_t release_steps = 0;
+        while (hardware_is_z_switch_pressed() && release_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
+            hardware_step_pulse(STEP_Z, 600);
+            ++release_steps;
+            if ((release_steps & 0x3FU) == 0U) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+
+        if (release_steps >= Z_HOME_RELEASE_LIMIT_STEPS && hardware_is_z_switch_pressed()) {
+            ESP_LOGE(APP_TAG, "Home Z falhou no teste %d/3: switch nao liberou", cycle + 1);
+            ctx->state.em_homing_z = false;
+            ctx->state.z_bloqueado = true;
+            hardware_rmt_reacquire_pin(STEP_Z);
+            xSemaphoreGive(ctx->motion_mutex);
+            return ESP_ERR_TIMEOUT;
+        }
+
+        for (int32_t i = 0; i < extra_backoffs[cycle]; ++i) {
+            hardware_step_pulse(STEP_Z, 600);
+        }
+
+        ESP_LOGI(APP_TAG, "Home Z teste %d/3 concluido com sucesso.", cycle + 1);
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 
     ctx->state.atual_z = 0;
+    ctx->state.z_bloqueado = false;
     ctx->state.em_homing_z = false;
     hardware_rmt_reacquire_pin(STEP_Z);
     xSemaphoreGive(ctx->motion_mutex);
+    ESP_LOGI(APP_TAG, "Home Z finalizado com 3 testagens de fim de curso e elevacao de seguranca de 5.0 mm (%ld passos).", (long)lift_5mm_steps);
     return ESP_OK;
 }
 
@@ -463,10 +518,26 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
             move_up = !move_up;
         }
         int32_t steps = labs(requested_steps);
+        if (requested_steps > 0) {
+            if (ctx->state.atual_z + steps > (int32_t)ctx->settings.max_passos_z) {
+                steps = ((int32_t)ctx->settings.max_passos_z > ctx->state.atual_z) ?
+                        ((int32_t)ctx->settings.max_passos_z - ctx->state.atual_z) : 0;
+            }
+        } else {
+            if (ctx->state.atual_z - steps < 0) {
+                steps = (ctx->state.atual_z > 0) ? ctx->state.atual_z : 0;
+            }
+        }
+        if (steps == 0) {
+            hardware_rmt_reacquire_pin(STEP_Z);
+            xSemaphoreGive(ctx->motion_mutex);
+            return ESP_OK;
+        }
+
         gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
         esp_rom_delay_us(5);
         ESP_LOGI(APP_TAG, "MOVE_F Z steps=%d dir_pin=%d (Z_DIR_UP=%d Z_DIR_DOWN=%d)",
-                 (int)requested_steps,
+                 (int)steps,
                  (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),
                  (int)Z_DIR_UP, (int)Z_DIR_DOWN);
 
@@ -699,10 +770,28 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
         move_up = !move_up;
     }
     int32_t steps = labs(requested_steps);
+    if (requested_steps > 0) {
+        if (ctx->state.atual_z + steps > (int32_t)ctx->settings.max_passos_z) {
+            steps = ((int32_t)ctx->settings.max_passos_z > ctx->state.atual_z) ?
+                    ((int32_t)ctx->settings.max_passos_z - ctx->state.atual_z) : 0;
+            ESP_LOGW(APP_TAG, "MOVE Z ajustado por limite superior: %ld passos", (long)steps);
+        }
+    } else {
+        if (ctx->state.atual_z - steps < 0) {
+            steps = (ctx->state.atual_z > 0) ? ctx->state.atual_z : 0;
+            ESP_LOGW(APP_TAG, "MOVE Z ajustado por limite inferior: %ld passos", (long)steps);
+        }
+    }
+    if (steps == 0) {
+        hardware_rmt_reacquire_pin(STEP_Z);
+        xSemaphoreGive(ctx->motion_mutex);
+        return ESP_OK;
+    }
+
     gpio_set_level(DIR_Z, move_up ? Z_DIR_UP : Z_DIR_DOWN);
     esp_rom_delay_us(2);
     ESP_LOGI(APP_TAG, "MOVE Z steps=%d dir_pin=%d (Z_DIR_UP=%d Z_DIR_DOWN=%d)",
-             (int)requested_steps,
+             (int)steps,
              (int)(move_up ? Z_DIR_UP : Z_DIR_DOWN),
              (int)Z_DIR_UP, (int)Z_DIR_DOWN);
 
@@ -960,6 +1049,7 @@ static void motion_task(void *arg)
                     } else if (ax == 'Z') {
                         ctx->state.homed[2] = true;
                     }
+                    printf("Home %c finalizado.\n", ax);
                 }
                 xSemaphoreGive(ctx->state_mutex);
             }
@@ -1028,6 +1118,10 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
 {
     if (ctx->motion_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
+    }
+    // Homing tem prioridade imediata: descarta movimentos antigos pendentes na fila
+    if (cmd->type == MOTION_CMD_HOME) {
+        xQueueReset(ctx->motion_queue);
     }
     // If the new command reverses direction on the same axis, purge stale opposing moves in queue
     if (cmd->type == MOTION_CMD_MOVE_REL || cmd->type == MOTION_CMD_MOVE_FORCE) {

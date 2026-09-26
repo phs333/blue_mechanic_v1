@@ -15,8 +15,6 @@ from PyQt6.QtGui import QIcon
 from python_app.ui.style import DARK_THEME_QSS
 from python_app.ui.views.dashboard_view import DashboardView
 from python_app.ui.views.teensy_dashboard_view import TeensyDashboardView
-from python_app.ui.views.motion_view import MotionView
-from python_app.ui.views.peripherals_view import PeripheralsView
 from python_app.ui.views.parameters_view import ParametersView
 from python_app.ui.views.terminal_view import TerminalView
 from python_app.ui.views.automation_view import AutomationView
@@ -83,39 +81,27 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.btn_nav_dash)
         self.nav_buttons.append(self.btn_nav_dash)
         
-        self.btn_nav_motion = QPushButton("🕹️  Movimentação & Jog")
-        self.btn_nav_motion.setProperty("class", "nav-btn")
-        self.btn_nav_motion.clicked.connect(lambda: self._set_page(1))
-        sidebar_layout.addWidget(self.btn_nav_motion)
-        self.nav_buttons.append(self.btn_nav_motion)
-        
-        self.btn_nav_periph = QPushButton("💡  Lasers & Ventoinha")
-        self.btn_nav_periph.setProperty("class", "nav-btn")
-        self.btn_nav_periph.clicked.connect(lambda: self._set_page(2))
-        sidebar_layout.addWidget(self.btn_nav_periph)
-        self.nav_buttons.append(self.btn_nav_periph)
-        
         self.btn_nav_params = QPushButton("⚙️  Parâmetros & NVS")
         self.btn_nav_params.setProperty("class", "nav-btn")
-        self.btn_nav_params.clicked.connect(lambda: self._set_page(3))
+        self.btn_nav_params.clicked.connect(lambda: self._set_page(1))
         sidebar_layout.addWidget(self.btn_nav_params)
         self.nav_buttons.append(self.btn_nav_params)
         
         self.btn_nav_term = QPushButton("📟  Terminal & Sniffer")
         self.btn_nav_term.setProperty("class", "nav-btn")
-        self.btn_nav_term.clicked.connect(lambda: self._set_page(4))
+        self.btn_nav_term.clicked.connect(lambda: self._set_page(2))
         sidebar_layout.addWidget(self.btn_nav_term)
         self.nav_buttons.append(self.btn_nav_term)
         
         self.btn_nav_auto = QPushButton("🔁  Automação & Testes")
         self.btn_nav_auto.setProperty("class", "nav-btn")
-        self.btn_nav_auto.clicked.connect(lambda: self._set_page(5))
+        self.btn_nav_auto.clicked.connect(lambda: self._set_page(3))
         sidebar_layout.addWidget(self.btn_nav_auto)
         self.nav_buttons.append(self.btn_nav_auto)
 
         self.btn_nav_ota = QPushButton("🚀  Atualização OTA")
         self.btn_nav_ota.setProperty("class", "nav-btn")
-        self.btn_nav_ota.clicked.connect(lambda: self._set_page(6))
+        self.btn_nav_ota.clicked.connect(lambda: self._set_page(4))
         sidebar_layout.addWidget(self.btn_nav_ota)
         self.nav_buttons.append(self.btn_nav_ota)
         
@@ -233,8 +219,6 @@ class MainWindow(QMainWindow):
         self.dash_stack.addWidget(self.page_dash)
         self.dash_stack.addWidget(self.page_teensy_dash)
 
-        self.page_motion = MotionView(self.comm, self.state)
-        self.page_periph = PeripheralsView(self.comm, self.state)
         self.page_params = ParametersView(self.comm, self.state)
         self.page_term = TerminalView(self.comm, self.state)
         self.page_auto = AutomationView(self.comm, self.state)
@@ -242,8 +226,6 @@ class MainWindow(QMainWindow):
         
         self.stack = QStackedWidget()
         self.stack.addWidget(self.dash_stack)
-        self.stack.addWidget(self.page_motion)
-        self.stack.addWidget(self.page_periph)
         self.stack.addWidget(self.page_params)
         self.stack.addWidget(self.page_term)
         self.stack.addWidget(self.page_auto)
@@ -357,11 +339,7 @@ class MainWindow(QMainWindow):
             self.dash_stack.setCurrentWidget(self.page_teensy_dash)
             self.btn_nav_dash.setText("🌐  Dashboard (10 Nós)")
             
-            # Telas não suportadas no modo Teensy (Motion, Periph, Params)
-            self.btn_nav_motion.setEnabled(False)
-            self.btn_nav_motion.setToolTip("Indisponível no modo Teensy (Use o Painel dos 10 Nós)")
-            self.btn_nav_periph.setEnabled(False)
-            self.btn_nav_periph.setToolTip("Indisponível no modo Teensy (Use o Painel dos 10 Nós)")
+            # Telas não suportadas no modo Teensy (Params)
             self.btn_nav_params.setEnabled(False)
             self.btn_nav_params.setToolTip("Indisponível no modo Teensy (Bridge não suporta NVS/TMC)")
 
@@ -369,18 +347,14 @@ class MainWindow(QMainWindow):
             self.btn_nav_ota.setEnabled(True)
             self.btn_nav_ota.setToolTip("")
 
-            # Se a página atual for uma das bloqueadas (1=Motion, 2=Periph, 3=Params), retorna ao Dashboard
-            if self.stack.currentIndex() in (1, 2, 3):
+            # Se a página atual for a bloqueada (1=Params), retorna ao Dashboard
+            if self.stack.currentIndex() == 1:
                 self._set_page(0)
         else:
             self.dash_stack.setCurrentWidget(self.page_dash)
             self.btn_nav_dash.setText("📊  Dashboard Geral")
 
             # Reabilita telas
-            self.btn_nav_motion.setEnabled(True)
-            self.btn_nav_motion.setToolTip("")
-            self.btn_nav_periph.setEnabled(True)
-            self.btn_nav_periph.setToolTip("")
             self.btn_nav_params.setEnabled(True)
             self.btn_nav_params.setToolTip("")
             
@@ -388,7 +362,7 @@ class MainWindow(QMainWindow):
             ota_supported = index in (1, 2, 3)
             self.btn_nav_ota.setEnabled(ota_supported)
             self.btn_nav_ota.setToolTip("" if ota_supported else "OTA via CAN requer Teensy, PeakCAN ou Simulador")
-            if not ota_supported and self.stack.currentIndex() == 6:
+            if not ota_supported and self.stack.currentIndex() == 4:
                 self._set_page(0)
 
     def _on_broadcast_toggled(self, checked: bool):

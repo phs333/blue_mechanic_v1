@@ -23,4 +23,6 @@ void hardware_set_fan_output(app_context_t *ctx, bool on);
 esp_err_t hardware_set_laser_level(app_context_t *ctx, size_t laser_index, uint16_t level);
 bool hardware_is_z_switch_pressed(void);
 esp_err_t hardware_read_axis_encoder(char axis, float *angle_deg);
+esp_err_t hardware_encoder_set_zero(app_context_t *ctx, char axis);
+void hardware_update_encoders(void);
 esp_err_t hardware_read_temperature_c(float *temp_c);

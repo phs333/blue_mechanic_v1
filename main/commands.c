@@ -163,10 +163,10 @@ void commands_print_config(const app_context_t *ctx)
            (unsigned long)ctx->settings.steps_per_rev[0],
            (unsigned long)ctx->settings.steps_per_rev[1],
            (unsigned long)ctx->settings.steps_per_rev[2]);
-    printf("CONFIG SPEED C=%.2f A=%.2f Z=%.2f\n",
-           motion_delay_us_to_speed((app_context_t *)ctx, 'C', ctx->settings.speed_delay_us[0]),
-           motion_delay_us_to_speed((app_context_t *)ctx, 'A', ctx->settings.speed_delay_us[1]),
-           motion_delay_us_to_speed((app_context_t *)ctx, 'Z', ctx->settings.speed_delay_us[2]));
+    float spd_c = (ctx->settings.speed[0] > 0.0f) ? ctx->settings.speed[0] : motion_delay_us_to_speed((app_context_t *)ctx, 'C', ctx->settings.speed_delay_us[0]);
+    float spd_a = (ctx->settings.speed[1] > 0.0f) ? ctx->settings.speed[1] : motion_delay_us_to_speed((app_context_t *)ctx, 'A', ctx->settings.speed_delay_us[1]);
+    float spd_z = (ctx->settings.speed[2] > 0.0f) ? ctx->settings.speed[2] : motion_delay_us_to_speed((app_context_t *)ctx, 'Z', ctx->settings.speed_delay_us[2]);
+    printf("CONFIG SPEED C=%.2f A=%.2f Z=%.2f\n", spd_c, spd_a, spd_z);
     printf("CONFIG SPEED_MAX C=%.2f A=%.2f Z=%.2f\n",
            ctx->settings.speed_max[0], ctx->settings.speed_max[1], ctx->settings.speed_max[2]);
     printf("CONFIG ACCEL_MAX C=%.2f A=%.2f Z=%.2f\n",
@@ -177,9 +177,13 @@ void commands_print_config(const app_context_t *ctx)
            ctx->state.inverter[0] ? 1 : 0,
            ctx->state.inverter[1] ? 1 : 0,
            ctx->state.inverter[2] ? 1 : 0);
-    printf("CONFIG PULLEY_Z=%u MAX_PASSOS_Z=%lu\n",
+    float z_mm_rev = (float)ctx->settings.z_pulley_teeth * 2.0f;
+    float z_spr = (float)ctx->settings.steps_per_rev[AXIS_Z_ID] * (float)ctx->settings.tmc_microsteps[AXIS_Z_ID];
+    float z_max_mm = (z_spr > 0.0f) ? ((float)ctx->settings.max_passos_z * z_mm_rev / z_spr) : 0.0f;
+    printf("CONFIG PULLEY_Z=%u MAX_PASSOS_Z=%lu MAX_Z_MM=%.2f\n",
            (unsigned)ctx->settings.z_pulley_teeth,
-           (unsigned long)ctx->settings.max_passos_z);
+           (unsigned long)ctx->settings.max_passos_z,
+           z_max_mm);
     printf("CONFIG HOME_DEG C=%.2f A=%.2f\n",
            ctx->settings.home_c_deg, ctx->settings.home_a_deg);
     printf("CONFIG LIMITS C=%.2f..%.2f A=%.2f..%.2f\n",
@@ -198,7 +202,8 @@ void commands_print_config(const app_context_t *ctx)
                (unsigned)ctx->settings.tmc_microsteps[i],
                (unsigned)ctx->settings.tmc_spreadcycle[i]);
     }
-    printf("CONFIG CAN node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
+    printf("CONFIG CAN enabled=%u node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
+           (unsigned)ctx->settings.can_enabled,
            (unsigned)ctx->settings.node_id,
            (unsigned long)ctx->settings.can_bitrate,
            (unsigned long)ctx->settings.can_command_base_id,
@@ -414,29 +419,13 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         char axis = '\0';
         parse_axis_token(raw_axis, &axis_index, &axis);
 
-        float current_deg = 0.0f;
-        esp_err_t err = hardware_read_axis_encoder(axis, &current_deg);
-        if (err != ESP_OK) {
-            printf("ERRO: nao foi possivel ler encoder %c (%s)\n", axis, esp_err_to_name(err));
-            return;
-        }
-
-        if (axis == 'C') {
-            ctx->settings.home_c_deg = current_deg;
-        } else {
-            ctx->settings.home_a_deg = current_deg;
-        }
-
-        float min_lim = (axis == 'C') ? ctx->settings.limit_min_c_deg : ctx->settings.limit_min_a_deg;
-        float max_lim = (axis == 'C') ? ctx->settings.limit_max_c_deg : ctx->settings.limit_max_a_deg;
-        if (current_deg < min_lim || current_deg > max_lim) {
-            printf("AVISO: Posicao Home %.2f deg esta fora dos limites [%.2f, %.2f] deg de %c!\n",
-                   current_deg, min_lim, max_lim, axis);
-        }
-
-        err = storage_save_settings(&ctx->settings);
+        esp_err_t err = hardware_encoder_set_zero(ctx, axis);
         if (err == ESP_OK) {
-            printf("Home %c gravado em %.2f deg.\n", axis, current_deg);
+            printf("Home %c gravado em 0.00 deg (posicao atual zerada, voltas resetadas na NVS).\n", axis);
+            float live_deg = 0.0f;
+            if (hardware_read_axis_encoder(axis, &live_deg) == ESP_OK) {
+                printf("Eixo %c (%s): %.2f deg\n", axis, (axis == 'C' || axis == 'X') ? "Base" : "Pivot", live_deg);
+            }
         } else {
             printf("ERRO ao salvar home %c: %s\n", axis, esp_err_to_name(err));
         }
@@ -449,8 +438,8 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         if (sscanf(cmd + 6, "%c %f %f", &raw_axis, &min_deg, &max_deg) == 3) {
             char axis = '\0';
             parse_axis_token(raw_axis, NULL, &axis);
-            if (min_deg < 0.0f || max_deg > 360.0f || max_deg <= min_deg) {
-                printf("ERRO: limites invalidos para %c (devem estar entre 0.0 e 360.0 e min < max).\n", axis);
+            if (min_deg < -3600.0f || max_deg > 3600.0f || max_deg <= min_deg) {
+                printf("ERRO: limites invalidos para %c (devem estar entre -3600.0 e +3600.0 e min < max).\n", axis);
                 return;
             }
             if (axis == 'C') {
@@ -497,17 +486,37 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     if (strcmp(cmd, "HOME Z") == 0) {
         esp_err_t err = motion_post_home_axis(ctx, 'Z', 0, 0);
         if (err == ESP_OK) {
-            puts("Home Z finalizado.");
+            puts("Home Z enfileirado.");
         } else {
             printf("ERRO no HOME Z: %s\n", esp_err_to_name(err));
         }
         return;
     }
 
+    float mm_z = 0.0f;
+    if (sscanf(cmd, "SETLENGTH_MM Z %f", &mm_z) == 1 || sscanf(cmd, "SET_LENGTH_MM Z %f", &mm_z) == 1 ||
+        sscanf(cmd, "LIMIT_MM Z %f", &mm_z) == 1) {
+        if (mm_z <= 0.0f || mm_z > 500.0f) {
+            puts("Valor invalido para limite Z em mm (deve ser entre 1.0 e 500.0 mm).");
+            return;
+        }
+        float mm_per_rev = (float)ctx->settings.z_pulley_teeth * Z_BELT_PITCH_MM;
+        float spr = (float)ctx->settings.steps_per_rev[AXIS_Z_ID] * (float)ctx->settings.tmc_microsteps[AXIS_Z_ID];
+        int32_t calc_steps = (int32_t)(mm_z * (spr / mm_per_rev) + 0.5f);
+        ctx->settings.max_passos_z = calc_steps;
+        esp_err_t err = persist_settings(ctx);
+        if (err == ESP_OK) {
+            printf("Limite Z definido para %.2f mm (%ld passos).\n", mm_z, (long)calc_steps);
+        } else {
+            printf("Erro ao salvar: %s\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
     long steps_z = 0;
-    if (sscanf(cmd, "SETLENGTH Z %ld", &steps_z) == 1) {
-        if (steps_z <= 0 || steps_z > 100000) {
-            puts("Valor invalido para limite Z (deve ser entre 1 e 100000).");
+    if (sscanf(cmd, "SETLENGTH Z %ld", &steps_z) == 1 || sscanf(cmd, "SET_LENGTH Z %ld", &steps_z) == 1) {
+        if (steps_z <= 0 || steps_z > 2000000) {
+            puts("Valor invalido para limite Z (deve ser entre 1 e 2000000).");
             return;
         }
         ctx->settings.max_passos_z = (int32_t)steps_z;
@@ -620,6 +629,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             }
         }
         uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed_val);
+        ctx->settings.speed[axis_index] = speed_val;
         ctx->settings.speed_delay_us[axis_index] = delay_us;
         ctx->state.speed_delay_us[axis_index] = delay_us;
         esp_err_t err = persist_settings(ctx);

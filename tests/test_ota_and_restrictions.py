@@ -119,9 +119,7 @@ class OtaAndRestrictionsTests(unittest.TestCase):
         win.combo_backend.setCurrentIndex(1)
         self.app.processEvents()
 
-        # Check unsupported buttons in Teensy mode (Motion, Periph, Params)
-        self.assertFalse(win.btn_nav_motion.isEnabled())
-        self.assertFalse(win.btn_nav_periph.isEnabled())
+        # Check unsupported buttons in Teensy mode (Params)
         self.assertFalse(win.btn_nav_params.isEnabled())
 
         # Supported buttons in Teensy mode (Dash, Term, Auto, OTA)
@@ -130,21 +128,19 @@ class OtaAndRestrictionsTests(unittest.TestCase):
         self.assertTrue(win.btn_nav_auto.isEnabled())
         self.assertTrue(win.btn_nav_ota.isEnabled())
 
-        # Attempt navigation to blocked page (e.g. page 1 - Motion)
+        # Attempt navigation to blocked page (page 1 - Params)
         win._set_page(1)
         self.assertEqual(win.stack.currentIndex(), 0) # Kept at 0 (Dashboard)!
 
-        # Navigation to OTA (page 6) is allowed in Teensy mode!
-        win._set_page(6)
-        self.assertEqual(win.stack.currentIndex(), 6)
+        # Navigation to OTA (page 4) is allowed in Teensy mode!
+        win._set_page(4)
+        self.assertEqual(win.stack.currentIndex(), 4)
 
         # Switch to PeakCAN (Index 2)
         win.combo_backend.setCurrentIndex(2)
         self.app.processEvents()
 
         # Screens should be re-enabled
-        self.assertTrue(win.btn_nav_motion.isEnabled())
-        self.assertTrue(win.btn_nav_periph.isEnabled())
         self.assertTrue(win.btn_nav_params.isEnabled())
         self.assertTrue(win.btn_nav_ota.isEnabled())
 

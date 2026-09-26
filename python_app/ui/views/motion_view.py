@@ -66,11 +66,13 @@ class MotionView(QWidget):
         # --- 2. Main Motion Grid (Jog + Direct Move / Homing) ---
         grid_layout = QHBoxLayout()
         grid_layout.setSpacing(16)
+        grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         # Left: Jog Pad
         self.jog_pad = JogPad(self.state)
         self.jog_pad.jog_requested.connect(self._on_jog)
         self.jog_pad.home_requested.connect(self.comm.home_axis)
+        self.jog_pad.set_home_requested.connect(self.comm.set_home)
         grid_layout.addWidget(self.jog_pad, 1)
         
         # Right: Calibration & Direct Move Card

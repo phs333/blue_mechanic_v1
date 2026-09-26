@@ -96,14 +96,16 @@
 
 #define SETTINGS_NAMESPACE "cinetica"
 #define SETTINGS_KEY "cfg"
-#define SETTINGS_VERSION 9U
+#define SETTINGS_VERSION 10U
 
 #define DEFAULT_HOME_X_DEG 0.0f
 #define DEFAULT_HOME_Y_DEG 0.0f
-#define DEFAULT_LIMIT_MIN_C_DEG 10.0f
-#define DEFAULT_LIMIT_MAX_C_DEG 190.0f
-#define DEFAULT_LIMIT_MIN_A_DEG 10.0f
-#define DEFAULT_LIMIT_MAX_A_DEG 190.0f
+#define DEFAULT_HOME_C_DEG 0.0f
+#define DEFAULT_HOME_A_DEG 0.0f
+#define DEFAULT_LIMIT_MIN_C_DEG -540.0f
+#define DEFAULT_LIMIT_MAX_C_DEG 540.0f
+#define DEFAULT_LIMIT_MIN_A_DEG -540.0f
+#define DEFAULT_LIMIT_MAX_A_DEG 540.0f
 #define DEFAULT_MAX_Z_STEPS 20000
 #define DEFAULT_Z_PULLEY_TEETH 16U // Polia padrão GT2 16 dentes no motor Z
 
@@ -215,6 +217,8 @@ typedef struct {
             float limit_max_y_deg;
         };
     };
+    float speed[AXIS_COUNT];       // velocidade nominal salva por eixo (deg/s para C/A, mm/s para Z)
+    uint16_t home_raw[2];          // leitura bruta de encoder (0..4095) quando SETHOME foi gravado (0=C, 1=A)
 } persisted_settings_t;
 
 typedef struct {
@@ -308,7 +312,9 @@ typedef struct {
         .limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG, \
         .limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG, \
         .limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG, \
-        .limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG \
+        .limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG, \
+        .speed = {140.0f, 140.0f, 12.5f}, \
+        .home_raw = {0, 0} \
     }
 
 #define APP_RUNTIME_DEFAULT_INIT          \

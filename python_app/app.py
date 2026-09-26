@@ -28,6 +28,7 @@ from PyQt6.QtCore import Qt
 from python_app.core.state_model import DeviceState
 from python_app.core.comm_manager import CommManager
 from python_app.ui.main_window import MainWindow
+from python_app.ui.wheel_filter import WheelFocusFilter
 
 def main():
     # High DPI scaling attributes for modern displays
@@ -38,6 +39,10 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Blue Mechanic V1")
     app.setOrganizationName("Blue Mechanic")
+
+    # Suppress unintended mouse wheel changes on unfocused spinboxes and combos
+    wheel_filter = WheelFocusFilter(app)
+    app.installEventFilter(wheel_filter)
     
     # Initialize Core reactive models
     state = DeviceState()
@@ -45,6 +50,7 @@ def main():
     
     # Initialize UI
     window = MainWindow(comm, state)
+    window._wheel_filter = wheel_filter  # Keep reference alive
     window.showMaximized()
     
     # Clean exit

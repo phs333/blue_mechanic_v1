@@ -13,8 +13,8 @@ class StatusCard(QFrame):
         self.setProperty("class", "metric-card")
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(2)
         
         # Header (Title + Badge)
         header_layout = QHBoxLayout()
@@ -35,8 +35,8 @@ class StatusCard(QFrame):
         
         # Value + Unit
         val_layout = QHBoxLayout()
-        val_layout.setContentsMargins(0, 2, 0, 0)
-        val_layout.setSpacing(6)
+        val_layout.setContentsMargins(0, 0, 0, 0)
+        val_layout.setSpacing(5)
         
         self.lbl_value = QLabel(initial_value)
         self.lbl_value.setProperty("class", "metric-value")
@@ -53,7 +53,8 @@ class StatusCard(QFrame):
         # Optional progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setFixedHeight(5)
+        self.progress_bar.setTextVisible(False)
         layout.addWidget(self.progress_bar)
 
     def set_value(self, val_text: str):

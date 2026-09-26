@@ -100,7 +100,6 @@ class SerialClient(BaseClient):
             with self.lock:
                 self.serial_port.write(cmd_str.encode('utf-8'))
                 self.serial_port.flush()
-                time.sleep(0.040)  # Pacing delay between serial commands
             self.state.raw_message_received.emit("TX", cmd.strip())
             self.state.telemetry.tx_frames += 1
             return True
@@ -290,7 +289,7 @@ class SerialClient(BaseClient):
                 self.state.parameters_updated.emit(self.state.parameters)
             return
 
-        m_cfg_z = re.search(r'CONFIG PULLEY_Z=(\d+)\s+MAX_PASSOS_Z=(\d+)', line, re.IGNORECASE)
+        m_cfg_z = re.search(r'CONFIG PULLEY_Z=(\d+)(?:\s+MAX_Z_MM=[\d\.\-]+)?\s+MAX_PASSOS_Z=(\d+)', line, re.IGNORECASE)
         if m_cfg_z:
             teeth = int(m_cfg_z.group(1))
             max_z = int(m_cfg_z.group(2))
@@ -301,7 +300,7 @@ class SerialClient(BaseClient):
                 self.state.parameters_updated.emit(self.state.parameters)
             return
 
-        m_cfg_lim = re.search(r'CONFIG LIMITS C=([\d\.\-]+)\.\.([\d\.\-]+)\s+A=([\d\.\-]+)\.\.([\d\.\-]+)', line, re.IGNORECASE)
+        m_cfg_lim = re.search(r'CONFIG LIMITS C=(-?[\d\.]+)\.\.(-?[\d\.]+)\s+A=(-?[\d\.]+)\.\.(-?[\d\.]+)', line, re.IGNORECASE)
         if m_cfg_lim:
             self.state.parameters.limit_min_deg_c = float(m_cfg_lim.group(1))
             self.state.parameters.limit_max_deg_c = float(m_cfg_lim.group(2))
@@ -332,14 +331,16 @@ class SerialClient(BaseClient):
                 self.state.parameters_updated.emit(self.state.parameters)
             return
 
-        m_cfg_can = re.search(r'CONFIG CAN node=(\d+)\s+bitrate=(\d+)\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
+        m_cfg_can = re.search(r'CONFIG CAN (?:enabled=(\d+)\s+)?node=(\d+)\s+bitrate=(\d+)\s+cmd=(0x[0-9A-Fa-f]+)\s+status=(0x[0-9A-Fa-f]+)\s+event=(0x[0-9A-Fa-f]+)', line, re.IGNORECASE)
         if m_cfg_can:
             try:
-                self.state.parameters.node_id = int(m_cfg_can.group(1))
-                self.state.parameters.can_bitrate = int(m_cfg_can.group(2))
-                self.state.parameters.can_command_base_id = int(m_cfg_can.group(3), 16)
-                self.state.parameters.can_status_base_id = int(m_cfg_can.group(4), 16)
-                self.state.parameters.can_event_base_id = int(m_cfg_can.group(5), 16)
+                if m_cfg_can.group(1) is not None:
+                    self.state.parameters.can_enabled = (m_cfg_can.group(1) == "1")
+                self.state.parameters.node_id = int(m_cfg_can.group(2))
+                self.state.parameters.can_bitrate = int(m_cfg_can.group(3))
+                self.state.parameters.can_command_base_id = int(m_cfg_can.group(4), 16)
+                self.state.parameters.can_status_base_id = int(m_cfg_can.group(5), 16)
+                self.state.parameters.can_event_base_id = int(m_cfg_can.group(6), 16)
                 if not self._in_config_dump:
                     self.state.parameters_updated.emit(self.state.parameters)
             except ValueError:
@@ -353,9 +354,20 @@ class SerialClient(BaseClient):
             val = float(m_home.group(2))
             if axis in ['C', 'X']:
                 self.state.parameters.home_c_deg = val
+                self.state.update_telemetry(pos_c_deg=val, pos_c_valid=True)
             else:
                 self.state.parameters.home_a_deg = val
+                self.state.update_telemetry(pos_a_deg=val, pos_a_valid=True)
             self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        m_enc_zero = re.search(r'Encoder\s+([CAXY]):\s*Zero\s*\(Home\)\s*gravado', line, re.IGNORECASE)
+        if m_enc_zero:
+            ax = m_enc_zero.group(1).upper()
+            if ax in ['C', 'X']:
+                self.state.update_telemetry(pos_c_deg=0.0, pos_c_valid=True)
+            else:
+                self.state.update_telemetry(pos_a_deg=0.0, pos_a_valid=True)
             return
 
         m_lim_resp = re.search(r'LIMIT\s+([CA])\s+gravado:\s+min=([\d\.\-]+)\s+max=([\d\.\-]+)', line, re.IGNORECASE)
@@ -419,14 +431,22 @@ class SerialClient(BaseClient):
 
     def home_axis(self, axis: str) -> bool:
         axis = axis.upper()
-        if axis == "ALL" or axis == "CA":
+        if axis == "ALL":
             self.send_raw("HOME C")
             self.send_raw("HOME A")
             return self.send_raw("HOME Z")
+        elif axis == "CA":
+            self.send_raw("HOME C")
+            return self.send_raw("HOME A")
         return self.send_raw(f"HOME {axis}")
 
     def set_home(self, axis: str) -> bool:
-        return self.send_raw(f"SETHOME {axis.upper()}")
+        ax = axis.upper()
+        if ax in ['C', 'X']:
+            self.state.update_telemetry(pos_c_deg=0.0, pos_c_valid=True)
+        elif ax in ['A', 'Y']:
+            self.state.update_telemetry(pos_a_deg=0.0, pos_a_valid=True)
+        return self.send_raw(f"SETHOME {ax}")
 
     def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
         return self.send_raw(f"LIMIT {axis.upper()} {min_deg:.2f} {max_deg:.2f}")
@@ -523,15 +543,23 @@ class SerialClient(BaseClient):
     def apply_driver_settings(self) -> bool:
         return self.send_raw("DRIVER APPLY")
 
-    def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int) -> bool:
+    def set_can_enabled(self, enabled: bool) -> bool:
+        cmd = "CAN ON" if enabled else "CAN OFF"
+        self.state.parameters.can_enabled = enabled
+        return self.send_raw(cmd)
+
+    def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int, enabled: bool = True) -> bool:
+        if enabled is not None:
+            self.send_raw("CAN ON" if enabled else "CAN OFF")
+            time.sleep(0.04)
         self.send_raw(f"CAN NODE {node_id}")
-        time.sleep(0.03)
+        time.sleep(0.04)
         self.send_raw(f"CAN BITRATE {bitrate}")
-        time.sleep(0.03)
+        time.sleep(0.04)
         self.send_raw(f"CAN BASE CMD 0x{cmd_base:03X}")
-        time.sleep(0.03)
+        time.sleep(0.04)
         self.send_raw(f"CAN BASE STATUS 0x{status_base:03X}")
-        time.sleep(0.03)
+        time.sleep(0.04)
         self.send_raw(f"CAN BASE EVENT 0x{event_base:03X}")
-        time.sleep(0.03)
+        time.sleep(0.04)
         return self.send_raw("CAN APPLY")

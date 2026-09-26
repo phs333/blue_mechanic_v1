@@ -9,6 +9,7 @@ from python_app.core.protocol_defs import (
     calc_ca_degrees_per_step,
     calc_ca_steps_for_degrees,
     calc_z_steps_for_mm,
+    calc_z_mm_for_steps,
 )
 from python_app.core.serial_client import SerialClient
 from python_app.core.state_model import DeviceState
@@ -46,6 +47,8 @@ class KinematicsTests(unittest.TestCase):
     def test_z_steps_follow_pulley_and_microsteps(self):
         self.assertEqual(calc_z_steps_for_mm(10.0, 16, 200, 16), 1000)
         self.assertEqual(calc_z_steps_for_mm(10.0, 20, 200, 16), 800)
+        self.assertAlmostEqual(calc_z_mm_for_steps(1000, 16, 200, 16), 10.0)
+        self.assertAlmostEqual(calc_z_mm_for_steps(50000, 16, 200, 16), 500.0)
 
 
 class CanProtocolTests(unittest.TestCase):
@@ -367,5 +370,171 @@ class TeensySerialProtocolTests(unittest.TestCase):
         )
 
 
+class RecordingSerialClient(SerialClient):
+    def __init__(self, state: DeviceState):
+        super().__init__(state)
+        self.commands = []
+        self.is_connected = True
+
+    def send_raw(self, cmd: str) -> bool:
+        self.commands.append(cmd)
+        return True
+
+
+class SerialProtocolTests(unittest.TestCase):
+    def setUp(self):
+        self.state = DeviceState()
+        self.client = RecordingSerialClient(self.state)
+
+    def test_serial_home_routing_ca_and_all(self):
+        self.client.home_axis("CA")
+        self.assertEqual(self.client.commands, ["HOME C", "HOME A"])
+
+        self.client.commands.clear()
+        self.client.home_axis("ALL")
+        self.assertEqual(self.client.commands, ["HOME C", "HOME A", "HOME Z"])
+
+        self.client.commands.clear()
+        self.client.home_axis("Z")
+        self.assertEqual(self.client.commands, ["HOME Z"])
+
+    def test_serial_set_home_command(self):
+        self.state.telemetry.pos_c_deg = 123.45
+        self.state.telemetry.pos_a_deg = 67.89
+        self.client.set_home("C")
+        self.assertEqual(self.state.telemetry.pos_c_deg, 0.0)
+        self.client.set_home("A")
+        self.assertEqual(self.state.telemetry.pos_a_deg, 0.0)
+        self.assertEqual(self.client.commands, ["SETHOME C", "SETHOME A"])
+
+        # Also test response line parsing
+        self.state.telemetry.pos_c_deg = 99.99
+        self.client._parse_response_line("Home C gravado em 0.00 deg (posicao atual zerada, voltas resetadas na NVS).")
+        self.assertEqual(self.state.telemetry.pos_c_deg, 0.0)
+
+    def test_serial_config_dump_with_negative_limits_and_large_z(self):
+        lines = [
+            "=== CONFIG DUMP ===",
+            "CONFIG STEPS C=200 A=200 Z=200",
+            "CONFIG SPEED C=140.62 A=140.62 Z=12.50",
+            "CONFIG SPEED_MAX C=720.00 A=720.00 Z=60.00",
+            "CONFIG ACCEL_MAX C=3600.00 A=3600.00 Z=800.00",
+            "CONFIG ACCEL C=1800.00 A=1800.00 Z=300.00",
+            "CONFIG INVERT C=0 A=0 Z=1",
+            "CONFIG PULLEY_Z=16 MAX_Z_MM=1600.00 MAX_PASSOS_Z=160000",
+            "CONFIG LIMITS C=-540.00..540.00 A=-540.00..540.00",
+            "CONFIG DRIVER_BUS_MODE=1",
+            "CONFIG TMC C addr=0 ihold=359 irun=897 delay=6 usteps=16 spread=0",
+            "CONFIG TMC A addr=1 ihold=359 irun=897 delay=6 usteps=16 spread=0",
+            "CONFIG TMC Z addr=2 ihold=418 irun=957 delay=6 usteps=16 spread=0",
+            "CONFIG CAN node=1 bitrate=500000 cmd=0x200 status=0x280 event=0x300",
+            "===================",
+        ]
+        for l in lines:
+            self.client._parse_response_line(l)
+
+        p = self.state.parameters
+        self.assertEqual(p.z_pulley_teeth, 16)
+        self.assertEqual(p.max_passos_z, 160000)
+        self.assertEqual(self.state.telemetry.max_z_steps, 160000)
+        self.assertAlmostEqual(p.limit_min_deg_c, -540.00)
+        self.assertAlmostEqual(p.limit_max_deg_c, 540.00)
+        self.assertAlmostEqual(p.limit_min_deg_a, -540.00)
+        self.assertAlmostEqual(p.limit_max_deg_a, 540.00)
+        self.assertAlmostEqual(p.speed[0], 140.62)
+        self.assertAlmostEqual(p.speed[1], 140.62)
+        self.assertAlmostEqual(p.speed[2], 12.50)
+
+
+    def test_serial_can_enabled_parsing_and_commands(self):
+        self.client.set_can_enabled(True)
+        self.assertEqual(self.client.commands[-1], "CAN ON")
+        self.assertTrue(self.state.parameters.can_enabled)
+
+        self.client.set_can_enabled(False)
+        self.assertEqual(self.client.commands[-1], "CAN OFF")
+        self.assertFalse(self.state.parameters.can_enabled)
+
+        # Parse CONFIG CAN with enabled=1
+        self.client._parse_response_line("CONFIG CAN enabled=1 node=3 bitrate=250000 cmd=0x210 status=0x290 event=0x310")
+        self.assertTrue(self.state.parameters.can_enabled)
+        self.assertEqual(self.state.parameters.node_id, 3)
+        self.assertEqual(self.state.parameters.can_bitrate, 250000)
+
+        # Parse CONFIG CAN with enabled=0
+        self.client._parse_response_line("CONFIG CAN enabled=0 node=5 bitrate=500000 cmd=0x200 status=0x280 event=0x300")
+        self.assertFalse(self.state.parameters.can_enabled)
+        self.assertEqual(self.state.parameters.node_id, 5)
+
+        # Parse backward compatible without enabled
+        self.client._parse_response_line("CONFIG CAN node=7 bitrate=1000000 cmd=0x200 status=0x280 event=0x300")
+        self.assertEqual(self.state.parameters.node_id, 7)
+        self.assertEqual(self.state.parameters.can_bitrate, 1000000)
+
+    def test_wheel_focus_filter_behavior(self):
+        from PyQt6.QtWidgets import QApplication, QSpinBox, QComboBox, QScrollArea, QWidget, QVBoxLayout
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtGui import QWheelEvent
+        from python_app.ui.wheel_filter import WheelFocusFilter
+
+        app = QApplication.instance() or QApplication([])
+        scroll = QScrollArea()
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        sp = QSpinBox()
+        sp.setValue(20)
+        vbox.addWidget(sp)
+        scroll.setWidget(container)
+        scroll.show()
+
+        filt = WheelFocusFilter(app)
+        app.installEventFilter(filt)
+
+        wheel_up = QWheelEvent(
+            QPointF(5, 5), QPointF(5, 5),
+            QPoint(0, 0), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False
+        )
+
+        # Unfocused: value must NOT change!
+        app.sendEvent(sp, wheel_up)
+        self.assertEqual(sp.value(), 20)
+
+        # Focused: value changes
+        app.setActiveWindow(sp)
+        sp.setFocus()
+        app.sendEvent(sp, wheel_up)
+        self.assertEqual(sp.value(), 21)
+
+        scroll.close()
+
+    def test_laser_slider_throttling_and_telemetry_grace(self):
+        import time
+        from PyQt6.QtWidgets import QApplication
+        from python_app.ui.widgets.laser_slider import LaserSlider
+
+        app = QApplication.instance() or QApplication([])
+        slider = LaserSlider(1, "Test Laser")
+        emitted = []
+        slider.laser_level_changed.connect(lambda idx, val: emitted.append((idx, val)))
+
+        # Direct preset
+        slider.set_percent(50)
+        self.assertEqual(slider.current_percent, 50)
+        self.assertTrue(len(emitted) > 0)
+        emitted.clear()
+
+        # Telemetry arriving immediately within grace period (< 0.8s) is ignored
+        slider.update_from_telemetry(0)
+        self.assertEqual(slider.current_percent, 50) # Not overridden!
+
+        # Manually backdate _last_user_time past grace period
+        slider._last_user_time = time.time() - 2.0
+        slider.update_from_telemetry(0)
+        self.assertEqual(slider.current_percent, 0) # Now accepted!
+
+
 if __name__ == "__main__":
     unittest.main()
+

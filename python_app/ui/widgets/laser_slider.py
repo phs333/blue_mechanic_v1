@@ -2,12 +2,14 @@
 Laser Power Controller Widget.
 0% to 100% control mapped to physical PWM duty (0/4095, 46..300/4095).
 Slider and SpinBox increment 1 in 1 (0% to 100%).
+Features command throttling and telemetry grace periods to prevent desynchronization.
 """
 
+import time
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QSpinBox
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from python_app.core.protocol_defs import laser_level_to_percent, percent_to_laser_level
 
 class LaserSlider(QFrame):
@@ -21,6 +23,13 @@ class LaserSlider(QFrame):
         self.current_raw_level = 0
         self.setProperty("class", "metric-card")
         self._block_signals = False
+
+        # Throttling & Telemetry synchronization protection
+        self._last_user_time = 0.0
+        self._pending_raw_level = None
+        self._throttle_timer = QTimer(self)
+        self._throttle_timer.setSingleShot(True)
+        self._throttle_timer.timeout.connect(self._flush_throttled_change)
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(14, 12, 14, 12)
@@ -52,6 +61,7 @@ class LaserSlider(QFrame):
         self.slider.setPageStep(10)
         self.slider.setToolTip("Ajuste de potência do laser de 0% a 100% (Passo de 1%)")
         self.slider.valueChanged.connect(self._on_slider_change)
+        self.slider.sliderReleased.connect(self._on_slider_released)
         slider_layout.addWidget(self.slider, 4)
         
         self.spin_val = QSpinBox()
@@ -93,34 +103,62 @@ class LaserSlider(QFrame):
         else:
             self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 13px;")
 
+    def _flush_throttled_change(self):
+        if self._pending_raw_level is not None:
+            val = self._pending_raw_level
+            self._pending_raw_level = None
+            self.laser_level_changed.emit(self.laser_index, val)
+
     def _on_slider_change(self, percent: int):
         if self._block_signals:
             return
+        self._last_user_time = time.time()
         raw_level = percent_to_laser_level(percent)
+        
         self._block_signals = True
         self.spin_val.setValue(percent)
         self._update_display(percent, raw_level)
         self._block_signals = False
+
+        self._pending_raw_level = raw_level
+        if not self._throttle_timer.isActive():
+            self._throttle_timer.start(60)
+
+    def _on_slider_released(self):
+        self._last_user_time = time.time()
+        self._throttle_timer.stop()
+        raw_level = percent_to_laser_level(self.slider.value())
+        self._pending_raw_level = None
         self.laser_level_changed.emit(self.laser_index, raw_level)
 
     def _on_spin_change(self, percent: int):
         if self._block_signals:
             return
+        self._last_user_time = time.time()
+        self._throttle_timer.stop()
         raw_level = percent_to_laser_level(percent)
+        self._pending_raw_level = None
+        
         self._block_signals = True
         self.slider.setValue(percent)
         self._update_display(percent, raw_level)
         self._block_signals = False
+        
         self.laser_level_changed.emit(self.laser_index, raw_level)
 
     def set_percent(self, pct: int, notify: bool = True):
         pct = max(0, min(100, int(pct)))
         raw_level = percent_to_laser_level(pct)
+        self._last_user_time = time.time()
+        self._throttle_timer.stop()
+        self._pending_raw_level = None
+        
         self._block_signals = True
         self.slider.setValue(pct)
         self.spin_val.setValue(pct)
         self._update_display(pct, raw_level)
         self._block_signals = False
+        
         if notify:
             self.laser_level_changed.emit(self.laser_index, raw_level)
 
@@ -130,12 +168,15 @@ class LaserSlider(QFrame):
         self.set_percent(pct, notify=notify)
 
     def update_from_telemetry(self, raw_level: int):
-        """Update from background telemetry without re-emitting command."""
+        """Update from background telemetry without overriding active user adjustments."""
         raw_level = max(0, min(4095, int(raw_level)))
         if self.slider.isSliderDown() or self.spin_val.hasFocus():
-            return  # Do not override while user is actively sliding or typing
+            return  # Do not override while user is actively dragging or typing
+        if (time.time() - self._last_user_time) < 0.8:
+            return  # Grace period prevents stale buffered telemetry from overriding recent changes
         if self.current_raw_level == raw_level:
             return  # Value unchanged
+
         pct = laser_level_to_percent(raw_level)
         self._block_signals = True
         self.slider.setValue(pct)

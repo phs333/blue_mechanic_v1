@@ -13,6 +13,8 @@
 #include "tmc2209.h"
 #include "status_led.h"
 #include "ota_update.h"
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
 
 static app_context_t g_app = {
     .settings = APP_SETTINGS_DEFAULT_INIT,
@@ -32,11 +34,12 @@ static void console_task(void *arg) {
   while (true) {
     int c = fgetc(stdin);
     if (c == EOF) {
-      vTaskDelay(pdMS_TO_TICKS(20));
+      clearerr(stdin);
+      vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
 
-    if (c == '\n') {
+    if (c == '\n' || c == '\r') {
       if (buf_len > 0) {
         buf[buf_len] = '\0';
         snprintf(line, sizeof(line), "%s", buf);
@@ -44,8 +47,6 @@ static void console_task(void *arg) {
         commands_handle_line(ctx, line);
         buf_len = 0;
       }
-    } else if (c == '\r') {
-      // ignore CR
     } else {
       if (buf_len < sizeof(buf) - 1) {
         buf[buf_len++] = (char)c;
@@ -58,6 +59,7 @@ static void safety_task(void *arg) {
   app_context_t *ctx = (app_context_t *)arg;
 
   while (true) {
+    hardware_update_encoders();
     if (ctx->state.alarme_z_ativo && !ctx->state.em_homing_z &&
         !ctx->state.z_bloqueado && hardware_is_z_switch_pressed()) {
       ctx->state.z_bloqueado = true;
@@ -131,6 +133,8 @@ static void thermal_task(void *arg) {
 }
 
 void app_main(void) {
+  uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0);
+  uart_vfs_dev_use_driver(UART_NUM_0);
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
 
@@ -174,9 +178,6 @@ void app_main(void) {
     ESP_LOGW(APP_TAG, "CAN/TWAI nao entrou totalmente. Firmware segue local.");
   }
 
-  ESP_LOGI(APP_TAG, "Postando pedido de auto-ajuste C e A...");
-  (void)motion_post_home_axis(&g_app, 'C', 0, 0);
-  (void)motion_post_home_axis(&g_app, 'A', 0, 0);
 
   xTaskCreatePinnedToCore(safety_task, "safety_task", 4096, &g_app, 10, NULL,
                           1);

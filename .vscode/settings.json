@@ -15,7 +15,7 @@
     "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "UART",
-  "idf.portWin": "COM7",
   "antigravity.toolExecutionPolicy": "always-proceed",
-  "antigravity.artifactReviewMode": "always-proceed"
+  "antigravity.artifactReviewMode": "always-proceed",
+  "idf.port": "COM10"
 }

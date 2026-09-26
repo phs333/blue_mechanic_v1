@@ -240,10 +240,16 @@ class SimulatorClient(BaseClient):
     def set_home(self, axis: str) -> bool:
         axis = axis.upper()
         if axis in ["C", "X"]:
-            self.state.update_parameters(home_c_deg=self.sim_c_deg)
+            self.sim_c_deg = 0.0
+            self.target_c_deg = 0.0
+            self.state.update_telemetry(pos_c_deg=0.0, pos_c_valid=True)
+            self.state.update_parameters(home_c_deg=0.0)
         elif axis in ["A", "Y"]:
-            self.state.update_parameters(home_a_deg=self.sim_a_deg)
-        self.state.raw_message_received.emit("RX", f"Home {axis} gravado.")
+            self.sim_a_deg = 0.0
+            self.target_a_deg = 0.0
+            self.state.update_telemetry(pos_a_deg=0.0, pos_a_valid=True)
+            self.state.update_parameters(home_a_deg=0.0)
+        self.state.raw_message_received.emit("RX", f"Home {axis} gravado em 0.00 deg (posicao atual zerada, voltas resetadas na NVS).")
         return True
 
     def set_axis_limits(self, axis: str, min_deg: float, max_deg: float) -> bool:
@@ -359,8 +365,21 @@ class SimulatorClient(BaseClient):
     def apply_driver_settings(self) -> bool:
         return True
 
-    def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int) -> bool:
-        self.state.update_parameters(node_id=node_id, can_bitrate=bitrate, can_command_base_id=cmd_base, can_status_base_id=status_base, can_event_base_id=event_base)
+    def set_can_enabled(self, enabled: bool) -> bool:
+        self.state.update_parameters(can_enabled=enabled)
+        self.state.raw_message_received.emit("RX", "Estado do CAN salvo.")
+        return True
+
+    def configure_can(self, node_id: int, bitrate: int, cmd_base: int, status_base: int, event_base: int, enabled: bool = True) -> bool:
+        self.state.update_parameters(
+            node_id=node_id,
+            can_bitrate=bitrate,
+            can_command_base_id=cmd_base,
+            can_status_base_id=status_base,
+            can_event_base_id=event_base,
+            can_enabled=enabled
+        )
+        self.state.raw_message_received.emit("RX", "Configuracao CAN reaplicada.")
         return True
 
     # --- Simulated OTA Methods ---

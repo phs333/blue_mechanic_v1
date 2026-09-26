@@ -12,8 +12,11 @@
 #include "freertos/task.h"
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
+#include "esp_rom_gpio.h"
+#include "soc/gpio_sig_map.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
+#include "storage.h"
 
 #include "stepper_motor_encoder.h"
 
@@ -49,6 +52,15 @@ static const ledc_channel_t k_laser_channels[2] = {LEDC_CHANNEL_0, LEDC_CHANNEL_
 static i2c_master_bus_handle_t k_encoder_buses[2];
 static i2c_master_dev_handle_t k_encoder_devices[2];
 static SemaphoreHandle_t s_i2c_mutex = NULL;
+
+typedef struct {
+    int32_t turns;
+    uint16_t last_raw;
+    uint16_t home_raw;
+    bool initialized;
+} encoder_tracker_t;
+
+static encoder_tracker_t s_encoder_trackers[2] = {0};
 
 static esp_err_t init_gpio_matrix(void);
 static esp_err_t init_i2c_buses(void);
@@ -185,6 +197,12 @@ esp_err_t hardware_init(app_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
+    if (ctx) {
+        s_encoder_trackers[0].home_raw = ctx->settings.home_raw[0];
+        s_encoder_trackers[1].home_raw = ctx->settings.home_raw[1];
+    }
+    hardware_update_encoders();
+
     hardware_set_driver_enable(ctx, true);
     vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -193,61 +211,25 @@ esp_err_t hardware_init(app_context_t *ctx)
 
 
 /**
- * Temporarily release a STEP pin from RMT control so legacy bit-bang
- * code (homing, Z per-step loop) can use gpio_set_level().
- * Must be paired with hardware_rmt_reacquire_pin() when done.
+ * Temporarily route a STEP pin to standard GPIO output for bit-bang
+ * stepping (homing, rescue). Avoids deleting and recreating RMT channels
+ * or disturbing allocated shared interrupts and GPIO reservations.
  */
 void hardware_rmt_release_pin(gpio_num_t step_pin)
 {
-    size_t idx = 0;
-    if (step_pin == STEP_C) idx = 0;
-    else if (step_pin == STEP_A) idx = 1;
-    else if (step_pin == STEP_Z) idx = 2;
-    else return;
-
-    if (s_rmt_chan[idx] != NULL) {
-        rmt_disable(s_rmt_chan[idx]);
-        rmt_del_channel(s_rmt_chan[idx]);
-        s_rmt_chan[idx] = NULL;
-    }
-
-    // Reclaim the GPIO for direct control
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << step_pin),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&cfg);
+    esp_rom_gpio_connect_out_signal(step_pin, SIG_GPIO_OUT_IDX, false, false);
+    gpio_set_direction(step_pin, GPIO_MODE_OUTPUT);
     gpio_set_level(step_pin, 0);
 }
 
 /**
- * Re-create the RMT TX channel for a STEP pin after bit-bang is done.
+ * Re-connect the STEP pin to its dedicated RMT TX signal via GPIO Matrix.
  */
 void hardware_rmt_reacquire_pin(gpio_num_t step_pin)
 {
-    size_t idx = 0;
-    if (step_pin == STEP_C) idx = 0;
-    else if (step_pin == STEP_A) idx = 1;
-    else if (step_pin == STEP_Z) idx = 2;
-    else return;
-
-    if (s_rmt_chan[idx] != NULL) {
-        return; // already acquired
-    }
-
-    rmt_tx_channel_config_t tx_chan_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .gpio_num = step_pin,
-        .mem_block_symbols = 48,
-        .resolution_hz = 1000000,
-        .trans_queue_depth = 10,
-    };
-    if (rmt_new_tx_channel(&tx_chan_config, &s_rmt_chan[idx]) == ESP_OK) {
-        rmt_enable(s_rmt_chan[idx]);
-    }
+    uint32_t sig = (step_pin == STEP_C) ? RMT_SIG_OUT0_IDX :
+                   (step_pin == STEP_A) ? RMT_SIG_OUT1_IDX : RMT_SIG_OUT2_IDX;
+    esp_rom_gpio_connect_out_signal(step_pin, sig, false, false);
 }
 
 void hardware_step_pulse(gpio_num_t step_pin, uint32_t delay_us)
@@ -767,7 +749,7 @@ static uint32_t laser_level_to_duty(uint16_t level)
 bool hardware_is_z_switch_pressed(void)
 {
     if (gpio_get_level(SWITCH_Z) == 1) {
-        esp_rom_delay_us(5000);
+        esp_rom_delay_us(200);
         return gpio_get_level(SWITCH_Z) == 1;
     }
     return false;
@@ -974,9 +956,10 @@ static esp_err_t init_led_pwm(app_context_t *ctx)
     return ESP_OK;
 }
 
-static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
+static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val)
 {
     ESP_RETURN_ON_FALSE(encoder_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Encoder invalido");
+    ESP_RETURN_ON_FALSE(raw_val != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "raw_val nulo");
 
     if (s_i2c_mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
@@ -995,14 +978,112 @@ static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
 
             if (last_err == ESP_OK) {
                 uint16_t raw = ((uint16_t)raw_data[0] << 8) | raw_data[1];
-                raw &= 0x0FFF;
-                *angle_deg = ((float)raw * 360.0f) / 4096.0f;
+                *raw_val = (raw & 0x0FFFU);
                 return ESP_OK;
             }
         }
         esp_rom_delay_us(200);
     }
     return last_err;
+}
+
+static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw)
+{
+    encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
+    if (!tracker->initialized) {
+        tracker->last_raw = curr_raw;
+        tracker->initialized = true;
+        int32_t diff = (int32_t)curr_raw - (int32_t)tracker->home_raw;
+        if (diff > 2048) {
+            tracker->turns = -1;
+        } else if (diff < -2048) {
+            tracker->turns = 1;
+        } else {
+            tracker->turns = 0;
+        }
+        return;
+    }
+
+    int32_t diff = (int32_t)curr_raw - (int32_t)tracker->last_raw;
+    if (diff < -2048) {
+        // Passou de 4095 para 0 no sentido horario (+)
+        tracker->turns++;
+    } else if (diff > 2048) {
+        // Passou de 0 para 4095 no sentido anti-horario (-)
+        tracker->turns--;
+    }
+    tracker->last_raw = curr_raw;
+}
+
+void hardware_update_encoders(void)
+{
+    uint16_t raw0 = 0, raw1 = 0;
+    if (read_encoder_raw(0, &raw0) == ESP_OK) {
+        update_encoder_tracker(0, raw0);
+    }
+    if (read_encoder_raw(1, &raw1) == ESP_OK) {
+        update_encoder_tracker(1, raw1);
+    }
+}
+
+static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
+{
+    ESP_RETURN_ON_FALSE(encoder_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Encoder invalido");
+    ESP_RETURN_ON_FALSE(angle_deg != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "angle_deg nulo");
+
+    uint16_t curr_raw = 0;
+    esp_err_t err = read_encoder_raw(encoder_index, &curr_raw);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    update_encoder_tracker(encoder_index, curr_raw);
+    encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
+
+    // Calcula coordenadas incrementais contínuas relativas ao Home (zero relativo)
+    // Horário = positivo, Anti-horário = negativo
+    int32_t ticks_from_home = (tracker->turns * 4096) + ((int32_t)curr_raw - (int32_t)tracker->home_raw);
+    *angle_deg = ((float)ticks_from_home * 360.0f) / 4096.0f;
+    return ESP_OK;
+}
+
+esp_err_t hardware_encoder_set_zero(app_context_t *ctx, char axis)
+{
+    size_t idx = 0;
+    char ax = (char)toupper((unsigned char)axis);
+    if (ax == 'C' || ax == 'X') {
+        idx = 0;
+    } else if (ax == 'A' || ax == 'Y') {
+        idx = 1;
+    } else {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t curr_raw = 0;
+    esp_err_t err = read_encoder_raw(idx, &curr_raw);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    encoder_tracker_t *tracker = &s_encoder_trackers[idx];
+    tracker->home_raw = curr_raw;
+    tracker->last_raw = curr_raw;
+    tracker->turns = 0;
+    tracker->initialized = true;
+
+    if (ctx) {
+        ctx->settings.home_raw[idx] = curr_raw;
+        if (idx == 0) {
+            ctx->settings.home_c_deg = 0.0f;
+        } else {
+            ctx->settings.home_a_deg = 0.0f;
+        }
+        (void)storage_save_settings(&ctx->settings);
+    }
+
+    ESP_LOGI(APP_TAG, "Encoder %c: Zero (Home) gravado em raw=%u (posicao atual definida em 0.00 deg)",
+             ax, (unsigned)curr_raw);
+    return ESP_OK;
 }
 
 void hardware_deinit(void)

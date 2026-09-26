@@ -127,8 +127,8 @@ QFrame.card:hover {
 QFrame.metric-card {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #111c33, stop:1 #0d1527);
     border: 1px solid #1e2e4a;
-    border-radius: 12px;
-    padding: 14px;
+    border-radius: 10px;
+    padding: 6px 10px;
 }
 
 QFrame.metric-card:hover {
@@ -181,22 +181,22 @@ QLabel.section-title {
 
 QLabel.card-title {
     color: #94a3b8;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
+    letter-spacing: 0.6px;
 }
 
 QLabel.metric-value {
     color: #f8fafc;
-    font-size: 26px;
+    font-size: 19px;
     font-weight: 800;
     font-family: 'Consolas', 'JetBrains Mono', 'Segoe UI', monospace;
 }
 
 QLabel.metric-unit {
     color: #64748b;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 600;
 }
 
@@ -386,11 +386,11 @@ QComboBox QAbstractItemView {
 
 /* Status Badges */
 QLabel.badge {
-    border-radius: 10px;
-    padding: 3px 8px;
-    font-size: 10px;
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.4px;
 }
 
 QLabel.badge-green {
@@ -484,5 +484,195 @@ QStatusBar {
     color: #94a3b8;
     font-size: 11px;
     padding: 4px;
+}
+
+/* ==========================================================================
+   JOG PAD & MOTION CONTROLS
+   ========================================================================== */
+
+QFrame.jog-module {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0f172a, stop:1 #0a1120);
+    border: 1px solid #1e2e4a;
+    border-radius: 12px;
+    padding: 12px;
+}
+
+QFrame.jog-module:hover {
+    border-color: #2b4570;
+}
+
+QLabel.jog-module-title {
+    color: #38bdf8;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    padding-bottom: 2px;
+}
+
+QLabel.jog-module-title-z {
+    color: #34d399;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    padding-bottom: 2px;
+}
+
+QLabel.jog-module-sub {
+    color: #64748b;
+    font-size: 10px;
+    font-weight: 500;
+}
+
+/* Jog Directional Buttons */
+QPushButton.jog-btn {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #16243d, stop:1 #0e1728);
+    border: 1px solid #233758;
+    border-radius: 10px;
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 10px 14px;
+    min-height: 38px;
+}
+
+QPushButton.jog-btn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #22375d, stop:1 #15243e);
+    border-color: #38bdf8;
+    color: #38bdf8;
+}
+
+QPushButton.jog-btn:pressed {
+    background: #09101d;
+    border-color: #0284c7;
+    color: #ffffff;
+}
+
+QPushButton.jog-btn-z {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #12282e, stop:1 #0c1a1e);
+    border: 1px solid #1c4543;
+    border-radius: 10px;
+    color: #e2e8f0;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 10px 14px;
+    min-height: 38px;
+}
+
+QPushButton.jog-btn-z:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #183e3f, stop:1 #0f2b2b);
+    border-color: #10b981;
+    color: #34d399;
+}
+
+QPushButton.jog-btn-z:pressed {
+    background: #081717;
+    border-color: #059669;
+    color: #ffffff;
+}
+
+QPushButton.jog-btn-home {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0284c7, stop:1 #0369a1);
+    border: 1px solid #38bdf8;
+    border-radius: 10px;
+    color: #ffffff;
+    font-weight: 800;
+    font-size: 12px;
+    padding: 10px 14px;
+    min-height: 38px;
+}
+
+QPushButton.jog-btn-home:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0ea5e9, stop:1 #0284c7);
+    border-color: #7dd3fc;
+}
+
+QPushButton.jog-btn-home-z {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #059669, stop:1 #047857);
+    border: 1px solid #34d399;
+    border-radius: 10px;
+    color: #ffffff;
+    font-weight: 800;
+    font-size: 12px;
+    padding: 10px 14px;
+    min-height: 38px;
+}
+
+QPushButton.jog-btn-home-z:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #10b981, stop:1 #059669);
+    border-color: #6ee7b7;
+}
+
+QPushButton.jog-btn-action {
+    background-color: #111a2c;
+    border: 1px solid #1f304d;
+    border-radius: 8px;
+    color: #94a3b8;
+    font-weight: 600;
+    font-size: 11px;
+    padding: 7px 10px;
+    min-height: 28px;
+}
+
+QPushButton.jog-btn-action:hover {
+    background-color: #1a2a47;
+    border-color: #38bdf8;
+    color: #e2e8f0;
+}
+
+QPushButton.jog-btn-zero {
+    background-color: #171822;
+    border: 1px solid #362e4a;
+    border-radius: 8px;
+    color: #f59e0b;
+    font-weight: 600;
+    font-size: 11px;
+    padding: 7px 10px;
+    min-height: 28px;
+}
+
+QPushButton.jog-btn-zero:hover {
+    background-color: #242236;
+    border-color: #f59e0b;
+    color: #fbbf24;
+}
+
+/* Resolution Step Pills */
+QPushButton.step-pill {
+    background-color: #0d1527;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    color: #94a3b8;
+    font-weight: 600;
+    font-size: 11px;
+    padding: 3px 10px;
+    min-height: 22px;
+}
+
+QPushButton.step-pill:hover {
+    background-color: #17233d;
+    border-color: #38bdf8;
+    color: #f1f5f9;
+}
+
+QPushButton.step-pill-active {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #0ea5e9);
+    border: 1px solid #38bdf8;
+    border-radius: 10px;
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 11px;
+    padding: 3px 10px;
+    min-height: 22px;
+}
+
+QPushButton.step-pill-active-z {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #059669, stop:1 #10b981);
+    border: 1px solid #34d399;
+    border-radius: 10px;
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 11px;
+    padding: 3px 10px;
+    min-height: 22px;
 }
 """

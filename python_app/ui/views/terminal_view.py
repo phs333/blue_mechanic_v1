@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QCheckBox
 )
 from PyQt6.QtGui import QTextCursor, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QEvent
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState
 
@@ -75,6 +75,7 @@ class TerminalView(QWidget):
         self.txt_cmd = QLineEdit()
         self.txt_cmd.setPlaceholderText("Digite um comando (ex: STATUS, MOVE C 400, MOVE A -200, DRIVER ENABLED ON)...")
         self.txt_cmd.returnPressed.connect(self._send_command)
+        self.txt_cmd.installEventFilter(self)
         input_layout.addWidget(self.txt_cmd, 1)
         
         self.btn_send = QPushButton("Enviar")
@@ -174,11 +175,37 @@ class TerminalView(QWidget):
     def _clear_can_table(self):
         self.can_table.setRowCount(0)
 
+    def eventFilter(self, watched, event):
+        if watched == self.txt_cmd and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Up:
+                if self.history:
+                    if self.history_idx > 0:
+                        self.history_idx -= 1
+                    elif self.history_idx == -1:
+                        self.history_idx = len(self.history) - 1
+                    self.txt_cmd.setText(self.history[self.history_idx])
+                    self.txt_cmd.setCursorPosition(len(self.txt_cmd.text()))
+                return True
+            elif event.key() == Qt.Key.Key_Down:
+                if self.history:
+                    if 0 <= self.history_idx < len(self.history) - 1:
+                        self.history_idx += 1
+                        self.txt_cmd.setText(self.history[self.history_idx])
+                        self.txt_cmd.setCursorPosition(len(self.txt_cmd.text()))
+                    else:
+                        self.history_idx = len(self.history)
+                        self.txt_cmd.clear()
+                return True
+        return super().eventFilter(watched, event)
+
     def _send_command(self):
         cmd = self.txt_cmd.text().strip()
         if not cmd:
             return
-        self.history.append(cmd)
+        if not self.history or self.history[-1] != cmd:
+            self.history.append(cmd)
+            if len(self.history) > 50:
+                self.history.pop(0)
         self.history_idx = len(self.history)
         self.comm.send_raw(cmd)
         self.txt_cmd.clear()

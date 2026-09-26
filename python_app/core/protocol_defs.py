@@ -55,6 +55,10 @@ def calc_z_steps_for_mm(mm: float, pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH,
                         steps_per_rev: int = 200, microsteps: int = 16) -> int:
     return int(round(float(mm) * calc_z_steps_per_mm(pulley_teeth, steps_per_rev, microsteps)))
 
+def calc_z_mm_for_steps(steps: int, pulley_teeth: int = DEFAULT_Z_PULLEY_TEETH,
+                        steps_per_rev: int = 200, microsteps: int = 16) -> float:
+    return float(steps) * calc_z_mm_per_step(pulley_teeth, steps_per_rev, microsteps)
+
 # --- CAN Protocol OpCodes (Teensy/host -> ESP32) ---
 class CanOpcode(IntEnum):
     PING = 0x01

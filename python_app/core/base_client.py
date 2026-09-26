@@ -136,8 +136,12 @@ class BaseClient(ABC):
     def apply_driver_settings(self) -> bool:
         return self._unsupported("Aplicação das configurações TMC2209")
 
+    def set_can_enabled(self, enabled: bool) -> bool:
+        """Enable or disable CAN bus on the node."""
+        return self._unsupported("Habilitar/Desabilitar barramento CAN")
+
     def configure_can(self, node_id: int, bitrate: int, cmd_base: int,
-                      status_base: int, event_base: int) -> bool:
+                      status_base: int, event_base: int, enabled: bool = True) -> bool:
         return self._unsupported("Configuração da rede CAN")
 
     def read_tmc_reg(self, axis: str, reg: int) -> bool:

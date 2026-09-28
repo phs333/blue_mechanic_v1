@@ -19,6 +19,7 @@ from python_app.ui.widgets.jog_pad import JogPad
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, HardwareParameters, DeviceState
 from python_app.core.protocol_defs import calc_ca_steps_for_degrees, calc_z_steps_for_mm, DEFAULT_Z_PULLEY_TEETH
+from python_app.ui.theme import add_class
 
 class MotionView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -134,7 +135,7 @@ class MotionView(QWidget):
         
         # Calibration Section
         calib_title = QLabel("Gravação de Home e Limites (NVS):")
-        calib_title.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(calib_title, "table-header")
         move_vbox.addWidget(calib_title)
         
         calib_grid = QGridLayout()
@@ -171,7 +172,7 @@ class MotionView(QWidget):
         
         # Synchronized Move C+A+Z
         sync_title = QLabel("Movimento Sincronizado Simultâneo (C + A + Z por Hardware RMT):")
-        sync_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        add_class(sync_title, "accent")
         move_vbox.addWidget(sync_title)
         
         sync_grid = QGridLayout()
@@ -233,7 +234,7 @@ class MotionView(QWidget):
         sync_grid.addWidget(self.chk_sync_force, 2, 0, 1, 3)
 
         self.lbl_sync_calc = QLabel("Passos calculados: C=0 | A=0 | Z=0")
-        self.lbl_sync_calc.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        add_class(self.lbl_sync_calc, "caption")
         sync_grid.addWidget(self.lbl_sync_calc, 2, 3, 1, 3)
 
         # Row 3: Action Button

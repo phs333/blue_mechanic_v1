@@ -1,2 +1,12 @@
 CompileFlags:
-    Remove: [-f*, -m*]
+  CompilationDatabase: .
+  Remove:
+    - -f*
+    - -m*
+    - -W*
+  Add:
+    - --target=xtensa-esp32s3-elf
+    - -isystem
+    - C:/Espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/lib/gcc/xtensa-esp-elf/15.2.0/include
+    - -isystem
+    - C:/Espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/xtensa-esp-elf/include

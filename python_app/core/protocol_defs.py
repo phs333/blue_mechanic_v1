@@ -72,6 +72,7 @@ class CanOpcode(IntEnum):
     HOME = 0x21
     MOVE_FORCE = 0x22
     MOVE_SYNC = 0x23
+    STOP = 0x24          # [0x24, flags] bit0 = apagar lasers (E-STOP)
     LASER = 0x30
     FAN = 0x31
     OTA_START = 0x40
@@ -99,6 +100,7 @@ STATUS_FLAG_ALARME_Z_ATIVO  = 0x04
 STATUS_FLAG_TEMP_VALID      = 0x08
 STATUS_FLAG_TMC_UART_READY  = 0x10
 STATUS_FLAG_CAN_ONLINE      = 0x20
+STATUS_FLAG_POS_V2          = 0x40  # frame de posição do nó usa C/A int16 em décimos de grau com sinal
 
 # --- Fan Modes ---
 class FanMode(IntEnum):
@@ -125,8 +127,13 @@ ESP_ERRORS = {
     0x05: "ESP_ERR_NOT_FOUND",
     0x06: "ESP_ERR_NOT_SUPPORTED",
     0x07: "ESP_ERR_TIMEOUT",
+    0x08: "ESP_ERR_INVALID_RESPONSE",  # ex.: HOME terminou fora da tolerancia
+    0x09: "ESP_ERR_INVALID_CRC",       # ex.: OTA com frame perdido (lacuna de sequencia)
+    0x0C: "ESP_ERR_NOT_FINISHED",      # movimento interrompido por STOP ou removido da fila
     0xFF: "ESP_FAIL",
 }
+
+STOP_FLAG_LASERS_OFF = 0x01
 
 def delay_to_speed_level(delay_us: int) -> int:
     if delay_us >= 2000:
@@ -141,6 +148,24 @@ def delay_to_speed_level(delay_us: int) -> int:
 
 def speed_level_to_delay(level: int) -> int:
     return SPEED_LEVEL_DELAYS.get(level, 400)
+
+# --- TMC2209: corrente quantizada em 32 degraus (CS 0..31) ---
+# Mesma fórmula do firmware (tmc2209_ma_to_cs / tmc2209_cs_to_ma, Rsense 0,1 Ω).
+TMC2209_MA_PER_CS = 59.846
+
+
+def tmc_ma_to_cs(ma: float) -> int:
+    return max(0, min(31, int(float(ma) / TMC2209_MA_PER_CS - 1.0 + 0.5)))
+
+
+def tmc_cs_to_ma(cs: int) -> int:
+    return int((max(0, min(31, int(cs))) + 1) * TMC2209_MA_PER_CS + 0.5)
+
+
+def tmc_quantize_ma(ma: float) -> int:
+    """Corrente que o driver realmente usará para o valor pedido (ex.: 559 -> 539 mA)."""
+    return tmc_cs_to_ma(tmc_ma_to_cs(ma))
+
 
 LASER_MIN_USEFUL_DUTY = 46
 LASER_MAX_USEFUL_DUTY = 300

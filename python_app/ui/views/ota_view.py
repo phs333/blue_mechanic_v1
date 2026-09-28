@@ -20,6 +20,7 @@ from PyQt6.QtGui import QTextCursor
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState
 from python_app.core.ota_manager import OtaWorker
+from python_app.ui.theme import add_class
 
 
 class NodeOtaCard(QFrame):
@@ -124,7 +125,7 @@ class OtaView(QWidget):
         lbl_title = QLabel("🚀 Atualização de Firmware OTA (Nós ESP32-S3)")
         lbl_title.setStyleSheet("color: #38bdf8; font-size: 17px; font-weight: 800;")
         lbl_sub = QLabel("Transmissão segura de firmware via Teensy 4.1 USB/CAN ou PeakCAN para os nós 1 a 10 com verificação flash")
-        lbl_sub.setStyleSheet("color: #64748b; font-size: 12px;")
+        add_class(lbl_sub, "muted")
         title_vbox.addWidget(lbl_title)
         title_vbox.addWidget(lbl_sub)
         hdr_layout.addLayout(title_vbox)
@@ -169,15 +170,15 @@ class OtaView(QWidget):
         meta_row.setSpacing(16)
 
         self.lbl_file_size = QLabel("Tamanho: --")
-        self.lbl_file_size.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        add_class(self.lbl_file_size, "caption")
         meta_row.addWidget(self.lbl_file_size)
 
         self.lbl_file_sha = QLabel("SHA-256: --")
-        self.lbl_file_sha.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        add_class(self.lbl_file_sha, "caption")
         meta_row.addWidget(self.lbl_file_sha)
 
         self.lbl_file_date = QLabel("Modificado: --")
-        self.lbl_file_date.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        add_class(self.lbl_file_date, "caption")
         meta_row.addWidget(self.lbl_file_date)
 
         meta_row.addStretch()
@@ -219,7 +220,7 @@ class OtaView(QWidget):
         target_row.addSpacing(20)
 
         lbl_delay = QLabel("Pacing CAN (ms):")
-        lbl_delay.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        add_class(lbl_delay, "caption")
         target_row.addWidget(lbl_delay)
 
         self.spin_delay = QDoubleSpinBox()
@@ -307,7 +308,7 @@ class OtaView(QWidget):
         metrics_row.setSpacing(16)
 
         self.lbl_metric_bytes = QLabel("Dados: 0 / 0 KB (0%)")
-        self.lbl_metric_bytes.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(self.lbl_metric_bytes, "row-label")
         metrics_row.addWidget(self.lbl_metric_bytes)
 
         self.lbl_metric_speed = QLabel("Velocidade: 0.0 KB/s")
@@ -347,7 +348,7 @@ class OtaView(QWidget):
         grid_vbox.setSpacing(10)
 
         lbl_grid_hdr = QLabel("4. Status dos 10 Nós na Rede CAN:")
-        lbl_grid_hdr.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        add_class(lbl_grid_hdr, "accent")
         grid_vbox.addWidget(lbl_grid_hdr)
 
         self.node_cards: Dict[int, NodeOtaCard] = {}
@@ -375,7 +376,7 @@ class OtaView(QWidget):
 
         log_hdr = QHBoxLayout()
         lbl_l_title = QLabel("5. Registro de Eventos e Auditoria OTA")
-        lbl_l_title.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(lbl_l_title, "table-header")
         log_hdr.addWidget(lbl_l_title)
 
         log_hdr.addStretch()

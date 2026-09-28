@@ -15,9 +15,27 @@
 #include "ota_update.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
+#include "driver/gpio.h"
+
+static TaskHandle_t s_safety_task;
+
+/* Borda de subida do fim de curso Z: acorda a safety_task na hora (antes: polling de 20 ms).
+ * Os passos do Z via RMT nao checam o switch a cada passo, entao o STOP depende disso. */
+static void IRAM_ATTR z_switch_isr(void *arg)
+{
+  (void)arg;
+  BaseType_t woken = pdFALSE;
+  if (s_safety_task != NULL) {
+    vTaskNotifyGiveFromISR(s_safety_task, &woken);
+  }
+  if (woken == pdTRUE) {
+    portYIELD_FROM_ISR();
+  }
+}
 
 static app_context_t g_app = {
     .settings = APP_SETTINGS_DEFAULT_INIT,
+    .ext = APP_EXT_SETTINGS_DEFAULT_INIT,
     .state = APP_RUNTIME_DEFAULT_INIT,
     .motion_mutex = NULL,
 };
@@ -63,10 +81,15 @@ static void safety_task(void *arg) {
     if (ctx->state.alarme_z_ativo && !ctx->state.em_homing_z &&
         !ctx->state.z_bloqueado && hardware_is_z_switch_pressed()) {
       ctx->state.z_bloqueado = true;
+      ctx->state.homed[AXIS_Z_ID] = false;
+      // MOVE_SYNC gera os passos do Z via RMT sem checar o switch a cada passo:
+      // interrompe qualquer movimento em curso, como um endstop de impressora 3D.
+      (void)motion_request_stop(ctx);
       ESP_LOGE(APP_TAG, "ALARME: fim de curso Z acionado inesperadamente. "
-                        "Movimentos no eixo Z suspensos.");
+                        "Movimentos interrompidos e eixo Z suspenso.");
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    // Periodico (encoders) ou imediato quando a ISR do fim de curso Z dispara
+    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
   }
 }
 
@@ -157,8 +180,12 @@ void app_main(void) {
       ESP_LOGE(APP_TAG, "Aviso ao carregar settings da NVS (%s). Usando padroes.", esp_err_to_name(store_err));
       g_app.settings = (persisted_settings_t)APP_SETTINGS_DEFAULT_INIT;
   }
+  (void)storage_load_ext(&g_app.ext);
   for (size_t i = 0; i < AXIS_COUNT; ++i) {
       g_app.state.speed_delay_us[i] = g_app.settings.speed_delay_us[i];
+      g_app.state.speed[i] = g_app.settings.speed[i];
+      g_app.state.speed_max[i] = g_app.settings.speed_max[i];
+      g_app.state.accel_max[i] = g_app.settings.accel_max[i];
       g_app.state.inverter[i] = (bool)g_app.settings.inverter[i];
   }
   ESP_ERROR_CHECK(hardware_init(&g_app));
@@ -174,13 +201,23 @@ void app_main(void) {
     ESP_LOGW(APP_TAG,
              "TMC UART nao entrou totalmente. STEP/DIR continua habilitado.");
   }
+  // VM dos motores pode subir depois do ESP32 (ou oscilar): o monitor reaplica a
+  // configuracao quando o driver volta a responder ou reporta reset.
+  (void)tmc2209_start_monitor(&g_app);
   if (can_bus_init(&g_app) != ESP_OK) {
     ESP_LOGW(APP_TAG, "CAN/TWAI nao entrou totalmente. Firmware segue local.");
   }
 
 
-  xTaskCreatePinnedToCore(safety_task, "safety_task", 4096, &g_app, 10, NULL,
+  xTaskCreatePinnedToCore(safety_task, "safety_task", 4096, &g_app, 10, &s_safety_task,
                           1);
+  esp_err_t isr_err = gpio_install_isr_service(0);
+  if (isr_err == ESP_OK || isr_err == ESP_ERR_INVALID_STATE) {
+    (void)gpio_set_intr_type(SWITCH_Z, GPIO_INTR_POSEDGE);
+    if (gpio_isr_handler_add(SWITCH_Z, z_switch_isr, NULL) != ESP_OK) {
+      ESP_LOGW(APP_TAG, "ISR do fim de curso Z indisponivel; safety_task segue por polling.");
+    }
+  }
   xTaskCreatePinnedToCore(thermal_task, "thermal_task", 4096, &g_app, 5, NULL,
                           0);
   xTaskCreatePinnedToCore(console_task, "console_task", 6144, &g_app, 4, NULL,

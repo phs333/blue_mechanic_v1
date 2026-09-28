@@ -15,13 +15,13 @@ from PyQt6.QtWidgets import (
     QLineEdit, QMessageBox
 )
 from PyQt6.QtCore import Qt, QTimer
-import time
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareParameters, DeviceState
 from python_app.core.protocol_defs import (
     calc_z_mm_per_rev, calc_z_mm_per_step, calc_z_steps_per_mm,
-    calc_z_steps_for_mm, calc_z_mm_for_steps, Z_BELT_PITCH_MM
+    calc_z_steps_for_mm, calc_z_mm_for_steps, Z_BELT_PITCH_MM, tmc_quantize_ma
 )
+from python_app.ui.theme import add_class
 
 class ParametersView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -59,7 +59,7 @@ class ParametersView(QWidget):
         title_lbl = QLabel("⚙️  Gerenciamento de Parâmetros & NVS")
         title_lbl.setStyleSheet("color: #38bdf8; font-size: 15px; font-weight: 700;")
         sub_lbl = QLabel("Cinemática, encoders magnéticos, drivers TMC2209 e barramento CAN dos nós")
-        sub_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        add_class(sub_lbl, "muted")
         title_vbox.addWidget(title_lbl)
         title_vbox.addWidget(sub_lbl)
         header_layout.addLayout(title_vbox, 1)
@@ -102,7 +102,7 @@ class ParametersView(QWidget):
         
         kin_title = QLabel("1. Cinemática e Movimento")
         kin_title.setProperty("class", "section-title")
-        kin_title.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #38bdf8;")
+        add_class(kin_title, "card-title")
         kin_layout.addWidget(kin_title)
         
         kin_grid = QGridLayout()
@@ -111,27 +111,27 @@ class ParametersView(QWidget):
         
         # Column Headers
         h_axis = QLabel("Eixo")
-        h_axis.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_axis, "table-header")
         h_axis.setFixedWidth(95)
         h_steps = QLabel("Passos")
         h_steps.setToolTip("Passos base do motor por volta")
-        h_steps.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_steps, "table-header")
         h_steps.setFixedWidth(80)
         h_speed = QLabel("Vel. Máx")
         h_speed.setToolTip("Velocidade Máxima (°/s ou mm/s)")
-        h_speed.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_speed, "table-header")
         h_speed.setFixedWidth(120)
         h_accel = QLabel("Acel. Máx")
         h_accel.setToolTip("Aceleração Máxima (°/s² ou mm/s²)")
-        h_accel.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_accel, "table-header")
         h_accel.setFixedWidth(125)
         h_ramp = QLabel("Rampa Inicial")
         h_ramp.setToolTip("Velocidade inicial de partida da rampa S-Curve (°/s ou mm/s)")
-        h_ramp.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_ramp, "table-header")
         h_ramp.setFixedWidth(120)
         h_inv = QLabel("Inv.")
         h_inv.setToolTip("Inverter sentido no hardware")
-        h_inv.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(h_inv, "table-header")
         h_inv.setFixedWidth(48)
         
         kin_grid.addWidget(h_axis, 0, 0)
@@ -154,7 +154,7 @@ class ParametersView(QWidget):
         
         # Axis C
         lbl_c = QLabel("Eixo C (Base):")
-        lbl_c.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_c, "row-label")
         lbl_c.setFixedWidth(95)
         kin_grid.addWidget(lbl_c, 1, 0)
         self.spin_steps_c = QSpinBox()
@@ -162,7 +162,7 @@ class ParametersView(QWidget):
         self.spin_steps_c.setValue(200)
         self.spin_steps_c.setFixedWidth(80)
         self.spin_steps_c.setFixedHeight(28)
-        self.spin_steps_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_steps_c, "compact-input")
         self.spin_steps_c.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_c, 1, 1)
         self.spin_speed_c = QDoubleSpinBox()
@@ -172,7 +172,7 @@ class ParametersView(QWidget):
         self.spin_speed_c.setSuffix(" °/s")
         self.spin_speed_c.setFixedWidth(120)
         self.spin_speed_c.setFixedHeight(28)
-        self.spin_speed_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_speed_c, "compact-input")
         kin_grid.addWidget(self.spin_speed_c, 1, 2)
         self.spin_accel_c = QDoubleSpinBox()
         self.spin_accel_c.setRange(1.0, 50000.0)
@@ -180,7 +180,7 @@ class ParametersView(QWidget):
         self.spin_accel_c.setSuffix(" °/s²")
         self.spin_accel_c.setFixedWidth(125)
         self.spin_accel_c.setFixedHeight(28)
-        self.spin_accel_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_accel_c, "compact-input")
         kin_grid.addWidget(self.spin_accel_c, 1, 3)
         self.spin_ramp_c = QDoubleSpinBox()
         self.spin_ramp_c.setRange(0.5, 100.0)
@@ -190,19 +190,19 @@ class ParametersView(QWidget):
         self.spin_ramp_c.setSuffix(" °/s")
         self.spin_ramp_c.setFixedWidth(120)
         self.spin_ramp_c.setFixedHeight(28)
-        self.spin_ramp_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_ramp_c, "compact-input")
         self.spin_ramp_c.setToolTip("Velocidade inicial de partida da rampa S-Curve no eixo C (salvo na NVS)")
         self.spin_ramp_c.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_ramp_c, 1, 4)
         self.chk_inv_hw_c = QCheckBox("Inv")
         self.chk_inv_hw_c.setChecked(True)
         self.chk_inv_hw_c.setFixedWidth(48)
-        self.chk_inv_hw_c.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_inv_hw_c, "check-label")
         kin_grid.addWidget(self.chk_inv_hw_c, 1, 5)
         
         # Axis A
         lbl_a = QLabel("Eixo A (Pivot):")
-        lbl_a.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_a, "row-label")
         lbl_a.setFixedWidth(95)
         kin_grid.addWidget(lbl_a, 2, 0)
         self.spin_steps_a = QSpinBox()
@@ -210,7 +210,7 @@ class ParametersView(QWidget):
         self.spin_steps_a.setValue(200)
         self.spin_steps_a.setFixedWidth(80)
         self.spin_steps_a.setFixedHeight(28)
-        self.spin_steps_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_steps_a, "compact-input")
         self.spin_steps_a.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_a, 2, 1)
         self.spin_speed_a = QDoubleSpinBox()
@@ -220,7 +220,7 @@ class ParametersView(QWidget):
         self.spin_speed_a.setSuffix(" °/s")
         self.spin_speed_a.setFixedWidth(120)
         self.spin_speed_a.setFixedHeight(28)
-        self.spin_speed_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_speed_a, "compact-input")
         kin_grid.addWidget(self.spin_speed_a, 2, 2)
         self.spin_accel_a = QDoubleSpinBox()
         self.spin_accel_a.setRange(1.0, 50000.0)
@@ -228,7 +228,7 @@ class ParametersView(QWidget):
         self.spin_accel_a.setSuffix(" °/s²")
         self.spin_accel_a.setFixedWidth(125)
         self.spin_accel_a.setFixedHeight(28)
-        self.spin_accel_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_accel_a, "compact-input")
         kin_grid.addWidget(self.spin_accel_a, 2, 3)
         self.spin_ramp_a = QDoubleSpinBox()
         self.spin_ramp_a.setRange(0.5, 100.0)
@@ -238,19 +238,19 @@ class ParametersView(QWidget):
         self.spin_ramp_a.setSuffix(" °/s")
         self.spin_ramp_a.setFixedWidth(120)
         self.spin_ramp_a.setFixedHeight(28)
-        self.spin_ramp_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_ramp_a, "compact-input")
         self.spin_ramp_a.setToolTip("Velocidade inicial de partida da rampa S-Curve no eixo A (salvo na NVS)")
         self.spin_ramp_a.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_ramp_a, 2, 4)
         self.chk_inv_hw_a = QCheckBox("Inv")
         self.chk_inv_hw_a.setChecked(True)
         self.chk_inv_hw_a.setFixedWidth(48)
-        self.chk_inv_hw_a.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_inv_hw_a, "check-label")
         kin_grid.addWidget(self.chk_inv_hw_a, 2, 5)
         
         # Axis Z
         lbl_z = QLabel("Eixo Z (Linear):")
-        lbl_z.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_z, "row-label")
         lbl_z.setFixedWidth(95)
         kin_grid.addWidget(lbl_z, 3, 0)
         self.spin_steps_z = QSpinBox()
@@ -258,7 +258,7 @@ class ParametersView(QWidget):
         self.spin_steps_z.setValue(200)
         self.spin_steps_z.setFixedWidth(80)
         self.spin_steps_z.setFixedHeight(28)
-        self.spin_steps_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_steps_z, "compact-input")
         self.spin_steps_z.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_steps_z, 3, 1)
         self.spin_speed_z = QDoubleSpinBox()
@@ -268,7 +268,7 @@ class ParametersView(QWidget):
         self.spin_speed_z.setSuffix(" mm/s")
         self.spin_speed_z.setFixedWidth(120)
         self.spin_speed_z.setFixedHeight(28)
-        self.spin_speed_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_speed_z, "compact-input")
         kin_grid.addWidget(self.spin_speed_z, 3, 2)
         self.spin_accel_z = QDoubleSpinBox()
         self.spin_accel_z.setRange(0.1, 5000.0)
@@ -277,7 +277,7 @@ class ParametersView(QWidget):
         self.spin_accel_z.setSuffix(" mm/s²")
         self.spin_accel_z.setFixedWidth(125)
         self.spin_accel_z.setFixedHeight(28)
-        self.spin_accel_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_accel_z, "compact-input")
         kin_grid.addWidget(self.spin_accel_z, 3, 3)
         self.spin_ramp_z = QDoubleSpinBox()
         self.spin_ramp_z.setRange(0.5, 150.0)
@@ -287,14 +287,14 @@ class ParametersView(QWidget):
         self.spin_ramp_z.setSuffix(" mm/s")
         self.spin_ramp_z.setFixedWidth(120)
         self.spin_ramp_z.setFixedHeight(28)
-        self.spin_ramp_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_ramp_z, "compact-input")
         self.spin_ramp_z.setToolTip("Velocidade inicial de partida da rampa S-Curve no eixo Z (salvo na NVS)")
         self.spin_ramp_z.valueChanged.connect(self._update_kinematics_preview)
         kin_grid.addWidget(self.spin_ramp_z, 3, 4)
         self.chk_inv_hw_z = QCheckBox("Inv")
         self.chk_inv_hw_z.setChecked(False)
         self.chk_inv_hw_z.setFixedWidth(48)
-        self.chk_inv_hw_z.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_inv_hw_z, "check-label")
         kin_grid.addWidget(self.chk_inv_hw_z, 3, 5)
         kin_grid.setColumnStretch(6, 1)
         
@@ -312,7 +312,7 @@ class ParametersView(QWidget):
         z_config_row.setSpacing(12)
         
         lbl_pulley = QLabel("Polia Z:")
-        lbl_pulley.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_pulley, "field-label")
         lbl_pulley.setFixedWidth(54)
         z_config_row.addWidget(lbl_pulley)
         self.spin_pulley_z = QSpinBox()
@@ -321,12 +321,12 @@ class ParametersView(QWidget):
         self.spin_pulley_z.setSuffix(" T")
         self.spin_pulley_z.setFixedWidth(80)
         self.spin_pulley_z.setFixedHeight(28)
-        self.spin_pulley_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_pulley_z, "compact-input")
         self.spin_pulley_z.valueChanged.connect(self._update_kinematics_preview)
         z_config_row.addWidget(self.spin_pulley_z)
         
         lbl_max_z = QLabel("Curso Z:")
-        lbl_max_z.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_max_z, "field-label")
         lbl_max_z.setFixedWidth(62)
         z_config_row.addWidget(lbl_max_z)
         self.spin_max_z_mm = QDoubleSpinBox()
@@ -337,12 +337,62 @@ class ParametersView(QWidget):
         self.spin_max_z_mm.setSuffix(" mm")
         self.spin_max_z_mm.setFixedWidth(110)
         self.spin_max_z_mm.setFixedHeight(28)
-        self.spin_max_z_mm.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_max_z_mm, "compact-input")
         self.spin_max_z_mm.valueChanged.connect(self._update_kinematics_preview)
         self.spin_max_z = self.spin_max_z_mm
         z_config_row.addWidget(self.spin_max_z_mm)
         z_config_row.addStretch(1)
         z_extra_layout.addLayout(z_config_row)
+
+        # Motor de movimento do firmware: S-curve no ISR + encadeamento (lookahead com jerk)
+        motion_row = QHBoxLayout()
+        motion_row.setContentsMargins(0, 0, 0, 0)
+        motion_row.setSpacing(10)
+        lbl_engine = QLabel("Motor:")
+        lbl_engine.setProperty("class", "field-label")
+        motion_row.addWidget(lbl_engine)
+        self.combo_motion_engine = QComboBox()
+        self.combo_motion_engine.addItems(["STREAM", "LEGACY"])
+        self.combo_motion_engine.setToolTip(
+            "STREAM: perfil S-curve no domínio do tempo gerado no ISR do RMT, eixos alinhados e "
+            "encadeamento de movimentos.\nLEGACY: motor anterior (rampas por tabela, um movimento por vez)."
+        )
+        self.combo_motion_engine.setFixedWidth(100)
+        self.combo_motion_engine.setFixedHeight(28)
+        add_class(self.combo_motion_engine, "compact-combo")
+        motion_row.addWidget(self.combo_motion_engine)
+        self.chk_lookahead = QCheckBox("Encadear movimentos")
+        self.chk_lookahead.setChecked(True)
+        self.chk_lookahead.setToolTip(
+            "Com comandos já na fila, passa de um movimento ao seguinte sem parar "
+            "(salto de velocidade por eixo limitado pelo jerk)."
+        )
+        motion_row.addWidget(self.chk_lookahead)
+        motion_row.addStretch(1)
+        z_extra_layout.addLayout(motion_row)
+
+        jerk_row = QHBoxLayout()
+        jerk_row.setContentsMargins(0, 0, 0, 0)
+        jerk_row.setSpacing(10)
+        motion_row = jerk_row
+        lbl_jerk = QLabel("Jerk C / A / Z:")
+        lbl_jerk.setProperty("class", "field-label")
+        lbl_jerk.setToolTip("Salto máximo de velocidade de cada eixo numa junção entre movimentos")
+        motion_row.addWidget(lbl_jerk)
+        self.spin_jerk = []
+        for default, suffix in ((15.0, " °/s"), (15.0, " °/s"), (10.0, " mm/s")):
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 1000.0)
+            spin.setDecimals(1)
+            spin.setValue(default)
+            spin.setSuffix(suffix)
+            spin.setFixedWidth(92)
+            spin.setFixedHeight(28)
+            add_class(spin, "compact-input")
+            motion_row.addWidget(spin)
+            self.spin_jerk.append(spin)
+        motion_row.addStretch(1)
+        z_extra_layout.addLayout(motion_row)
         
         # Dynamic preview calculation banner (with wordwrap enabled)
         self.lbl_kin_calc_info = QLabel("Cálculo cinemático: ...")
@@ -362,7 +412,7 @@ class ParametersView(QWidget):
         
         limits_title = QLabel("2. Limites Angulares dos Encoders Magnéticos")
         limits_title.setProperty("class", "section-title")
-        limits_title.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #38bdf8;")
+        add_class(limits_title, "card-title")
         limits_layout.addWidget(limits_title)
         
         limits_grid = QGridLayout()
@@ -370,16 +420,16 @@ class ParametersView(QWidget):
         limits_grid.setSpacing(5)
         
         lh_axis = QLabel("Eixo")
-        lh_axis.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(lh_axis, "table-header")
         lh_axis.setFixedWidth(95)
         lh_min = QLabel("Limite Mín")
-        lh_min.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(lh_min, "table-header")
         lh_min.setFixedWidth(120)
         lh_max = QLabel("Limite Máx")
-        lh_max.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(lh_max, "table-header")
         lh_max.setFixedWidth(120)
         lh_desc = QLabel("Operação")
-        lh_desc.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(lh_desc, "table-header")
         lh_desc.setFixedWidth(135)
         
         limits_grid.addWidget(lh_axis, 0, 0)
@@ -389,7 +439,7 @@ class ParametersView(QWidget):
         
         # Eixo C
         lbl_lim_c = QLabel("Eixo C (Base):")
-        lbl_lim_c.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_lim_c, "row-label")
         lbl_lim_c.setFixedWidth(95)
         limits_grid.addWidget(lbl_lim_c, 1, 0)
         self.spin_limit_min_c = QDoubleSpinBox()
@@ -399,7 +449,7 @@ class ParametersView(QWidget):
         self.spin_limit_min_c.setSuffix(" °")
         self.spin_limit_min_c.setFixedWidth(120)
         self.spin_limit_min_c.setFixedHeight(28)
-        self.spin_limit_min_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_limit_min_c, "compact-input")
         limits_grid.addWidget(self.spin_limit_min_c, 1, 1)
         self.spin_limit_max_c = QDoubleSpinBox()
         self.spin_limit_max_c.setRange(-3600.0, 3600.0)
@@ -408,16 +458,16 @@ class ParametersView(QWidget):
         self.spin_limit_max_c.setSuffix(" °")
         self.spin_limit_max_c.setFixedWidth(120)
         self.spin_limit_max_c.setFixedHeight(28)
-        self.spin_limit_max_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_limit_max_c, "compact-input")
         limits_grid.addWidget(self.spin_limit_max_c, 1, 2)
         lbl_desc_c = QLabel("Giro base contínuo")
-        lbl_desc_c.setStyleSheet("color: #64748b; font-size: 12px;")
+        add_class(lbl_desc_c, "muted")
         lbl_desc_c.setFixedWidth(135)
         limits_grid.addWidget(lbl_desc_c, 1, 3)
         
         # Eixo A
         lbl_lim_a = QLabel("Eixo A (Pivot):")
-        lbl_lim_a.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_lim_a, "row-label")
         lbl_lim_a.setFixedWidth(95)
         limits_grid.addWidget(lbl_lim_a, 2, 0)
         self.spin_limit_min_a = QDoubleSpinBox()
@@ -427,7 +477,7 @@ class ParametersView(QWidget):
         self.spin_limit_min_a.setSuffix(" °")
         self.spin_limit_min_a.setFixedWidth(120)
         self.spin_limit_min_a.setFixedHeight(28)
-        self.spin_limit_min_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_limit_min_a, "compact-input")
         limits_grid.addWidget(self.spin_limit_min_a, 2, 1)
         self.spin_limit_max_a = QDoubleSpinBox()
         self.spin_limit_max_a.setRange(-3600.0, 3600.0)
@@ -436,10 +486,10 @@ class ParametersView(QWidget):
         self.spin_limit_max_a.setSuffix(" °")
         self.spin_limit_max_a.setFixedWidth(120)
         self.spin_limit_max_a.setFixedHeight(28)
-        self.spin_limit_max_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_limit_max_a, "compact-input")
         limits_grid.addWidget(self.spin_limit_max_a, 2, 2)
         lbl_desc_a = QLabel("Pivot do cabeçote")
-        lbl_desc_a.setStyleSheet("color: #64748b; font-size: 12px;")
+        add_class(lbl_desc_a, "muted")
         lbl_desc_a.setFixedWidth(135)
         limits_grid.addWidget(lbl_desc_a, 2, 3)
         limits_grid.setColumnStretch(4, 1)
@@ -469,19 +519,19 @@ class ParametersView(QWidget):
         tmc_header.setSpacing(8)
         tmc_title = QLabel("3. Drivers TMC2209 (UART)")
         tmc_title.setProperty("class", "section-title")
-        tmc_title.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #38bdf8;")
+        add_class(tmc_title, "card-title")
         tmc_header.addWidget(tmc_title)
         tmc_header.addStretch()
         
         lbl_mode = QLabel("Modo:")
-        lbl_mode.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_mode, "field-label")
         tmc_header.addWidget(lbl_mode)
         self.combo_driver_mode = QComboBox()
         self.combo_driver_mode.addItems(["UART Digital", "STEP/DIR Legado"])
         self.combo_driver_mode.setCurrentIndex(0)
         self.combo_driver_mode.setFixedWidth(155)
         self.combo_driver_mode.setFixedHeight(28)
-        self.combo_driver_mode.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_driver_mode, "compact-combo")
         tmc_header.addWidget(self.combo_driver_mode)
         tmc_layout.addLayout(tmc_header)
         
@@ -490,26 +540,26 @@ class ParametersView(QWidget):
         tmc_grid.setSpacing(5)
         
         th_driver = QLabel("Driver")
-        th_driver.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_driver, "table-header")
         th_driver.setFixedWidth(95)
         th_addr = QLabel("Endr")
         th_addr.setToolTip("Endereço UART (0..3)")
-        th_addr.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_addr, "table-header")
         th_addr.setFixedWidth(55)
         th_irun = QLabel("iRun")
         th_irun.setToolTip("Corrente de trabalho em mA")
-        th_irun.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_irun, "table-header")
         th_irun.setFixedWidth(105)
         th_ihold = QLabel("iHold")
         th_ihold.setToolTip("Corrente de repouso em mA")
-        th_ihold.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_ihold, "table-header")
         th_ihold.setFixedWidth(105)
         th_usteps = QLabel("Micropassos")
-        th_usteps.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_usteps, "table-header")
         th_usteps.setFixedWidth(75)
         th_sc = QLabel("SC")
         th_sc.setToolTip("SpreadCycle ativado")
-        th_sc.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(th_sc, "table-header")
         th_sc.setFixedWidth(45)
         
         tmc_grid.addWidget(th_driver, 0, 0)
@@ -521,7 +571,7 @@ class ParametersView(QWidget):
         
         # Driver C
         lbl_drv_c = QLabel("Driver C (Base):")
-        lbl_drv_c.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_drv_c, "row-label")
         lbl_drv_c.setFixedWidth(95)
         tmc_grid.addWidget(lbl_drv_c, 1, 0)
         self.spin_tmc_addr_c = QSpinBox()
@@ -529,7 +579,7 @@ class ParametersView(QWidget):
         self.spin_tmc_addr_c.setValue(0)
         self.spin_tmc_addr_c.setFixedWidth(55)
         self.spin_tmc_addr_c.setFixedHeight(28)
-        self.spin_tmc_addr_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_addr_c, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_addr_c, 1, 1)
         self.spin_tmc_irun_c = QSpinBox()
         self.spin_tmc_irun_c.setRange(50, 2000)
@@ -537,7 +587,7 @@ class ParametersView(QWidget):
         self.spin_tmc_irun_c.setSuffix(" mA")
         self.spin_tmc_irun_c.setFixedWidth(105)
         self.spin_tmc_irun_c.setFixedHeight(28)
-        self.spin_tmc_irun_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_irun_c, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_irun_c, 1, 2)
         self.spin_tmc_ihold_c = QSpinBox()
         self.spin_tmc_ihold_c.setRange(50, 2000)
@@ -545,24 +595,24 @@ class ParametersView(QWidget):
         self.spin_tmc_ihold_c.setSuffix(" mA")
         self.spin_tmc_ihold_c.setFixedWidth(105)
         self.spin_tmc_ihold_c.setFixedHeight(28)
-        self.spin_tmc_ihold_c.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_ihold_c, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_ihold_c, 1, 3)
         self.combo_tmc_usteps_c = QComboBox()
         self.combo_tmc_usteps_c.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_c.setCurrentText("16")
         self.combo_tmc_usteps_c.setFixedWidth(75)
         self.combo_tmc_usteps_c.setFixedHeight(28)
-        self.combo_tmc_usteps_c.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_tmc_usteps_c, "compact-combo")
         self.combo_tmc_usteps_c.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_c, 1, 4)
         self.chk_tmc_sc_c = QCheckBox("SC")
         self.chk_tmc_sc_c.setFixedWidth(45)
-        self.chk_tmc_sc_c.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_tmc_sc_c, "check-label")
         tmc_grid.addWidget(self.chk_tmc_sc_c, 1, 5)
         
         # Driver A
         lbl_drv_a = QLabel("Driver A (Pivot):")
-        lbl_drv_a.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_drv_a, "row-label")
         lbl_drv_a.setFixedWidth(95)
         tmc_grid.addWidget(lbl_drv_a, 2, 0)
         self.spin_tmc_addr_a = QSpinBox()
@@ -570,7 +620,7 @@ class ParametersView(QWidget):
         self.spin_tmc_addr_a.setValue(1)
         self.spin_tmc_addr_a.setFixedWidth(55)
         self.spin_tmc_addr_a.setFixedHeight(28)
-        self.spin_tmc_addr_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_addr_a, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_addr_a, 2, 1)
         self.spin_tmc_irun_a = QSpinBox()
         self.spin_tmc_irun_a.setRange(50, 2000)
@@ -578,7 +628,7 @@ class ParametersView(QWidget):
         self.spin_tmc_irun_a.setSuffix(" mA")
         self.spin_tmc_irun_a.setFixedWidth(105)
         self.spin_tmc_irun_a.setFixedHeight(28)
-        self.spin_tmc_irun_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_irun_a, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_irun_a, 2, 2)
         self.spin_tmc_ihold_a = QSpinBox()
         self.spin_tmc_ihold_a.setRange(50, 2000)
@@ -586,24 +636,24 @@ class ParametersView(QWidget):
         self.spin_tmc_ihold_a.setSuffix(" mA")
         self.spin_tmc_ihold_a.setFixedWidth(105)
         self.spin_tmc_ihold_a.setFixedHeight(28)
-        self.spin_tmc_ihold_a.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_ihold_a, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_ihold_a, 2, 3)
         self.combo_tmc_usteps_a = QComboBox()
         self.combo_tmc_usteps_a.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_a.setCurrentText("16")
         self.combo_tmc_usteps_a.setFixedWidth(75)
         self.combo_tmc_usteps_a.setFixedHeight(28)
-        self.combo_tmc_usteps_a.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_tmc_usteps_a, "compact-combo")
         self.combo_tmc_usteps_a.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_a, 2, 4)
         self.chk_tmc_sc_a = QCheckBox("SC")
         self.chk_tmc_sc_a.setFixedWidth(45)
-        self.chk_tmc_sc_a.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_tmc_sc_a, "check-label")
         tmc_grid.addWidget(self.chk_tmc_sc_a, 2, 5)
         
         # Driver Z
         lbl_drv_z = QLabel("Driver Z (Linear):")
-        lbl_drv_z.setStyleSheet("color: #e2e8f0; font-size: 12px; font-weight: 600;")
+        add_class(lbl_drv_z, "row-label")
         lbl_drv_z.setFixedWidth(95)
         tmc_grid.addWidget(lbl_drv_z, 3, 0)
         self.spin_tmc_addr_z = QSpinBox()
@@ -611,7 +661,7 @@ class ParametersView(QWidget):
         self.spin_tmc_addr_z.setValue(2)
         self.spin_tmc_addr_z.setFixedWidth(55)
         self.spin_tmc_addr_z.setFixedHeight(28)
-        self.spin_tmc_addr_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_addr_z, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_addr_z, 3, 1)
         self.spin_tmc_irun_z = QSpinBox()
         self.spin_tmc_irun_z.setRange(50, 2000)
@@ -619,7 +669,7 @@ class ParametersView(QWidget):
         self.spin_tmc_irun_z.setSuffix(" mA")
         self.spin_tmc_irun_z.setFixedWidth(105)
         self.spin_tmc_irun_z.setFixedHeight(28)
-        self.spin_tmc_irun_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_irun_z, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_irun_z, 3, 2)
         self.spin_tmc_ihold_z = QSpinBox()
         self.spin_tmc_ihold_z.setRange(50, 2000)
@@ -627,21 +677,50 @@ class ParametersView(QWidget):
         self.spin_tmc_ihold_z.setSuffix(" mA")
         self.spin_tmc_ihold_z.setFixedWidth(105)
         self.spin_tmc_ihold_z.setFixedHeight(28)
-        self.spin_tmc_ihold_z.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_tmc_ihold_z, "compact-input")
         tmc_grid.addWidget(self.spin_tmc_ihold_z, 3, 3)
         self.combo_tmc_usteps_z = QComboBox()
         self.combo_tmc_usteps_z.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
         self.combo_tmc_usteps_z.setCurrentText("16")
         self.combo_tmc_usteps_z.setFixedWidth(75)
         self.combo_tmc_usteps_z.setFixedHeight(28)
-        self.combo_tmc_usteps_z.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_tmc_usteps_z, "compact-combo")
         self.combo_tmc_usteps_z.currentTextChanged.connect(self._update_kinematics_preview)
         tmc_grid.addWidget(self.combo_tmc_usteps_z, 3, 4)
         self.chk_tmc_sc_z = QCheckBox("SC")
         self.chk_tmc_sc_z.setFixedWidth(45)
-        self.chk_tmc_sc_z.setStyleSheet("font-size: 12px; color: #cbd5e1;")
+        add_class(self.chk_tmc_sc_z, "check-label")
         tmc_grid.addWidget(self.chk_tmc_sc_z, 3, 5)
-        tmc_grid.setColumnStretch(6, 1)
+
+        # Limiar stealthChop -> spreadCycle (TPWMTHRS): silencioso devagar, torque em alta
+        th_stealth = QLabel("Stealth até")
+        th_stealth.setToolTip(
+            "Velocidade até a qual o driver usa stealthChop (silencioso); acima dela troca para "
+            "spreadCycle (mais torque em alta rotação). 0 = stealthChop sempre. Ignorado com SC marcado."
+        )
+        add_class(th_stealth, "table-header")
+        tmc_grid.addWidget(th_stealth, 0, 6)
+        self.spin_tmc_stealth = []
+        for row, (default, suffix) in enumerate(((180.0, " °/s"), (180.0, " °/s"), (60.0, " mm/s")), start=1):
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 5000.0)
+            spin.setDecimals(0)
+            spin.setValue(default)
+            spin.setSuffix(suffix)
+            spin.setFixedWidth(110)
+            spin.setFixedHeight(28)
+            add_class(spin, "compact-input")
+            tmc_grid.addWidget(spin, row, 6)
+            self.spin_tmc_stealth.append(spin)
+
+        # A corrente do TMC2209 é quantizada em degraus de ~60 mA: ao terminar a edição o
+        # campo mostra o valor que o driver realmente vai usar (antes o CONFIG DUMP voltava
+        # "diferente" do digitado, ex.: 559 -> 539 mA).
+        for spin in (self.spin_tmc_irun_c, self.spin_tmc_irun_a, self.spin_tmc_irun_z,
+                     self.spin_tmc_ihold_c, self.spin_tmc_ihold_a, self.spin_tmc_ihold_z):
+            spin.setToolTip("Corrente RMS; ajustada ao degrau real do TMC2209 (~60 mA)")
+            spin.editingFinished.connect(lambda s=spin: s.setValue(tmc_quantize_ma(s.value())))
+        tmc_grid.setColumnStretch(7, 1)
         
         tmc_layout.addLayout(tmc_grid)
         
@@ -653,26 +732,26 @@ class ParametersView(QWidget):
         reg_layout.setSpacing(6)
         
         lbl_diag = QLabel("Reg TMC:")
-        lbl_diag.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_diag, "field-label")
         lbl_diag.setFixedWidth(65)
         reg_layout.addWidget(lbl_diag)
         self.combo_reg_axis = QComboBox()
         self.combo_reg_axis.addItems(["C", "A", "Z"])
         self.combo_reg_axis.setFixedWidth(65)
         self.combo_reg_axis.setFixedHeight(28)
-        self.combo_reg_axis.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_reg_axis, "compact-combo")
         reg_layout.addWidget(self.combo_reg_axis)
         self.txt_reg_addr = QLineEdit("0x06")
         self.txt_reg_addr.setFixedWidth(65)
         self.txt_reg_addr.setFixedHeight(28)
         self.txt_reg_addr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_reg_addr.setStyleSheet(INPUT_STYLE)
+        add_class(self.txt_reg_addr, "compact-input")
         reg_layout.addWidget(self.txt_reg_addr)
         self.txt_reg_val = QLineEdit("0x00000000")
         self.txt_reg_val.setFixedWidth(105)
         self.txt_reg_val.setFixedHeight(28)
         self.txt_reg_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_reg_val.setStyleSheet(INPUT_STYLE)
+        add_class(self.txt_reg_val, "compact-input")
         reg_layout.addWidget(self.txt_reg_val)
         self.btn_reg_read = QPushButton("📖 Ler")
         self.btn_reg_read.setFixedWidth(65)
@@ -702,12 +781,12 @@ class ParametersView(QWidget):
         can_header.setSpacing(8)
         can_title = QLabel("4. Barramento CAN / TWAI (10 Nós)")
         can_title.setProperty("class", "section-title")
-        can_title.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #38bdf8;")
+        add_class(can_title, "card-title")
         can_header.addWidget(can_title)
         can_header.addStretch()
         
         self.chk_can_enabled = QCheckBox("Habilitar CAN")
-        self.chk_can_enabled.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        add_class(self.chk_can_enabled, "accent")
         self.chk_can_enabled.toggled.connect(self._on_can_enabled_toggled)
         can_header.addWidget(self.chk_can_enabled)
         
@@ -722,7 +801,7 @@ class ParametersView(QWidget):
         can_grid.setSpacing(6)
         
         lbl_node = QLabel("Node ID (1..10):")
-        lbl_node.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_node, "field-label")
         lbl_node.setFixedWidth(105)
         can_grid.addWidget(lbl_node, 0, 0)
         self.spin_node_id = QSpinBox()
@@ -730,11 +809,11 @@ class ParametersView(QWidget):
         self.spin_node_id.setValue(1)
         self.spin_node_id.setFixedWidth(75)
         self.spin_node_id.setFixedHeight(28)
-        self.spin_node_id.setStyleSheet(INPUT_STYLE)
+        add_class(self.spin_node_id, "compact-input")
         can_grid.addWidget(self.spin_node_id, 0, 1)
         
         lbl_bitrate = QLabel("Bitrate:")
-        lbl_bitrate.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_bitrate, "field-label")
         lbl_bitrate.setFixedWidth(65)
         can_grid.addWidget(lbl_bitrate, 0, 2)
         self.combo_can_bitrate = QComboBox()
@@ -742,40 +821,40 @@ class ParametersView(QWidget):
         self.combo_can_bitrate.setCurrentText("500000")
         self.combo_can_bitrate.setFixedWidth(105)
         self.combo_can_bitrate.setFixedHeight(28)
-        self.combo_can_bitrate.setStyleSheet(COMBO_STYLE)
+        add_class(self.combo_can_bitrate, "compact-combo")
         can_grid.addWidget(self.combo_can_bitrate, 0, 3)
         
         lbl_base_cmd = QLabel("Base Cmd:")
-        lbl_base_cmd.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_base_cmd, "field-label")
         lbl_base_cmd.setFixedWidth(105)
         can_grid.addWidget(lbl_base_cmd, 1, 0)
         self.txt_base_cmd = QLineEdit("0x200")
         self.txt_base_cmd.setFixedWidth(75)
         self.txt_base_cmd.setFixedHeight(28)
         self.txt_base_cmd.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_base_cmd.setStyleSheet(INPUT_STYLE)
+        add_class(self.txt_base_cmd, "compact-input")
         can_grid.addWidget(self.txt_base_cmd, 1, 1)
         
         lbl_base_st = QLabel("Base Status:")
-        lbl_base_st.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_base_st, "field-label")
         lbl_base_st.setFixedWidth(85)
         can_grid.addWidget(lbl_base_st, 1, 2)
         self.txt_base_status = QLineEdit("0x280")
         self.txt_base_status.setFixedWidth(105)
         self.txt_base_status.setFixedHeight(28)
         self.txt_base_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_base_status.setStyleSheet(INPUT_STYLE)
+        add_class(self.txt_base_status, "compact-input")
         can_grid.addWidget(self.txt_base_status, 1, 3)
         
         lbl_base_ev = QLabel("Base Eventos:")
-        lbl_base_ev.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 600;")
+        add_class(lbl_base_ev, "field-label")
         lbl_base_ev.setFixedWidth(105)
         can_grid.addWidget(lbl_base_ev, 2, 0)
         self.txt_base_event = QLineEdit("0x300")
         self.txt_base_event.setFixedWidth(75)
         self.txt_base_event.setFixedHeight(28)
         self.txt_base_event.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_base_event.setStyleSheet(INPUT_STYLE)
+        add_class(self.txt_base_event, "compact-input")
         can_grid.addWidget(self.txt_base_event, 2, 1)
         can_grid.setColumnStretch(4, 1)
         
@@ -895,7 +974,8 @@ class ParametersView(QWidget):
             self.chk_tmc_sc_c, self.chk_tmc_sc_a, self.chk_tmc_sc_z,
             self.chk_can_enabled,
             self.spin_node_id, self.combo_can_bitrate, self.txt_base_cmd, self.txt_base_status, self.txt_base_event,
-            self.spin_limit_min_c, self.spin_limit_max_c, self.spin_limit_min_a, self.spin_limit_max_a
+            self.spin_limit_min_c, self.spin_limit_max_c, self.spin_limit_min_a, self.spin_limit_max_a,
+            self.combo_motion_engine, self.chk_lookahead,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -979,6 +1059,19 @@ class ParametersView(QWidget):
             set_chk(self.chk_tmc_sc_a, p.tmc_spreadcycle[1])
             set_chk(self.chk_tmc_sc_z, p.tmc_spreadcycle[2])
 
+        if not self.combo_motion_engine.hasFocus():
+            self.combo_motion_engine.setCurrentText(p.motion_engine)
+        set_chk(self.chk_lookahead, p.lookahead)
+        for spin, value in zip(self.spin_jerk, p.jerk):
+            spin.blockSignals(True)
+            set_spin(spin, value)
+            spin.blockSignals(False)
+
+        for spin, value in zip(self.spin_tmc_stealth, p.tmc_stealth_max):
+            spin.blockSignals(True)
+            set_spin(spin, value)
+            spin.blockSignals(False)
+
         # CAN status sync
         set_chk(self.chk_can_enabled, p.can_enabled)
         self._on_can_enabled_toggled(p.can_enabled)
@@ -993,6 +1086,156 @@ class ParametersView(QWidget):
             w.blockSignals(False)
 
         self._update_kinematics_preview()
+
+    AXES = ("C", "A", "Z")
+    CONFIRM_TIMEOUT_MS = 4000
+
+    def _collect_desired(self) -> dict:
+        """Captura TODOS os valores da tela no momento do clique.
+
+        Antes cada comando lia o widget só na hora de ser enviado; respostas do nó no meio
+        da sequência (ex.: polia/rampa) disparavam parameters_updated e recarregavam os
+        campos com os valores antigos — e as correntes antigas eram reenviadas.
+        """
+        teeth = self.spin_pulley_z.value()
+        spr = [self.spin_steps_c.value(), self.spin_steps_a.value(), self.spin_steps_z.value()]
+        usteps = []
+        for combo in (self.combo_tmc_usteps_c, self.combo_tmc_usteps_a, self.combo_tmc_usteps_z):
+            try:
+                usteps.append(int(combo.currentText()))
+            except ValueError:
+                usteps.append(16)
+        return {
+            "steps_per_rev": spr,
+            "speed": [self.spin_speed_c.value(), self.spin_speed_a.value(), self.spin_speed_z.value()],
+            "accel": [self.spin_accel_c.value(), self.spin_accel_a.value(), self.spin_accel_z.value()],
+            "inverter": [self.chk_inv_hw_c.isChecked(), self.chk_inv_hw_a.isChecked(), self.chk_inv_hw_z.isChecked()],
+            "z_pulley_teeth": teeth,
+            "max_passos_z": calc_z_steps_for_mm(self.spin_max_z_mm.value(), teeth, spr[2], usteps[2]),
+            "ramp": [self.spin_ramp_c.value(), self.spin_ramp_a.value(), self.spin_ramp_z.value()],
+            "limits_c": (self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
+            "limits_a": (self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
+            "tmc_addr": [self.spin_tmc_addr_c.value(), self.spin_tmc_addr_a.value(), self.spin_tmc_addr_z.value()],
+            "tmc_irun": [tmc_quantize_ma(w.value()) for w in (self.spin_tmc_irun_c, self.spin_tmc_irun_a, self.spin_tmc_irun_z)],
+            "tmc_ihold": [tmc_quantize_ma(w.value()) for w in (self.spin_tmc_ihold_c, self.spin_tmc_ihold_a, self.spin_tmc_ihold_z)],
+            "tmc_usteps": usteps,
+            "tmc_sc": [self.chk_tmc_sc_c.isChecked(), self.chk_tmc_sc_a.isChecked(), self.chk_tmc_sc_z.isChecked()],
+            "tmc_stealth": [w.value() for w in self.spin_tmc_stealth],
+            "driver_bus_mode": 1 if "UART" in self.combo_driver_mode.currentText() else 0,
+            "motion_engine": self.combo_motion_engine.currentText(),
+            "lookahead": self.chk_lookahead.isChecked(),
+            "jerk": [w.value() for w in self.spin_jerk],
+            "can_enabled": self.chk_can_enabled.isChecked(),
+            "node_id": self.spin_node_id.value(),
+            "can_bitrate": int(self.combo_can_bitrate.currentText()),
+            "can_bases": (int(self.txt_base_cmd.text(), 16), int(self.txt_base_status.text(), 16),
+                          int(self.txt_base_event.text(), 16)),
+        }
+
+    @staticmethod
+    def _differs(a, b, tol: float = 0.01) -> bool:
+        return abs(float(a) - float(b)) > tol
+
+    def _diff_against_device(self, d: dict, p: HardwareParameters) -> list:
+        """Lista (descrição, verificador) do que difere entre a tela e o nó."""
+        diffs = []
+        for i, ax in enumerate(self.AXES):
+            if d["steps_per_rev"][i] != p.steps_per_rev[i]:
+                diffs.append((f"Passos/volta {ax}", "steps_per_rev", i))
+            if self._differs(d["speed"][i], p.speed[i], 0.05):
+                diffs.append((f"Velocidade {ax}", "speed", i))
+            if self._differs(d["accel"][i], p.accel[i], 0.05):
+                diffs.append((f"Aceleração {ax}", "accel", i))
+            if d["inverter"][i] != p.inverter[i]:
+                diffs.append((f"Inversão {ax}", "inverter", i))
+            if self._differs(d["ramp"][i], (p.c_start_speed_deg, p.a_start_speed_deg, p.z_start_speed_mm)[i], 0.05):
+                diffs.append((f"Rampa inicial {ax}", "ramp", i))
+            if d["tmc_addr"][i] != p.tmc_slave_addr[i]:
+                diffs.append((f"Endereço TMC {ax}", "tmc_addr", i))
+            if d["tmc_irun"][i] != tmc_quantize_ma(p.tmc_irun_ma[i]) or \
+                    d["tmc_ihold"][i] != tmc_quantize_ma(p.tmc_ihold_ma[i]):
+                diffs.append((f"Corrente TMC {ax}", "tmc_current", i))
+            if d["tmc_usteps"][i] != p.tmc_microsteps[i]:
+                diffs.append((f"Micropassos {ax}", "tmc_usteps", i))
+            if d["tmc_sc"][i] != p.tmc_spreadcycle[i]:
+                diffs.append((f"SpreadCycle {ax}", "tmc_sc", i))
+            if self._differs(d["tmc_stealth"][i], p.tmc_stealth_max[i], 0.5):
+                diffs.append((f"Stealth até {ax}", "tmc_stealth", i))
+            if self._differs(d["jerk"][i], p.jerk[i], 0.05):
+                diffs.append((f"Jerk {ax}", "jerk", i))
+        if d["motion_engine"] != p.motion_engine:
+            diffs.append(("Motor de movimento", "motion_engine", None))
+        if d["lookahead"] != p.lookahead:
+            diffs.append(("Encadear movimentos", "lookahead", None))
+        if d["z_pulley_teeth"] != p.z_pulley_teeth:
+            diffs.append(("Polia Z", "z_pulley_teeth", None))
+        if d["max_passos_z"] != p.max_passos_z:
+            diffs.append(("Curso máximo Z", "max_passos_z", None))
+        if self._differs(d["limits_c"][0], p.limit_min_deg_c) or self._differs(d["limits_c"][1], p.limit_max_deg_c):
+            diffs.append(("Limites C", "limits_c", None))
+        if self._differs(d["limits_a"][0], p.limit_min_deg_a) or self._differs(d["limits_a"][1], p.limit_max_deg_a):
+            diffs.append(("Limites A", "limits_a", None))
+        if d["driver_bus_mode"] != p.driver_bus_mode:
+            diffs.append(("Modo do driver", "driver_bus_mode", None))
+        if (d["can_enabled"] != p.can_enabled or d["node_id"] != p.node_id or d["can_bitrate"] != p.can_bitrate or
+                d["can_bases"] != (p.can_command_base_id, p.can_status_base_id, p.can_event_base_id)):
+            diffs.append(("Barramento CAN", "can", None))
+        return diffs
+
+    def _commands_for(self, client, d: dict, diffs: list) -> list:
+        """Comandos só para o que mudou. DRIVER APPLY roda uma vez, e só se precisar."""
+        cmds = []
+        needs_driver_apply = False
+        keys = {key for _, key, _ in diffs}
+        for label, key, i in diffs:
+            ax = self.AXES[i] if i is not None else None
+            if key == "steps_per_rev":
+                cmds.append((label, lambda ax=ax, v=d["steps_per_rev"][i]: client.set_steps_per_rev(ax, v)))
+            elif key == "speed":
+                cmds.append((label, lambda ax=ax, v=d["speed"][i]: client.set_axis_speed(ax, v)))
+            elif key == "accel":
+                cmds.append((label, lambda ax=ax, v=d["accel"][i]: client.set_axis_accel(ax, v)))
+            elif key == "inverter":
+                cmds.append((label, lambda ax=ax, v=d["inverter"][i]: client.set_driver_invert(ax, v)))
+            elif key == "ramp":
+                cmds.append((label, lambda ax=ax, v=d["ramp"][i]: client.set_axis_ramp_speed(ax, v)))
+            elif key == "tmc_addr":
+                cmds.append((label, lambda ax=ax, v=d["tmc_addr"][i]: client.set_tmc_address(ax, v)))
+                needs_driver_apply = True
+            elif key == "tmc_current":
+                cmds.append((label, lambda ax=ax, h=d["tmc_ihold"][i], r=d["tmc_irun"][i]:
+                             client.set_tmc_uart_current(ax, h, r, 6)))
+            elif key == "tmc_usteps":
+                cmds.append((label, lambda ax=ax, v=d["tmc_usteps"][i]: client.set_tmc_microsteps(ax, v)))
+            elif key == "tmc_sc":
+                cmds.append((label, lambda ax=ax, v=d["tmc_sc"][i]: client.set_tmc_spreadcycle(ax, v)))
+            elif key == "tmc_stealth":
+                cmds.append((label, lambda ax=ax, v=d["tmc_stealth"][i]: client.set_tmc_stealth_max(ax, v)))
+            elif key == "jerk":
+                cmds.append((label, lambda ax=ax, v=d["jerk"][i]: client.set_jerk(ax, v)))
+            elif key == "motion_engine":
+                cmds.append((label, lambda v=d["motion_engine"]: client.set_motion_engine(v)))
+            elif key == "lookahead":
+                cmds.append((label, lambda v=d["lookahead"]: client.set_lookahead(v)))
+            elif key == "z_pulley_teeth":
+                cmds.append((label, lambda v=d["z_pulley_teeth"]: client.set_z_pulley_teeth(v)))
+            elif key == "max_passos_z":
+                cmds.append((label, lambda v=d["max_passos_z"]: client.set_length_z(v)))
+            elif key == "limits_c":
+                cmds.append((label, lambda v=d["limits_c"]: client.set_axis_limits("C", v[0], v[1])))
+            elif key == "limits_a":
+                cmds.append((label, lambda v=d["limits_a"]: client.set_axis_limits("A", v[0], v[1])))
+        if "driver_bus_mode" in keys:
+            # set_driver_mode já envia DRIVER APPLY
+            mode = "UART" if d["driver_bus_mode"] == 1 else "STEPDIR"
+            cmds.append(("Modo do driver", lambda m=mode: client.set_driver_mode(m)))
+        elif needs_driver_apply:
+            cmds.append(("Reaplicar drivers", client.apply_driver_settings))
+        if "can" in keys:
+            b = d["can_bases"]
+            cmds.append(("Barramento CAN", lambda: client.configure_can(
+                d["node_id"], d["can_bitrate"], b[0], b[1], b[2], enabled=d["can_enabled"])))
+        return cmds
 
     def _apply_all_parameters(self):
         client = self.comm.active_client
@@ -1013,100 +1256,107 @@ class ParametersView(QWidget):
             return
 
         try:
-            cmd_base = int(self.txt_base_cmd.text(), 16)
-            status_base = int(self.txt_base_status.text(), 16)
-            event_base = int(self.txt_base_event.text(), 16)
+            desired = self._collect_desired()
         except ValueError as e:
             QMessageBox.warning(self, "Valor Inválido", f"Formato hexadecimal incorreto nas bases CAN: {e}")
             return
 
-        teeth = self.spin_pulley_z.value()
-        spr_z = self.spin_steps_z.value()
-        try:
-            usteps_z = int(self.combo_tmc_usteps_z.currentText())
-        except ValueError:
-            usteps_z = 16
+        diffs = self._diff_against_device(desired, self.state.parameters)
+        if not diffs:
+            QMessageBox.information(self, "Nada a Gravar",
+                                    "Os valores da tela já são os do nó. Nenhum comando foi enviado.")
+            return
 
-        steps_z = calc_z_steps_for_mm(self.spin_max_z_mm.value(), teeth, spr_z, usteps_z)
-        target_mode = "UART" if "UART" in self.combo_driver_mode.currentText() else "STEPDIR"
-        can_enabled = self.chk_can_enabled.isChecked()
+        cmds = self._commands_for(client, desired, diffs)
+        # Grava de uma vez na NVS (o firmware agrupa as alterações) e confirma a escrita
+        cmds.append(("Gravar NVS", client.save_nvs))
+        labels = [label for label, _ in cmds]
+        self._run_command_sequence([func for _, func in cmds],
+                                   lambda results: self._on_apply_all_finished(results, labels, desired, diffs))
 
-        cmds = [
-            # 1. Driver Bus Mode
-            lambda: client.set_driver_mode("UART"),
-            # 2. Steps per revolution
-            lambda: client.set_steps_per_rev('C', self.spin_steps_c.value()),
-            lambda: client.set_steps_per_rev('A', self.spin_steps_a.value()),
-            lambda: client.set_steps_per_rev('Z', self.spin_steps_z.value()),
-            # 3. Speeds & Accel
-            lambda: client.set_axis_speed('C', self.spin_speed_c.value()),
-            lambda: client.set_axis_speed('A', self.spin_speed_a.value()),
-            lambda: client.set_axis_speed('Z', self.spin_speed_z.value()),
-            lambda: client.set_axis_accel('C', self.spin_accel_c.value()),
-            lambda: client.set_axis_accel('A', self.spin_accel_a.value()),
-            lambda: client.set_axis_accel('Z', self.spin_accel_z.value()),
-            # 4. Invert DIR
-            lambda: client.set_driver_invert('C', self.chk_inv_hw_c.isChecked()),
-            lambda: client.set_driver_invert('A', self.chk_inv_hw_a.isChecked()),
-            lambda: client.set_driver_invert('Z', self.chk_inv_hw_z.isChecked()),
-            # 5. Pulley Z, Max Z & Rampas (C, A, Z)
-            lambda: client.set_z_pulley_teeth(teeth),
-            lambda: client.set_length_z(steps_z),
-            lambda: client.set_axis_ramp_speed('C', self.spin_ramp_c.value()),
-            lambda: client.set_axis_ramp_speed('A', self.spin_ramp_a.value()),
-            lambda: client.set_axis_ramp_speed('Z', self.spin_ramp_z.value()),
-            # 6. Angular Limits C & A
-            lambda: client.set_axis_limits('C', self.spin_limit_min_c.value(), self.spin_limit_max_c.value()),
-            lambda: client.set_axis_limits('A', self.spin_limit_min_a.value(), self.spin_limit_max_a.value()),
-            # 7. TMC2209 Parameters
-            lambda: client.set_tmc_uart_current('C', self.spin_tmc_ihold_c.value(), self.spin_tmc_irun_c.value(), 6),
-            lambda: client.set_tmc_uart_current('A', self.spin_tmc_ihold_a.value(), self.spin_tmc_irun_a.value(), 6),
-            lambda: client.set_tmc_uart_current('Z', self.spin_tmc_ihold_z.value(), self.spin_tmc_irun_z.value(), 6),
-            lambda: client.set_tmc_spreadcycle('C', self.chk_tmc_sc_c.isChecked()),
-            lambda: client.set_tmc_spreadcycle('A', self.chk_tmc_sc_a.isChecked()),
-            lambda: client.set_tmc_spreadcycle('Z', self.chk_tmc_sc_z.isChecked()),
-            lambda: client.set_tmc_microsteps('C', int(self.combo_tmc_usteps_c.currentText())),
-            lambda: client.set_tmc_microsteps('A', int(self.combo_tmc_usteps_a.currentText())),
-            lambda: client.set_tmc_microsteps('Z', int(self.combo_tmc_usteps_z.currentText())),
-            lambda: client.set_driver_mode(target_mode),
-            lambda: client.apply_driver_settings(),
-            # 8. CAN Settings
-            lambda: client.configure_can(
-                self.spin_node_id.value(),
-                int(self.combo_can_bitrate.currentText()),
-                cmd_base,
-                status_base,
-                event_base,
-                enabled=can_enabled
-            )
-        ]
-
+    def _run_command_sequence(self, cmds, on_finished, interval_ms: int = 40):
+        """Envia os comandos espaçados por QTimer (40 ms evita overrun da RX FIFO da UART do
+        ESP32) sem bloquear a thread da interface — antes eram ~30 time.sleep() seguidos."""
         results = []
-        for cmd_func in cmds:
-            results.append(cmd_func())
-            time.sleep(0.04)  # 40ms inter-command delay prevents ESP32 UART RX FIFO overrun
+        self.btn_save_nvs.setEnabled(False)
+        self.btn_save_all_bottom.setEnabled(False)
 
-        # Solicita leitura de confirmação da placa
-        QTimer.singleShot(600, self.comm.request_config_dump)
+        def step(index: int = 0):
+            if index >= len(cmds) or not self.comm.is_connected:
+                self.btn_save_nvs.setEnabled(True)
+                self.btn_save_all_bottom.setEnabled(True)
+                on_finished(results + [False] * (len(cmds) - len(results)))
+                return
+            try:
+                results.append(bool(cmds[index]()))
+            except Exception as exc:
+                self.state.error_occurred.emit(f"Falha ao aplicar parâmetro {index + 1}: {exc}")
+                results.append(False)
+            QTimer.singleShot(interval_ms, lambda: step(index + 1))
 
-        if all(results):
-            can_str = "Habilitado" if can_enabled else "Desativado"
-            QMessageBox.information(
-                self,
-                "Configurações Gravadas",
-                f"Todas as configurações foram transmitidas e gravadas na NVS com sucesso!\n\n"
-                f"• Cinemática: Passos C={self.spin_steps_c.value()}, A={self.spin_steps_a.value()}, Z={self.spin_steps_z.value()}\n"
-                f"• Rampas S-Curve: C={self.spin_ramp_c.value():.1f}°/s | A={self.spin_ramp_a.value():.1f}°/s | Z={self.spin_ramp_z.value():.1f} mm/s\n"
-                f"• Eixo Z: Polia={teeth}T | Curso Máx={self.spin_max_z_mm.value():.1f} mm ({steps_z} passos)\n"
-                f"• Limites C: [{self.spin_limit_min_c.value():.1f}°, {self.spin_limit_max_c.value():.1f}°]\n"
-                f"• Limites A: [{self.spin_limit_min_a.value():.1f}°, {self.spin_limit_max_a.value():.1f}°]\n"
-                f"• Drivers TMC: Modo {target_mode} | Correntes Run/Hold atualizadas\n"
-                f"• Barramento CAN: {can_str} | Node ID={self.spin_node_id.value()} | Bitrate={self.combo_can_bitrate.currentText()} bps\n\n"
-                f"Os parâmetros foram confirmados pelo hardware e salvos na memória não-volátil."
-            )
-        else:
+        step()
+
+    def _on_apply_all_finished(self, results, labels, desired: dict, diffs: list):
+        failed = [label for label, ok in zip(labels, results) if not ok]
+        if failed:
             QMessageBox.warning(
                 self,
                 "Aviso de Gravação",
-                "Alguns parâmetros podem não ter sido confirmados pelo hardware. Verifique o terminal para detalhes.",
+                "Não foi possível transmitir: " + ", ".join(failed) + ".\nVerifique o terminal para detalhes.",
             )
+            return
+
+        # Confirmação real: relê a configuração do nó e compara com o que foi pedido
+        self._finish_confirmation()  # descarta conferência anterior ainda pendente
+        self._confirm_token = getattr(self, "_confirm_token", 0) + 1
+        token = self._confirm_token
+        self._pending_confirmation = (desired, diffs)
+        self.state.config_dump_completed.connect(self._on_confirmation_dump)
+        QTimer.singleShot(self.CONFIRM_TIMEOUT_MS, lambda: self._on_confirmation_timeout(token))
+        QTimer.singleShot(400, self.comm.request_config_dump)
+
+    def _finish_confirmation(self):
+        try:
+            self.state.config_dump_completed.disconnect(self._on_confirmation_dump)
+        except (TypeError, RuntimeError):
+            pass
+        pending = getattr(self, "_pending_confirmation", None)
+        self._pending_confirmation = None
+        return pending
+
+    def _on_confirmation_dump(self):
+        pending = self._finish_confirmation()
+        if pending is None:
+            return
+        desired, diffs = pending
+        still_diff = {label for label, _, _ in self._diff_against_device(desired, self.state.parameters)}
+        requested = [label for label, _, _ in diffs]
+        mismatched = [label for label in requested if label in still_diff]
+        if mismatched:
+            QMessageBox.warning(
+                self,
+                "Gravação Incompleta",
+                "O nó não confirmou: " + ", ".join(mismatched) +
+                ".\n\nOs demais parâmetros foram gravados e conferidos. Tente gravar novamente.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Configurações Gravadas",
+                f"{len(requested)} parâmetro(s) alterado(s) gravado(s) na NVS e conferido(s) no nó:\n\n• " +
+                "\n• ".join(requested),
+            )
+
+    def _on_confirmation_timeout(self, token: int):
+        if token != getattr(self, "_confirm_token", 0):
+            return  # timeout de uma gravação anterior
+        pending = self._finish_confirmation()
+        if pending is None:
+            return  # já confirmado pelo dump
+        _, diffs = pending
+        QMessageBox.information(
+            self,
+            "Configurações Enviadas",
+            f"{len(diffs)} parâmetro(s) enviado(s), mas o nó não respondeu ao CONFIG DUMP de conferência "
+            f"(backend sem leitura de configuração ou nó ocupado). Confira os valores no terminal.",
+        )

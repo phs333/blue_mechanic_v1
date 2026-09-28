@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from python_app.core.protocol_defs import laser_level_to_percent, percent_to_laser_level
+from python_app.ui.theme import add_class
 
 class LaserSlider(QFrame):
     # Emits (laser_index: 1|2, raw_level_12bit: 0..4095)
@@ -40,13 +41,13 @@ class LaserSlider(QFrame):
         header_layout.setContentsMargins(0, 0, 0, 0)
         default_title = "Laser Esquerdo" if laser_index == 1 else "Laser Direito"
         self.lbl_title = QLabel(title or default_title)
-        self.lbl_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        add_class(self.lbl_title, "accent")
         header_layout.addWidget(self.lbl_title)
         
         header_layout.addStretch()
         
         self.lbl_status = QLabel("0% (0/4095)")
-        self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(self.lbl_status, "table-header")
         header_layout.addWidget(self.lbl_status)
         
         main_layout.addLayout(header_layout)
@@ -108,7 +109,7 @@ class LaserSlider(QFrame):
         if percent > 0:
             self.lbl_status.setStyleSheet("color: #f87171; font-weight: 700; font-size: 12px;")
         else:
-            self.lbl_status.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+            add_class(self.lbl_status, "table-header")
 
     def _flush_throttled_change(self):
         if self._pending_raw_level is not None:

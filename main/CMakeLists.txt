@@ -4,6 +4,7 @@ idf_component_register(
         "storage.c"
         "hardware.c"
         "motion.c"
+        "motion_profile.c"
         "commands.c"
         "tmc2209.c"
         "can_bus.c"

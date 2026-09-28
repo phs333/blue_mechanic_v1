@@ -8,7 +8,7 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QFrame, QComboBox, QSpinBox, QCheckBox, QPlainTextEdit, QProgressBar,
-    QFileDialog, QMessageBox, QSplitter
+    QFileDialog, QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox
 )
 from PyQt6.QtGui import QTextCursor, QFont
 from PyQt6.QtCore import Qt, QTimer
@@ -23,6 +23,8 @@ from python_app.core.test_automation import (
     expand_automation_script,
     parse_script,
 )
+from python_app.ui.theme import add_class
+from python_app.ui.widgets.mouse_control_pad import MouseControlPad, MouseJogController
 
 
 class AutomationView(QWidget):
@@ -68,7 +70,7 @@ class AutomationView(QWidget):
         lbl_title = QLabel("🔁 Automação de Testes & Sequenciador em Loop")
         lbl_title.setStyleSheet("color: #38bdf8; font-size: 16px; font-weight: 800;")
         lbl_desc = QLabel("Execução contínua de comandos ASCII/CAN com suporte a ESP32-S3 Serial Direta, Teensy 4.1 e Simulador.")
-        lbl_desc.setStyleSheet("color: #64748b; font-size: 11px;")
+        add_class(lbl_desc, "hint")
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_desc)
         header_layout.addLayout(title_box)
@@ -104,6 +106,16 @@ class AutomationView(QWidget):
         header_layout.addWidget(self.btn_stop)
 
         main_layout.addWidget(header_card)
+
+        # Abas: sequenciador de scripts | controle manual por mouse
+        self.tabs = QTabWidget()
+        seq_page = QWidget()
+        seq_layout = QVBoxLayout(seq_page)
+        seq_layout.setContentsMargins(0, 10, 0, 0)
+        seq_layout.setSpacing(14)
+        self.tabs.addTab(seq_page, "Sequenciador")
+        self.tabs.addTab(self._build_mouse_page(), "Controle por Mouse")
+        main_layout.addWidget(self.tabs, 1)
 
         # ==========================================
         # 2. CONFIGURATION BAR
@@ -154,7 +166,7 @@ class AutomationView(QWidget):
         config_layout.addWidget(self.chk_stop_on_error)
 
         config_layout.addStretch()
-        main_layout.addWidget(config_card)
+        seq_layout.addWidget(config_card)
 
         # ==========================================
         # 3. SPLIT WORKSPACE: EDITOR & LIVE MONITOR
@@ -379,7 +391,85 @@ class AutomationView(QWidget):
         splitter.addWidget(monitor_widget)
         splitter.setSizes([540, 480])
 
-        main_layout.addWidget(splitter, 1)
+        seq_layout.addWidget(splitter, 1)
+
+    def _build_mouse_page(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(14)
+
+        self.mouse_controller = MouseJogController(self.comm, self.state, self)
+        self.mouse_pad = MouseControlPad(self.mouse_controller)
+        self.mouse_pad.active_changed.connect(self._on_mouse_mode_changed)
+        layout.addWidget(self.mouse_pad, 1)
+
+        side = QFrame()
+        side.setProperty("class", "metric-card")
+        side.setFixedWidth(280)
+        grid = QGridLayout(side)
+        grid.setContentsMargins(14, 12, 14, 12)
+        grid.setVerticalSpacing(8)
+
+        self.btn_mouse_mode = QPushButton("Ativar controle por mouse")
+        self.btn_mouse_mode.setProperty("class", "btn-primary")
+        self.btn_mouse_mode.clicked.connect(self._toggle_mouse_mode)
+        grid.addWidget(self.btn_mouse_mode, 0, 0, 1, 2)
+
+        def add_spin(row, label, attr, minimum, maximum, step, decimals, suffix, tooltip):
+            lbl = QLabel(label)
+            add_class(lbl, "field-label")
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setSingleStep(step)
+            spin.setDecimals(decimals)
+            spin.setSuffix(suffix)
+            spin.setValue(float(getattr(self.mouse_controller, attr)))
+            spin.setToolTip(tooltip)
+            add_class(spin, "compact-input")
+            spin.valueChanged.connect(lambda v, a=attr, d=decimals: setattr(
+                self.mouse_controller, a, v if d else int(v)))
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(spin, row, 1)
+            return spin
+
+        add_spin(1, "Eixo C", "deg_per_px_c", -5.0, 5.0, 0.05, 2, " °/px",
+                 "Graus do eixo C por pixel de movimento horizontal (negativo inverte o sentido)")
+        add_spin(2, "Eixo A", "deg_per_px_a", -5.0, 5.0, 0.05, 2, " °/px",
+                 "Graus do eixo A por pixel de movimento vertical (negativo inverte o sentido)")
+        add_spin(3, "Eixo Z", "mm_per_notch_z", -20.0, 20.0, 0.5, 2, " mm/clique",
+                 "Milímetros do eixo Z por clique da roda (negativo inverte o sentido)")
+        add_spin(4, "Fade laser", "fade_ms", 100, 20000, 100, 0, " ms",
+                 "Tempo do fade de 0 a 100% ao segurar o botão")
+        add_spin(5, "Envio", "send_interval_ms", 30, 500, 10, 0, " ms",
+                 "Intervalo entre lotes de movimento (menor = mais responsivo, mais comandos)")
+
+        hint = QLabel(
+            "Os lotes usam MOVE_SYNC com os limites de encoder e do Z. "
+            "Movimento mais rápido que a máquina é descartado (não acumula atraso).\n\n"
+            "Esc aciona o E-STOP e sai do modo."
+        )
+        hint.setWordWrap(True)
+        add_class(hint, "hint")
+        grid.addWidget(hint, 6, 0, 1, 2)
+        grid.setRowStretch(7, 1)
+        layout.addWidget(side)
+        return page
+
+    def _toggle_mouse_mode(self):
+        if self.mouse_pad.is_active():
+            self.mouse_pad.deactivate()
+            return
+        if not self.comm.is_connected:
+            QMessageBox.warning(self, "Sem conexão", "Conecte ao hardware antes de usar o controle por mouse.")
+            return
+        self.mouse_pad.activate()
+
+    def _on_mouse_mode_changed(self, active: bool):
+        self.btn_mouse_mode.setText("Sair do controle por mouse" if active else "Ativar controle por mouse")
+        self.btn_mouse_mode.setProperty("class", "btn-danger" if active else "btn-primary")
+        self.btn_mouse_mode.style().unpolish(self.btn_mouse_mode)
+        self.btn_mouse_mode.style().polish(self.btn_mouse_mode)
 
     def _insert_snippet(self, text: str):
         self.txt_script.insertPlainText(text)

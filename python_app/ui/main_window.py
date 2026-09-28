@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QComboBox, QFrame, QStatusBar, QMessageBox, QSpinBox, QCheckBox
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QTimer, QSettings
+from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
 
 from python_app.ui.style import DARK_THEME_QSS
 from python_app.ui.views.dashboard_view import DashboardView
@@ -22,6 +22,9 @@ from python_app.ui.views.ota_view import OtaView
 from python_app.ui.widgets.kinematic_3d_view import Kinematic3DView
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState
+from python_app.ui.theme import add_class, PALETTE
+from python_app.ui.icons import icon
+from PyQt6.QtCore import QSize
 
 class MainWindow(QMainWindow):
     def __init__(self, comm: CommManager, state: DeviceState):
@@ -65,7 +68,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 16)
         sidebar_layout.setSpacing(4)
         
-        lbl_brand = QLabel("⚙️ BLUE MECHANIC")
+        lbl_brand = QLabel("BLUE MECHANIC")
         lbl_brand.setObjectName("sidebarTitle")
         sidebar_layout.addWidget(lbl_brand)
         
@@ -75,31 +78,41 @@ class MainWindow(QMainWindow):
         
         self.nav_buttons = []
         
-        self.btn_nav_dash = QPushButton("📊  Dashboard Geral")
+        self.btn_nav_dash = QPushButton("  Dashboard Geral")
+        self.btn_nav_dash.setIcon(icon("dashboard", PALETTE["accent"]))
+        self.btn_nav_dash.setIconSize(QSize(18, 18))
         self.btn_nav_dash.setProperty("class", "nav-btn")
         self.btn_nav_dash.clicked.connect(lambda: self._set_page(0))
         sidebar_layout.addWidget(self.btn_nav_dash)
         self.nav_buttons.append(self.btn_nav_dash)
         
-        self.btn_nav_params = QPushButton("⚙️  Parâmetros & NVS")
+        self.btn_nav_params = QPushButton("  Parâmetros && NVS")
+        self.btn_nav_params.setIcon(icon("sliders", PALETTE["accent"]))
+        self.btn_nav_params.setIconSize(QSize(18, 18))
         self.btn_nav_params.setProperty("class", "nav-btn")
         self.btn_nav_params.clicked.connect(lambda: self._set_page(1))
         sidebar_layout.addWidget(self.btn_nav_params)
         self.nav_buttons.append(self.btn_nav_params)
         
-        self.btn_nav_term = QPushButton("📟  Terminal & Sniffer")
+        self.btn_nav_term = QPushButton("  Terminal && Sniffer")
+        self.btn_nav_term.setIcon(icon("terminal", PALETTE["accent"]))
+        self.btn_nav_term.setIconSize(QSize(18, 18))
         self.btn_nav_term.setProperty("class", "nav-btn")
         self.btn_nav_term.clicked.connect(lambda: self._set_page(2))
         sidebar_layout.addWidget(self.btn_nav_term)
         self.nav_buttons.append(self.btn_nav_term)
         
-        self.btn_nav_auto = QPushButton("🔁  Automação & Testes")
+        self.btn_nav_auto = QPushButton("  Automação && Testes")
+        self.btn_nav_auto.setIcon(icon("repeat", PALETTE["accent"]))
+        self.btn_nav_auto.setIconSize(QSize(18, 18))
         self.btn_nav_auto.setProperty("class", "nav-btn")
         self.btn_nav_auto.clicked.connect(lambda: self._set_page(3))
         sidebar_layout.addWidget(self.btn_nav_auto)
         self.nav_buttons.append(self.btn_nav_auto)
 
-        self.btn_nav_ota = QPushButton("🚀  Atualização OTA")
+        self.btn_nav_ota = QPushButton("  Atualização OTA")
+        self.btn_nav_ota.setIcon(icon("upload", PALETTE["accent"]))
+        self.btn_nav_ota.setIconSize(QSize(18, 18))
         self.btn_nav_ota.setProperty("class", "nav-btn")
         self.btn_nav_ota.clicked.connect(lambda: self._set_page(4))
         sidebar_layout.addWidget(self.btn_nav_ota)
@@ -149,7 +162,8 @@ class MainWindow(QMainWindow):
         # COM config widgets
         self.lbl_port = QLabel("Porta:")
         self.combo_ports = QComboBox()
-        self.btn_refresh_ports = QPushButton("🔄")
+        self.btn_refresh_ports = QPushButton()
+        self.btn_refresh_ports.setIcon(icon("refresh"))
         self.btn_refresh_ports.setToolTip("Atualizar portas")
         self.btn_refresh_ports.clicked.connect(self._refresh_ports)
         
@@ -162,6 +176,27 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.btn_refresh_ports)
         top_bar_layout.addWidget(self.lbl_baud)
         top_bar_layout.addWidget(self.combo_baud)
+
+        # Reset por hardware do ESP32 (RTS->EN) ao conectar: evita o nó "mudo" que só voltava
+        # apertando o botão da placa. Preferência lembrada entre sessões.
+        self._settings = QSettings()
+        self.chk_reset_on_connect = QCheckBox("Reset ao conectar")
+        self.chk_reset_on_connect.setToolTip(
+            "Reinicia o ESP32 pela linha RTS (EN) ao abrir a porta, com IO0 alto (boot normal).\n"
+            "Configuração e status são lidos quando o firmware termina o boot."
+        )
+        self.chk_reset_on_connect.setChecked(
+            self._settings.value("serial/reset_on_connect", True, type=bool))
+        self.chk_reset_on_connect.toggled.connect(
+            lambda v: self._settings.setValue("serial/reset_on_connect", bool(v)))
+        top_bar_layout.addWidget(self.chk_reset_on_connect)
+
+        self.btn_reset_device = QPushButton("Reset ESP32")
+        self.btn_reset_device.setIcon(icon("refresh"))
+        self.btn_reset_device.setToolTip("Reinicia o ESP32 agora (equivale ao botão EN/RST da placa)")
+        self.btn_reset_device.setEnabled(False)
+        self.btn_reset_device.clicked.connect(self._on_reset_device)
+        top_bar_layout.addWidget(self.btn_reset_device)
         
         # CAN config widgets
         self.lbl_can_chan = QLabel("Canal CAN:", top_bar)
@@ -203,9 +238,26 @@ class MainWindow(QMainWindow):
         self.chk_broadcast.setVisible(False)
         
         top_bar_layout.addStretch()
-        
+
+        # E-STOP: sempre visível, atalho Esc (ativo em qualquer tela da janela)
+        self.btn_estop = QPushButton(" E-STOP")
+        self.btn_estop.setIcon(icon("stop", "#ffffff"))
+        self.btn_estop.setIconSize(QSize(18, 18))
+        self.btn_estop.setObjectName("estopButton")
+        self.btn_estop.setToolTip(
+            "Parada de emergência (Esc): interrompe o movimento em curso, esvazia a fila "
+            "e apaga os lasers. No Teensy USB/CAN corta drivers e lasers de todos os nós."
+        )
+        self.btn_estop.setEnabled(False)
+        self.btn_estop.clicked.connect(self._on_estop)
+        top_bar_layout.addWidget(self.btn_estop)
+        self.shortcut_estop = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.shortcut_estop.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.shortcut_estop.activated.connect(self._on_estop)
+
         # Connect / Disconnect button
-        self.btn_connect = QPushButton("🔌 Conectar")
+        self.btn_connect = QPushButton(" Conectar")
+        self.btn_connect.setIcon(icon("plug", "#ffffff"))
         self.btn_connect.setProperty("class", "btn-primary")
         self.btn_connect.clicked.connect(self._toggle_connection)
         top_bar_layout.addWidget(self.btn_connect)
@@ -245,16 +297,16 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.lbl_status_conn)
         
         self.lbl_status_nodes = QLabel("🌐 Nós: --/10")
-        self.lbl_status_nodes.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+        add_class(self.lbl_status_nodes, "status-item")
         self.lbl_status_nodes.setVisible(False)
         status_bar.addPermanentWidget(self.lbl_status_nodes)
         
         self.lbl_status_hb = QLabel("💓 Heartbeat: --")
-        self.lbl_status_hb.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+        add_class(self.lbl_status_hb, "status-item")
         status_bar.addPermanentWidget(self.lbl_status_hb)
         
         self.lbl_status_frames = QLabel("TX: 0 | RX: 0")
-        self.lbl_status_frames.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+        add_class(self.lbl_status_frames, "status-item")
         status_bar.addPermanentWidget(self.lbl_status_frames)
         
         self._set_page(0)
@@ -310,7 +362,7 @@ class MainWindow(QMainWindow):
             if online_count > 0:
                 self.lbl_status_nodes.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 11px; margin-right: 15px;")
             else:
-                self.lbl_status_nodes.setStyleSheet("color: #64748b; font-size: 11px; margin-right: 15px;")
+                add_class(self.lbl_status_nodes, "status-item")
 
     def _on_backend_change(self, index: int):
         # 0 = ESP32 serial, 1 = Teensy USB/CAN, 2 = PeakCAN, 3 = Simulator
@@ -324,6 +376,8 @@ class MainWindow(QMainWindow):
         self.btn_refresh_ports.setVisible(is_serial)
         self.lbl_baud.setVisible(is_serial)
         self.combo_baud.setVisible(is_serial)
+        self.chk_reset_on_connect.setVisible(index == 0)   # só ESP32 direto (o Teensy não usa RTS/EN)
+        self.btn_reset_device.setVisible(index == 0)
         
         self.lbl_can_chan.setVisible(is_can)
         self.combo_can_chan.setVisible(is_can)
@@ -337,7 +391,8 @@ class MainWindow(QMainWindow):
         # Bloqueio de telas sem suporte no modo Teensy
         if is_teensy:
             self.dash_stack.setCurrentWidget(self.page_teensy_dash)
-            self.btn_nav_dash.setText("🌐  Dashboard (10 Nós)")
+            self.btn_nav_dash.setText("  Dashboard (10 Nós)")
+            self.btn_nav_dash.setIcon(icon("nodes", PALETTE["accent"]))
             
             # Telas não suportadas no modo Teensy (Params)
             self.btn_nav_params.setEnabled(False)
@@ -352,7 +407,8 @@ class MainWindow(QMainWindow):
                 self._set_page(0)
         else:
             self.dash_stack.setCurrentWidget(self.page_dash)
-            self.btn_nav_dash.setText("📊  Dashboard Geral")
+            self.btn_nav_dash.setText("  Dashboard Geral")
+            self.btn_nav_dash.setIcon(icon("dashboard", PALETTE["accent"]))
 
             # Reabilita telas
             self.btn_nav_params.setEnabled(True)
@@ -396,7 +452,8 @@ class MainWindow(QMainWindow):
                     return
                 baud = int(self.combo_baud.currentText())
                 if backend_idx == 0:
-                    self.comm.connect_serial(port=port, baudrate=baud)
+                    self.comm.connect_serial(port=port, baudrate=baud,
+                                             reset_on_connect=self.chk_reset_on_connect.isChecked())
                 else:
                     self.comm.connect_teensy(
                         port=port,
@@ -420,14 +477,37 @@ class MainWindow(QMainWindow):
             else: # Simulator
                 self.comm.connect_simulator()
 
+    def _on_reset_device(self):
+        if self.comm.reset_device():
+            self.statusBar().showMessage("ESP32 reiniciado; configuração será relida ao fim do boot.", 5000)
+        else:
+            self.statusBar().showMessage("⚠️ Reset disponível só na conexão serial direta com o ESP32.", 5000)
+
+    def _on_estop(self):
+        # O E-STOP sempre libera o mouse capturado pelo controle manual
+        mouse_pad = getattr(self.page_auto, "mouse_pad", None)
+        if mouse_pad is not None:
+            mouse_pad.deactivate()
+        if not self.comm.is_connected:
+            return
+        auto_worker = getattr(self.page_auto, "worker", None)
+        if auto_worker is not None and auto_worker.isRunning():
+            auto_worker.request_stop()  # a automação não pode reenviar movimentos após a parada
+        if self.comm.stop_all(lasers_off=True):
+            self.statusBar().showMessage("⛔ E-STOP enviado: movimento interrompido e lasers apagados.", 8000)
+        else:
+            self.statusBar().showMessage("⚠️ Falha ao enviar E-STOP — verifique a conexão!", 8000)
+
     def _on_connection_changed(self, connected: bool, backend: str):
+        self.btn_estop.setEnabled(connected)
+        self.btn_reset_device.setEnabled(connected and self.combo_backend.currentIndex() == 0)
         if connected:
-            self.btn_connect.setText("🔌 Desconectar")
+            self.btn_connect.setText(" Desconectar")
             self.btn_connect.setProperty("class", "btn-danger")
             self.lbl_status_conn.setText(f"CONECTADO: {backend}")
             self.lbl_status_conn.setProperty("class", "badge badge-green")
         else:
-            self.btn_connect.setText("🔌 Conectar")
+            self.btn_connect.setText(" Conectar")
             self.btn_connect.setProperty("class", "btn-primary")
             self.lbl_status_conn.setText("DESCONECTADO")
             self.lbl_status_conn.setProperty("class", "badge badge-gray")
@@ -460,10 +540,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            if hasattr(self, "page_auto") and hasattr(self.page_auto, "worker"):
-                self.page_auto.worker.stop()
-            if hasattr(self, "comm"):
-                self.comm.disconnect()
+            auto_worker = getattr(self.page_auto, "worker", None)
+            if auto_worker is not None and auto_worker.isRunning():
+                auto_worker.request_stop()
+                auto_worker.wait(2000)
+            ota_worker = getattr(self.page_ota, "worker", None)
+            if ota_worker is not None and ota_worker.isRunning():
+                ota_worker.abort()   # envia OTA_ABORT em vez de deixar os nós presos em modo OTA
+                ota_worker.wait(3000)
+            # CommManager.disconnect() seria o QObject.disconnect() do Qt (desconecta sinais,
+            # não o hardware); o encerramento das portas/threads é disconnect_all().
+            self.comm.disconnect_all()
         except Exception:
             pass
         super().closeEvent(event)

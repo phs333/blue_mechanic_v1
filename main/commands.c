@@ -48,7 +48,10 @@ static bool parse_axis_token(char axis_char, size_t *axis_index, char *canonical
 void commands_print_help(void)
 {
     puts("\nComandos disponiveis:");
+    puts("STOP | ESTOP (interrompe o movimento imediatamente e esvazia a fila; ESTOP tambem apaga os lasers)");
     puts("STATUS");
+    puts("DIAG (diagnostico: fim de curso Z, linhas I2C e ima dos encoders, resposta dos TMC2209)");
+    puts("SAVE (grava agora na NVS as alteracoes pendentes; normalmente automatico apos 300 ms)");
     puts("HELP");
     puts("DRIVER ENABLED ON / OFF");
     puts("ALARM ON / ALARM OFF");
@@ -60,6 +63,10 @@ void commands_print_help(void)
     puts("PULLEY Z <dentes> (ex: 16, 20)");
     puts("STEPS C|A|Z <steps_per_rev>");
     puts("SPEED C|A <deg/s> | Z <mm/s>");
+    puts("MOTION ENGINE STREAM|LEGACY (motor de movimento; STREAM = S-curve no ISR + encadeamento)");
+    puts("MOTION LOOKAHEAD ON|OFF (encadeia movimentos consecutivos da fila sem parar)");
+    puts("MOTION JERK C|A <deg/s> | Z <mm/s> (salto maximo de velocidade numa juncao)");
+    puts("VELOCIDADE <1..5> (nivel de velocidade de C/A em uso, nao salvo na NVS)");
     puts("ACCEL C|A <deg/s^2> | Z <mm/s^2>");
     puts("SPEED_MAX C|A|Z <value> | ACCEL_MAX C|A|Z <value>");
     puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
@@ -75,6 +82,7 @@ void commands_print_help(void)
     puts("DRIVER UART CURRENT C|A|Z <ihold_mA> <irun_mA> <delay>");
     puts("DRIVER UART SPREADCYCLE C|A|Z ON|OFF");
     puts("DRIVER UART MICROSTEPS C|A|Z <1..256>");
+    puts("DRIVER UART STEALTH_MAX C|A|Z <vel> (stealthChop ate essa velocidade, spreadCycle acima; 0 = sempre stealth)");
     puts("DRIVER REG READ C|A|Z <reg>");
     puts("DRIVER REG WRITE C|A|Z <reg> <value>");
     puts("DRIVER APPLY");
@@ -90,7 +98,7 @@ void commands_print_help(void)
     puts("LED RGB <r> <g> <b> (0..255)");
     puts("LED BRIGHTNESS <0..100>");
     puts("OTA [STATUS] (exibe particao ativa, rollback e proxima particao)");
-    puts("OTA WAIT / OTA PREPARE (entra em modo seguro de espera por gravacao OTA)");
+    puts("OTA WAIT [tamanho] / OTA PREPARE (entra em modo seguro de espera por gravacao OTA)");
     puts("OTA ABORT / OTA CANCEL (cancela OTA e restaura operacao normal)");
     puts("OTA CONFIRM (valida firmware atual e cancela rollback)");
     puts("OTA ROLLBACK (forca rollback para versao anterior e reinicia)");
@@ -124,6 +132,7 @@ void commands_print_status(app_context_t *ctx)
 
     printf("Eixo Z: %ld / %ld passos (%.2f / %.2f mm | Polia: %uT GT2)\n",
            (long)ctx->state.atual_z, (long)ctx->settings.max_passos_z, pos_z_mm, max_z_mm, (unsigned)z_teeth);
+    motion_print_pos_line(ctx);
     printf("Alarme Z: %s\n", ctx->state.alarme_z_ativo ? "ON" : "OFF");
     printf("Estado Z: %s\n", ctx->state.z_bloqueado ? "BLOQUEADO" : "LIVRE");
     printf("Drivers: %s\n", ctx->state.drivers_enabled ? "ENERGIZADOS" : "DESLIGADOS");
@@ -206,6 +215,11 @@ void commands_print_config(const app_context_t *ctx)
                (unsigned)ctx->settings.tmc_microsteps[i],
                (unsigned)ctx->settings.tmc_spreadcycle[i]);
     }
+    printf("CONFIG MOTION ENGINE=%s LOOKAHEAD=%u JERK C=%.2f A=%.2f Z=%.2f\n",
+           ctx->ext.motion_engine == MOTION_ENGINE_STREAM ? "STREAM" : "LEGACY",
+           (unsigned)ctx->ext.lookahead, ctx->ext.jerk[0], ctx->ext.jerk[1], ctx->ext.jerk[2]);
+    printf("CONFIG STEALTH_MAX C=%.2f A=%.2f Z=%.2f\n",
+           ctx->ext.stealth_max_speed[0], ctx->ext.stealth_max_speed[1], ctx->ext.stealth_max_speed[2]);
     printf("CONFIG CAN enabled=%u node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
            (unsigned)ctx->settings.can_enabled,
            (unsigned)ctx->settings.node_id,
@@ -224,6 +238,55 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     to_upper_ascii(cmd);
 
     if (cmd[0] == '\0') {
+        return;
+    }
+
+    if (strcmp(cmd, "STOP") == 0 || strcmp(cmd, "ESTOP") == 0 || strcmp(cmd, "E-STOP") == 0) {
+        (void)motion_request_stop(ctx);
+        if (strcmp(cmd, "STOP") != 0) {
+            (void)hardware_set_laser_level(ctx, 0, 0);
+            (void)hardware_set_laser_level(ctx, 1, 0);
+            puts("ESTOP: movimento interrompido, fila esvaziada e lasers apagados.");
+        } else {
+            puts("STOP: movimento interrompido e fila esvaziada.");
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "SAVE") == 0 || strcmp(cmd, "NVS SAVE") == 0) {
+        esp_err_t err = storage_flush();
+        if (err == ESP_OK) {
+            puts("NVS: configuracao gravada e confirmada.");
+        } else {
+            printf("NVS ERRO: falha ao gravar (%s)\n", esp_err_to_name(err));
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "DIAG") == 0) {
+        printf("\n=== DIAG ===\n");
+        hardware_print_diag();
+        // TMC2209: IOIN responde mesmo parado; versao 0x21 confirma o chip certo
+        int tmc_online = 0;
+        for (int i = 0; i < 3; ++i) {
+            const char axis = "CAZ"[i];
+            uint32_t ioin = 0;
+            esp_err_t err = tmc2209_read_register(ctx, axis, 0x06, &ioin);
+            if (err == ESP_OK) {
+                ++tmc_online;
+                printf("DIAG TMC %c: responde (versao 0x%02lX, ENN=%lu)\n", axis,
+                       (unsigned long)(ioin >> 24), (unsigned long)(ioin & 0x01U));
+            } else {
+                printf("DIAG TMC %c: sem resposta (%s)\n", axis, esp_err_to_name(err));
+            }
+        }
+        if (tmc_online == 0) {
+            puts("DIAG -> nenhum TMC responde: verifique a alimentacao dos motores (VM) e o fio PDN/UART (GPIO8).");
+        }
+        printf("DIAG Drivers: %s | Alarme Z: %s | Z bloqueado: %s\n",
+               ctx->state.drivers_enabled ? "ENERGIZADOS" : "DESLIGADOS",
+               ctx->state.alarme_z_ativo ? "ON" : "OFF", ctx->state.z_bloqueado ? "SIM" : "NAO");
+        printf("============\n");
         return;
     }
 
@@ -323,8 +386,14 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
-    if (strcmp(cmd, "OTA WAIT") == 0 || strcmp(cmd, "OTA PREPARE") == 0 || strcmp(cmd, "OTA START") == 0) {
-        esp_err_t err = ota_prepare_for_update(ctx, 0);
+    if (strncmp(cmd, "OTA WAIT", 8) == 0 || strncmp(cmd, "OTA PREPARE", 11) == 0 || strncmp(cmd, "OTA START", 9) == 0) {
+        // Tamanho opcional: com ele apaga so o necessario; sem ele, apaga setor a setor durante a gravacao
+        unsigned long image_size = 0;
+        const char *size_arg = strchr(cmd + 4, ' ');
+        if (size_arg != NULL) {
+            image_size = strtoul(size_arg, NULL, 10);
+        }
+        esp_err_t err = ota_prepare_for_update(ctx, (uint32_t)image_size);
         if (err == ESP_OK) {
             puts("OTA: Modo de espera segura ativado. Motores e lasers parados. Aguardando dados de firmware...");
         } else {
@@ -407,7 +476,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         bool enable = (strcmp(state_str, "ON") == 0 || strcmp(state_str, "1") == 0);
         ctx->state.inverter[axis_index] = enable;
         ctx->settings.inverter[axis_index] = enable;
-        esp_err_t err = storage_save_settings(&ctx->settings);
+        esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
             printf("Inversao de direcao %c %s (salvo na NVS).\n", axis, enable ? "ATIVADA" : "DESATIVADA");
         } else {
@@ -456,7 +525,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
                 printf("ERRO: Eixo invalido (%c). Use LIMIT C <min> <max> ou LIMIT A <min> <max>.\n", raw_axis);
                 return;
             }
-            esp_err_t err = storage_save_settings(&ctx->settings);
+            esp_err_t err = persist_settings(ctx);
             if (err == ESP_OK) {
                 printf("LIMIT %c gravado: min=%.2f max=%.2f deg (salvo na NVS).\n", axis, min_deg, max_deg);
             } else {
@@ -692,6 +761,7 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         ctx->settings.speed[axis_index] = speed_val;
         ctx->settings.speed_delay_us[axis_index] = delay_us;
         ctx->state.speed_delay_us[axis_index] = delay_us;
+        ctx->state.speed[axis_index] = speed_val;
         esp_err_t err = persist_settings(ctx);
         if (err == ESP_OK) {
             if (axis == 'Z') {
@@ -814,9 +884,61 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         return;
     }
 
+    char motion_arg[16] = {0};
+    if (sscanf(cmd, "MOTION ENGINE %15s", motion_arg) == 1) {
+        if (strcmp(motion_arg, "STREAM") == 0) {
+            ctx->ext.motion_engine = MOTION_ENGINE_STREAM;
+        } else if (strcmp(motion_arg, "LEGACY") == 0) {
+            ctx->ext.motion_engine = MOTION_ENGINE_LEGACY;
+        } else {
+            puts("Use MOTION ENGINE STREAM ou LEGACY.");
+            return;
+        }
+        storage_request_save_ext(&ctx->ext);
+        printf("Motor de movimento: %s (salvo na NVS).\n", motion_arg);
+        return;
+    }
+    if (sscanf(cmd, "MOTION LOOKAHEAD %15s", motion_arg) == 1) {
+        bool on = (strcmp(motion_arg, "ON") == 0 || strcmp(motion_arg, "1") == 0);
+        ctx->ext.lookahead = on ? 1U : 0U;
+        storage_request_save_ext(&ctx->ext);
+        printf("Lookahead %s (salvo na NVS).\n", on ? "ATIVADO" : "DESATIVADO");
+        return;
+    }
+    char jerk_axis = '\0';
+    float jerk_val = 0.0f;
+    if (sscanf(cmd, "MOTION JERK %c %f", &jerk_axis, &jerk_val) == 2) {
+        size_t axis_index = 0;
+        char axis = '\0';
+        if (!parse_axis_token(jerk_axis, &axis_index, &axis) || !(jerk_val >= 0.0f) || jerk_val > 1000.0f) {
+            puts("Uso: MOTION JERK C|A|Z <0..1000>");
+            return;
+        }
+        ctx->ext.jerk[axis_index] = jerk_val;
+        storage_request_save_ext(&ctx->ext);
+        printf("Jerk %c = %.2f %s (salvo na NVS).\n", axis, jerk_val, axis == 'Z' ? "mm/s" : "deg/s");
+        return;
+    }
+
+    unsigned speed_level = 0;
+    if (sscanf(cmd, "VELOCIDADE %u", &speed_level) == 1 || sscanf(cmd, "SPEED_LEVEL %u", &speed_level) == 1) {
+        esp_err_t err = motion_apply_speed_level(ctx, (uint8_t)(speed_level > 255U ? 0U : speed_level));
+        if (err == ESP_OK) {
+            printf("Nivel de velocidade %u aplicado: C=%.1f A=%.1f deg/s.\n", speed_level,
+                   ctx->state.speed[AXIS_C_ID], ctx->state.speed[AXIS_A_ID]);
+        } else {
+            puts("Nivel de velocidade invalido. Use 1..5.");
+        }
+        return;
+    }
+
     int laser_number = 0;
     char laser_value[16] = {0};
     if (sscanf(cmd, "LASER %d %15s", &laser_number, laser_value) == 2) {
+        if (ctx->state.ota_in_progress) {
+            puts("ERRO: sessao OTA em andamento; lasers bloqueados.");
+            return;
+        }
         if (laser_number < 1 || laser_number > 2) {
             puts("Laser invalido. Use 1 ou 2.");
             return;
@@ -921,11 +1043,35 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         ctx->settings.tmc_irun[axis_index] = tmc2209_ma_to_cs((uint16_t)irun_ma);
         ctx->settings.tmc_ihold_delay[axis_index] = (uint8_t)ihold_delay;
 
-        esp_err_t err = persist_settings(ctx);
+        (void)persist_settings(ctx);
+        // Aplica ja no driver (confirmado por IFCNT); antes so valia apos DRIVER APPLY/reboot.
+        // A corrente e quantizada em degraus de ~60 mA: informa o valor efetivo.
+        esp_err_t apply_err = tmc2209_apply_current(ctx, driver_axis);
+        printf("Corrente TMC do eixo %c salva: irun=%umA ihold=%umA delay=%u (%s).\n", driver_axis,
+               (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_irun[axis_index]),
+               (unsigned)tmc2209_cs_to_ma(ctx->settings.tmc_ihold[axis_index]),
+               ihold_delay,
+               (apply_err == ESP_OK) ? "aplicada no driver" :
+               (apply_err == ESP_ERR_INVALID_STATE) ? "driver offline, aplicada quando responder" :
+               "FALHA ao confirmar no driver");
+        return;
+    }
+
+    float stealth_speed = 0.0f;
+    if (sscanf(cmd, "DRIVER UART STEALTH_MAX %c %f", &raw_driver_axis, &stealth_speed) == 2 ||
+        sscanf(cmd, "STEALTH_MAX %c %f", &raw_driver_axis, &stealth_speed) == 2) {
+        size_t axis_index = 0;
+        char driver_axis = '\0';
+        if (!parse_axis_token(raw_driver_axis, &axis_index, &driver_axis)) {
+            puts("Eixo invalido. Use C, A ou Z.");
+            return;
+        }
+        esp_err_t err = tmc2209_set_stealth_max_speed(ctx, driver_axis, stealth_speed);
         if (err == ESP_OK) {
-            printf("Corrente TMC do eixo %c salva.\n", driver_axis);
+            printf("StealthChop do eixo %c ate %.1f %s (acima: spreadCycle).\n", driver_axis, stealth_speed,
+                   driver_axis == 'Z' ? "mm/s" : "deg/s");
         } else {
-            printf("ERRO ao salvar corrente TMC: %s\n", esp_err_to_name(err));
+            printf("ERRO ao ajustar limiar stealthChop %c: %s\n", driver_axis, esp_err_to_name(err));
         }
         return;
     }
@@ -1354,7 +1500,10 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
 static esp_err_t persist_settings(app_context_t *ctx)
 {
-    return storage_save_settings(&ctx->settings);
+    // Gravacao adiada e so se algo mudou: uma rajada de comandos vira uma escrita na flash.
+    // Use SAVE para forcar e confirmar a gravacao.
+    storage_request_save(&ctx->settings);
+    return ESP_OK;
 }
 
 static bool parse_u32_token(const char *text, uint32_t *value)

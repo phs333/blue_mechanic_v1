@@ -3,10 +3,12 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "hardware.h"
 #include "storage.h"
 #include "can_bus.h"
@@ -21,6 +23,71 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
 static void compute_axis_rmt_profile(float step_size, float speed, float accel, float start_speed_cfg, uint32_t total_steps,
                                      uint32_t *start_freq_hz, uint32_t *target_freq_hz,
                                      uint32_t *ramp_steps);
+
+// Geracao de STOP: incrementada por motion_request_stop(). Cada comando carrega a
+// geracao vigente no enfileiramento; se divergir durante a execucao, e abortado.
+static volatile uint32_t s_stop_gen = 0U;
+static volatile uint32_t s_active_gen = 0U;
+
+static bool motion_abort_hook(void)
+{
+    return s_active_gen != s_stop_gen;
+}
+
+static void notify_discarded_cmd(app_context_t *ctx, const motion_cmd_t *cmd, bool as_error)
+{
+    if (cmd->opcode == 0U || !ctx->state.can_online) {
+        return;
+    }
+    (void)can_send_event(ctx, as_error ? CAN_EVT_ERROR : CAN_EVT_DONE, cmd->opcode,
+                         (uint8_t)(ESP_ERR_NOT_FINISHED & 0xFF));
+}
+
+/*
+ * Laços bit-bang ocupam o core 1: cede CPU ao idle (task WDT de 5 s) sem inserir
+ * pausas perceptiveis em alta velocidade — so pausa com periodo de passo longo
+ * (>= 0,8 ms) ou, como ultimo recurso, a cada 3 s.
+ */
+static void bitbang_maybe_yield(int64_t *last_yield_us, uint32_t half_period_us)
+{
+    int64_t since = esp_timer_get_time() - *last_yield_us;
+    if ((since > 250000 && half_period_us >= 400U) || since > 3000000) {
+        vTaskDelay(1);
+        *last_yield_us = esp_timer_get_time();
+    }
+}
+
+static char axis_char_from_index(size_t idx)
+{
+    return (idx == AXIS_C_ID) ? 'C' : ((idx == AXIS_A_ID) ? 'A' : 'Z');
+}
+
+/* Velocidade nominal do eixo: override do comando ou valor em uso, limitada por SPEED_MAX. */
+static float axis_nominal_speed(app_context_t *ctx, size_t idx, float override)
+{
+    float v = (override > 0.0f && isfinite(override)) ? override : ctx->state.speed[idx];
+    if (!(v > 0.0f) || !isfinite(v)) {
+        v = (ctx->settings.speed[idx] > 0.0f) ? ctx->settings.speed[idx]
+                                               : motion_delay_us_to_speed(ctx, axis_char_from_index(idx),
+                                                                          ctx->state.speed_delay_us[idx]);
+    }
+    float vmax = ctx->settings.speed_max[idx];
+    if (isfinite(vmax) && vmax > 0.0f && v > vmax) {
+        v = vmax;
+    }
+    return (v < 1.0f) ? 1.0f : v;
+}
+
+/* Aceleracao do eixo: override do comando ou valor configurado, limitada por ACCEL_MAX. */
+static float axis_accel(app_context_t *ctx, size_t idx, float override)
+{
+    float a = (override > 0.0f && isfinite(override)) ? override : ctx->settings.accel[idx];
+    float amax = ctx->settings.accel_max[idx];
+    if (isfinite(amax) && amax > 0.0f && a > amax) {
+        a = amax;
+    }
+    return (a >= 10.0f) ? a : 10.0f;
+}
 
 static float get_deg_per_step(app_context_t *ctx, char axis)
 {
@@ -209,14 +276,16 @@ static void compute_axis_rmt_profile(float step_size, float speed, float accel, 
     }
 
     uint32_t ramp = 0U;
+    uint32_t ramp_needed = 0U;
+    float accel_steps_per_s2 = safe_accel / safe_step_size;
     if (target > start) {
-        float accel_steps_per_s2 = safe_accel / safe_step_size;
         float ramp_f = ((float)target * (float)target - (float)start * (float)start) /
                        (2.0f * accel_steps_per_s2);
         if (isfinite(ramp_f) && ramp_f > 0.0f) {
             ramp = (uint32_t)fmaxf(1.0f, floorf(ramp_f + 0.5f));
         }
     }
+    ramp_needed = ramp;
 
     // For short moves, ensure ramp takes at least half or one third of move (triangular S-curve)
     if (total_steps <= 24) {
@@ -230,6 +299,18 @@ static void compute_axis_rmt_profile(float step_size, float speed, float accel, 
 
     if (ramp < 1U && total_steps > 1U) ramp = 1U;
     if (ramp > total_steps / 2U) ramp = total_steps / 2U;
+    if (ramp > RMT_MAX_RAMP_SAMPLES) ramp = RMT_MAX_RAMP_SAMPLES;
+
+    // Movimentos longos cuja rampa foi truncada (perfil triangular ou limite de amostras do
+    // encoder RMT): reduz o pico para v = sqrt(v0^2 + 2*a*rampa), em vez de atingir o alvo
+    // numa rampa mais curta — o que excederia a aceleracao configurada e arriscaria perda de passos.
+    if (total_steps > 80U && ramp > 0U && ramp_needed > ramp) {
+        float v_peak = sqrtf((float)start * (float)start + 2.0f * accel_steps_per_s2 * (float)ramp);
+        if (isfinite(v_peak) && v_peak < (float)target) {
+            uint32_t peak = (uint32_t)v_peak;
+            target = (peak > start + 1U) ? peak : (start + 1U);
+        }
+    }
 
     *start_freq_hz = start;
     *target_freq_hz = target;
@@ -244,16 +325,14 @@ static void compute_z_motion_profile(app_context_t *ctx, int32_t steps, float sp
         step_size = 0.01f;
     }
 
-    // 1. Accel: Fully respect user's acceleration configuration (e.g. 1000 mm/s^2)
-    float accel = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[AXIS_Z_ID];
+    // 1. Accel: configuracao do usuario (ou override), limitada por ACCEL_MAX
+    float accel = axis_accel(ctx, AXIS_Z_ID, accel_override);
     if (accel < 50.0f) accel = 50.0f;
     if (accel > 5000.0f) accel = 5000.0f;
     float accel_steps_per_s2 = accel / step_size;
 
-    // 2. Cruise Speed: Respect user's speed configuration (e.g. 250 mm/s)
-    float nominal_speed = (speed_override > 0.0f) ? speed_override :
-                          ((ctx->settings.speed[AXIS_Z_ID] > 0.0f) ? ctx->settings.speed[AXIS_Z_ID] : 12.5f);
-    if (nominal_speed < 1.0f) nominal_speed = 1.0f;
+    // 2. Cruise Speed: velocidade em uso (ou override), limitada por SPEED_MAX
+    float nominal_speed = axis_nominal_speed(ctx, AXIS_Z_ID, speed_override);
     if (nominal_speed > 400.0f) nominal_speed = 400.0f;
     float max_speed_steps = nominal_speed / step_size;
 
@@ -394,8 +473,13 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
     }
     uint32_t total_steps_executed = 0;
     float initial_abs_error = fabsf(error_deg);
+    bool aborted = false;
 
     while (fabsf(error_deg) > TOLERANCE_DEG && total_steps_executed < max_allowed_steps) {
+        if (hardware_abort_requested()) {
+            aborted = true;
+            break;
+        }
         float abs_err = fabsf(error_deg);
         int32_t burst_steps = 0;
         uint32_t step_delay = 1000; // us
@@ -484,15 +568,19 @@ static esp_err_t do_motion_adjust_axis_to_home(app_context_t *ctx, char axis)
         printf("Eixo A (Pivot): %.2f deg\n", actual_deg);
     }
 
+    if (aborted) {
+        ESP_LOGW(APP_TAG, "Home %c interrompido por STOP (pos=%.2f deg)", axis_upper, actual_deg);
+        return ESP_ERR_NOT_FINISHED;
+    }
     if (fabsf(error_deg) <= TOLERANCE_DEG) {
         ESP_LOGI(APP_TAG, "Home %c concluido com precisao (pos=%.2f deg, erro=%.2f deg, passos=%lu)",
                  axis_upper, actual_deg, error_deg, (unsigned long)total_steps_executed);
         return ESP_OK;
-    } else {
-        ESP_LOGW(APP_TAG, "Home %c finalizado com desvio (pos=%.2f deg, erro=%.2f deg, passos=%lu)",
-                 axis_upper, actual_deg, error_deg, (unsigned long)total_steps_executed);
-        return ESP_OK;
     }
+    // Fora da tolerancia (limite, inversao de sentido ou passos esgotados): nao marca o eixo como homed
+    ESP_LOGW(APP_TAG, "Home %c finalizado com desvio (pos=%.2f deg, erro=%.2f deg, passos=%lu)",
+             axis_upper, actual_deg, error_deg, (unsigned long)total_steps_executed);
+    return ESP_ERR_INVALID_RESPONSE;
 }
 
 
@@ -522,6 +610,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
         esp_rom_delay_us(5);
         int32_t clear_steps = 0;
         while (hardware_is_z_switch_pressed() && clear_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
+            if (hardware_abort_requested()) {
+                goto aborted;
+            }
             hardware_step_pulse(STEP_Z, 600);
             ++clear_steps;
             if ((clear_steps & 0x3FU) == 0U) {
@@ -529,6 +620,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
             }
         }
         for (int32_t i = 0; i < 400; ++i) {
+            if (hardware_abort_requested()) {
+                goto aborted;
+            }
             hardware_step_pulse(STEP_Z, 600);
         }
         vTaskDelay(pdMS_TO_TICKS(30));
@@ -560,6 +654,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
         esp_rom_delay_us(5);
         int32_t search_steps = 0;
         while (!hardware_is_z_switch_pressed() && search_steps < search_limits[cycle]) {
+            if (hardware_abort_requested()) {
+                goto aborted;
+            }
             hardware_step_pulse(STEP_Z, approach_delays[cycle]);
             ++search_steps;
             if ((search_steps & 0x3FU) == 0U) {
@@ -580,6 +677,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
         esp_rom_delay_us(5);
         int32_t release_steps = 0;
         while (hardware_is_z_switch_pressed() && release_steps < Z_HOME_RELEASE_LIMIT_STEPS) {
+            if (hardware_abort_requested()) {
+                goto aborted;
+            }
             hardware_step_pulse(STEP_Z, 600);
             ++release_steps;
             if ((release_steps & 0x3FU) == 0U) {
@@ -597,6 +697,9 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
         }
 
         for (int32_t i = 0; i < extra_backoffs[cycle]; ++i) {
+            if (hardware_abort_requested()) {
+                goto aborted;
+            }
             hardware_step_pulse(STEP_Z, 600);
         }
 
@@ -611,6 +714,14 @@ static esp_err_t do_motion_home_z(app_context_t *ctx)
     xSemaphoreGive(ctx->motion_mutex);
     ESP_LOGI(APP_TAG, "Home Z finalizado com 3 testagens de fim de curso e elevacao de seguranca de 5.0 mm (%ld passos).", (long)lift_5mm_steps);
     return ESP_OK;
+
+aborted:
+    // Posicao Z desconhecida apos interrupcao: exige novo HOME Z
+    ctx->state.em_homing_z = false;
+    hardware_rmt_reacquire_pin(STEP_Z);
+    xSemaphoreGive(ctx->motion_mutex);
+    ESP_LOGW(APP_TAG, "Home Z interrompido por STOP.");
+    return ESP_ERR_NOT_FINISHED;
 }
 
 
@@ -651,14 +762,8 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
                   axis_upper, (int)requested_steps,
                   (int)(positive_motion ? 1 : 0), (int)invert);
          float step_size = get_step_size(ctx, axis_upper);
-         float accel_val = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[axis_idx];
-         if (accel_val < 10.0f) {
-             accel_val = 10.0f;
-         }
-         float speed_val = (speed_override > 0.0f) ? speed_override : (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[axis_idx]) * step_size);
-         if (speed_val < 1.0f) {
-             speed_val = 1.0f;
-         }
+         float accel_val = axis_accel(ctx, axis_idx, accel_override);
+         float speed_val = axis_nominal_speed(ctx, axis_idx, speed_override);
 
          float start_speed_cfg = (axis_upper == 'C' || axis_upper == 'X') ?
                                  ctx->settings.c_start_speed_deg : ctx->settings.a_start_speed_deg;
@@ -727,7 +832,13 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
         compute_z_motion_profile(ctx, steps, speed_override, accel_override,
                                  &start_delay, &target_delay, &z_ramp);
 
+        bool aborted = false;
+        int64_t last_yield_us = esp_timer_get_time();
         for (int32_t i = 0; i < steps; ++i) {
+            if (hardware_abort_requested()) {
+                aborted = true;
+                break;
+            }
             if (!move_up) {
                 if (ctx->state.atual_z <= 0 || hardware_is_z_switch_pressed()) {
                     ctx->state.z_bloqueado = hardware_is_z_switch_pressed();
@@ -742,11 +853,12 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
             }
             uint32_t delay = hardware_compute_step_delay(start_delay, target_delay, (uint32_t)i, (uint32_t)steps, z_ramp);
             hardware_step_pulse(STEP_Z, delay);
+            bitbang_maybe_yield(&last_yield_us, delay);
         }
 
         hardware_rmt_reacquire_pin(STEP_Z);
         xSemaphoreGive(ctx->motion_mutex);
-        return ESP_OK;
+        return aborted ? ESP_ERR_NOT_FINISHED : ESP_OK;
     }
 
     return ESP_ERR_INVALID_ARG;
@@ -876,7 +988,9 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
                 pending.axis == axis_upper &&
                 ((pending.steps > 0 && requested_steps > 0) || (pending.steps < 0 && requested_steps < 0))) {
                 motion_cmd_t discarded;
-                xQueueReceive(ctx->motion_queue, &discarded, 0);
+                if (xQueueReceive(ctx->motion_queue, &discarded, 0) == pdTRUE) {
+                    notify_discarded_cmd(ctx, &discarded, false); // mesmo sentido, ja no limite
+                }
             } else {
                 break;
             }
@@ -903,15 +1017,8 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
              (int)invert, permitted_move_deg, actual_deg, min_limit_deg, max_limit_deg);
     size_t axis_idx = axis_to_index(axis_upper);
     float step_size = get_step_size(ctx, axis_upper);
-    float accel_val = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[axis_idx];
-    if (accel_val < 10.0f) {
-        accel_val = 10.0f;
-    }
-    float speed_val = (speed_override > 0.0f) ? speed_override :
-                      (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[axis_idx]) * step_size);
-    if (speed_val < 1.0f) {
-        speed_val = 1.0f;
-    }
+    float accel_val = axis_accel(ctx, axis_idx, accel_override);
+    float speed_val = axis_nominal_speed(ctx, axis_idx, speed_override);
 
     float start_speed_cfg = (axis_upper == 'C' || axis_upper == 'X') ?
                             ctx->settings.c_start_speed_deg : ctx->settings.a_start_speed_deg;
@@ -983,7 +1090,13 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
     compute_z_motion_profile(ctx, steps, speed_override, accel_override,
                              &start_delay, &target_delay, &z_ramp);
 
+    bool aborted = false;
+    int64_t last_yield_us = esp_timer_get_time();
     for (int32_t i = 0; i < steps; ++i) {
+        if (hardware_abort_requested()) {
+            aborted = true;
+            break;
+        }
         if (!move_up) {
             if (ctx->state.atual_z <= 0 || hardware_is_z_switch_pressed()) {
                 ctx->state.z_bloqueado = hardware_is_z_switch_pressed();
@@ -998,14 +1111,12 @@ static esp_err_t do_motion_move_z_relative(app_context_t *ctx, int32_t requested
         }
         uint32_t delay = hardware_compute_step_delay(start_delay, target_delay, (uint32_t)i, (uint32_t)steps, z_ramp);
         hardware_step_pulse(STEP_Z, delay);
-        if ((i & 0xFFFU) == 0U) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        bitbang_maybe_yield(&last_yield_us, delay);
     }
 
     hardware_rmt_reacquire_pin(STEP_Z);
     xSemaphoreGive(ctx->motion_mutex);
-    return ESP_OK;
+    return aborted ? ESP_ERR_NOT_FINISHED : ESP_OK;
 }
 
 static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_t steps_a, int32_t steps_z,
@@ -1123,33 +1234,13 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
     float step_size_a = get_step_size(ctx, 'A');
     float step_size_z = get_step_size(ctx, 'Z');
 
-    // Accel
-    float accel_c = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[AXIS_C_ID];
-    float accel_a = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[AXIS_A_ID];
-    float accel_z = (accel_override > 0.0f) ? accel_override : ctx->settings.accel[AXIS_Z_ID];
-    if (accel_c < 10.0f) accel_c = 10.0f;
-    if (accel_a < 10.0f) accel_a = 10.0f;
-    if (accel_z < 10.0f) accel_z = 10.0f;
-    float max_accel_z = (ctx->settings.accel_max[AXIS_Z_ID] > 10.0f) ?
-                        ctx->settings.accel_max[AXIS_Z_ID] : DEFAULT_ACCEL_MAX_MM_S2_Z;
-    if (accel_z > max_accel_z) accel_z = max_accel_z;
-
-    // Speeds individual per axis
-    float speed_c = (speed_c_override > 0.0f) ? speed_c_override :
-                    (ctx->settings.speed[AXIS_C_ID] > 0.0f ? ctx->settings.speed[AXIS_C_ID] :
-                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_C_ID]) * step_size_c));
-    float speed_a = (speed_a_override > 0.0f) ? speed_a_override :
-                    (ctx->settings.speed[AXIS_A_ID] > 0.0f ? ctx->settings.speed[AXIS_A_ID] :
-                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_A_ID]) * step_size_a));
-    float speed_z = (speed_z_override > 0.0f) ? speed_z_override :
-                    (ctx->settings.speed[AXIS_Z_ID] > 0.0f ? ctx->settings.speed[AXIS_Z_ID] :
-                    (1000000.0f / (2.0f * (float)ctx->state.speed_delay_us[AXIS_Z_ID]) * step_size_z));
-    if (speed_c < 1.0f) speed_c = 1.0f;
-    if (speed_a < 1.0f) speed_a = 1.0f;
-    if (speed_z < 1.0f) speed_z = 1.0f;
-    float max_speed_z = (ctx->settings.speed_max[AXIS_Z_ID] > 0.1f) ?
-                        ctx->settings.speed_max[AXIS_Z_ID] : DEFAULT_SPEED_MAX_MM_S_Z;
-    if (speed_z > max_speed_z) speed_z = max_speed_z;
+    // Accel e velocidade por eixo (override do comando ou valor em uso), limitados por ACCEL_MAX/SPEED_MAX
+    float accel_c = axis_accel(ctx, AXIS_C_ID, accel_override);
+    float accel_a = axis_accel(ctx, AXIS_A_ID, accel_override);
+    float accel_z = axis_accel(ctx, AXIS_Z_ID, accel_override);
+    float speed_c = axis_nominal_speed(ctx, AXIS_C_ID, speed_c_override);
+    float speed_a = axis_nominal_speed(ctx, AXIS_A_ID, speed_a_override);
+    float speed_z = axis_nominal_speed(ctx, AXIS_Z_ID, speed_z_override);
 
     // Nominal target frequencies per axis
     float nom_freq_c = speed_c / step_size_c;
@@ -1203,15 +1294,42 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
     float dom_accel = (dom_axis == 'C') ? accel_c : (dom_axis == 'A' ? accel_a : accel_z);
     float dom_step_size = (dom_axis == 'C') ? step_size_c : (dom_axis == 'A' ? step_size_a : step_size_z);
 
-    // Dominant axis ramp
-    uint32_t dom_start_freq = (dom_target_freq > 300U) ? (dom_target_freq / 2U) : (dom_target_freq * 2U / 3U);
+    // Dominant axis ramp: parte da velocidade inicial configurada (RAMP C/A/Z), como nos
+    // movimentos de eixo unico. Antes partia em target/2 — a 720 deg/s isso era um salto
+    // instantaneo de 360 deg/s na partida e na parada.
+    float dom_start_cfg = (dom_axis == 'C') ? ctx->settings.c_start_speed_deg :
+                          ((dom_axis == 'A') ? ctx->settings.a_start_speed_deg : ctx->settings.z_start_speed_mm);
+    if (!(dom_start_cfg >= 0.5f)) {
+        dom_start_cfg = (dom_axis == 'Z') ? 15.0f : 10.0f;
+    }
+    uint32_t dom_start_freq = (uint32_t)(dom_start_cfg / dom_step_size);
     if (dom_start_freq < 25U) dom_start_freq = 25U;
-    if (dom_start_freq >= dom_target_freq) dom_start_freq = (dom_target_freq > 30U) ? (dom_target_freq - 15U) : (dom_target_freq / 2U);
+    if (dom_start_freq >= dom_target_freq) dom_start_freq = (dom_target_freq > 30U) ? (dom_target_freq / 2U) : dom_target_freq;
 
+    float dom_accel_steps = dom_accel / dom_step_size;
     float dom_ramp_f = ((float)dom_target_freq * (float)dom_target_freq - (float)dom_start_freq * (float)dom_start_freq) /
-                       (2.0f * (dom_accel / dom_step_size));
+                       (2.0f * dom_accel_steps);
+    uint32_t dom_ramp_limit = dom_steps / 3U;
+    if (dom_ramp_limit > RMT_MAX_RAMP_SAMPLES) dom_ramp_limit = RMT_MAX_RAMP_SAMPLES;
     uint32_t dom_ramp = (uint32_t)(dom_ramp_f + 0.5f);
-    if (dom_ramp > dom_steps / 3U) dom_ramp = dom_steps / 3U;
+    if (dom_ramp > dom_ramp_limit) {
+        dom_ramp = dom_ramp_limit;
+        // Rampa truncada: reduz o pico do eixo dominante para respeitar a aceleracao e escala
+        // os demais eixos na mesma proporcao (mantem a coordenacao de tempo entre eixos).
+        float v_peak = sqrtf((float)dom_start_freq * (float)dom_start_freq + 2.0f * dom_accel_steps * (float)dom_ramp);
+        if (isfinite(v_peak) && v_peak < (float)dom_target_freq && dom_target_freq > 0U) {
+            float k = v_peak / (float)dom_target_freq;
+            uint32_t *targets[AXIS_COUNT] = {&target_freq_c, &target_freq_a, &target_freq_z};
+            for (size_t i = 0; i < AXIS_COUNT; ++i) {
+                if (*targets[i] > 0U) {
+                    uint32_t scaled = (uint32_t)((float)*targets[i] * k + 0.5f);
+                    *targets[i] = (scaled < RMT_MIN_STEP_FREQ_HZ) ? RMT_MIN_STEP_FREQ_HZ : scaled;
+                }
+            }
+            dom_target_freq = (dom_axis == 'C') ? target_freq_c : (dom_axis == 'A' ? target_freq_a : target_freq_z);
+            if (dom_start_freq >= dom_target_freq) dom_start_freq = dom_target_freq / 2U;
+        }
+    }
 
     float ramp_ratio = (dom_steps > 0) ? ((float)dom_ramp / (float)dom_steps) : 0.0f;
     float start_freq_ratio = (dom_target_freq > 0) ? ((float)dom_start_freq / (float)dom_target_freq) : 0.5f;
@@ -1254,10 +1372,364 @@ static esp_err_t do_motion_move_sync(app_context_t *ctx, int32_t steps_c, int32_
                                                        abs_z, start_freq_z, target_freq_z, ramp_z);
     if (err == ESP_OK && steps_z != 0) {
         ctx->state.atual_z += steps_z;
+    } else if (err != ESP_OK && steps_z != 0) {
+        // O RMT nao informa quantos passos sairam antes da interrupcao: posicao Z desconhecida
+        ctx->state.homed[AXIS_Z_ID] = false;
+        ESP_LOGW(APP_TAG, "MOVE_SYNC interrompido (%s): posicao Z incerta, execute HOME Z.", esp_err_to_name(err));
     }
 
     xSemaphoreGive(ctx->motion_mutex);
     return err;
+}
+
+
+/* ==================================================================================== */
+/* Motor "stream" (padrao): perfis S-curve no dominio do tempo gerados no ISR do RMT,    */
+/* tres canais sempre alinhados e encadeamento de movimentos (lookahead com jerk por     */
+/* eixo, como as impressoras 3D). HOME continua no caminho de malha fechada/bit-bang.    */
+/* ==================================================================================== */
+
+#define STREAM_TICK_HZ 1000000U
+#define STREAM_POOL_WORDS 6144U /* por plano; dois planos em voo = 48 KB */
+
+static uint32_t s_stream_pool[2][STREAM_POOL_WORDS];
+static mp_plan_t s_stream_plan[2];
+
+typedef struct {
+    motion_cmd_t cmd;
+    mp_request_t req;
+    bool empty;      /* bloqueado pelos limites: nada a executar (DONE imediato, como no legado) */
+} stream_item_t;
+
+typedef struct {
+    uint8_t opcode;
+    int32_t steps_z;
+} stream_done_info_t;
+
+typedef struct {
+    float deg[2];     /* posicao prevista de C e A ao fim dos movimentos ja planejados */
+    bool deg_valid[2];
+    bool deg_read[2]; /* encoder ja consultado (leitura sob demanda: MOVE_F/Z nao dependem dele) */
+    int32_t z;
+} stream_prediction_t;
+
+static bool motion_cmd_streamable(const motion_cmd_t *cmd)
+{
+    return cmd->type == MOTION_CMD_MOVE_REL || cmd->type == MOTION_CMD_MOVE_FORCE ||
+           cmd->type == MOTION_CMD_MOVE_SYNC;
+}
+
+/* true se `cmd` precisa de um encoder ainda nao lido nesta cadeia. A leitura tem de ser feita
+ * com os motores parados (no inicio de uma cadeia), nunca com movimentos em voo. */
+static bool stream_needs_encoder_read(const motion_cmd_t *cmd, const stream_prediction_t *pred)
+{
+    if (cmd->type == MOTION_CMD_MOVE_FORCE || (cmd->type == MOTION_CMD_MOVE_SYNC && cmd->force_no_encoder)) {
+        return false;
+    }
+    for (size_t i = AXIS_C_ID; i <= AXIS_A_ID; ++i) {
+        int32_t s = (cmd->type == MOTION_CMD_MOVE_SYNC) ? ((i == AXIS_C_ID) ? cmd->steps_c : cmd->steps_a)
+                                                        : ((axis_to_index(cmd->axis) == i) ? cmd->steps : 0);
+        if (s != 0 && !pred->deg_read[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void stream_send_event(app_context_t *ctx, uint8_t opcode, esp_err_t err)
+{
+    if (opcode != 0U && ctx->state.can_online) {
+        (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, opcode, (uint8_t)err);
+    }
+}
+
+static float axis_start_speed(app_context_t *ctx, size_t idx)
+{
+    float v = (idx == AXIS_C_ID) ? ctx->settings.c_start_speed_deg :
+              (idx == AXIS_A_ID) ? ctx->settings.a_start_speed_deg : ctx->settings.z_start_speed_mm;
+    return (v >= 0.5f) ? v : ((idx == AXIS_Z_ID) ? 15.0f : 10.0f);
+}
+
+/* Converte um comando em pedido de perfil, aplicando limites sobre a posicao PREVISTA. */
+static esp_err_t stream_prepare(app_context_t *ctx, const motion_cmd_t *cmd, stream_prediction_t *pred,
+                                stream_item_t *item)
+{
+    memset(item, 0, sizeof(*item));
+    item->cmd = *cmd;
+
+    int32_t steps[AXIS_COUNT] = {0, 0, 0};
+    float speed_ovr[AXIS_COUNT] = {-1.0f, -1.0f, -1.0f};
+    float accel_ovr = cmd->accel_override;
+    bool force = (cmd->type == MOTION_CMD_MOVE_FORCE) ||
+                 (cmd->type == MOTION_CMD_MOVE_SYNC && cmd->force_no_encoder);
+
+    if (cmd->type == MOTION_CMD_MOVE_SYNC) {
+        steps[AXIS_C_ID] = cmd->steps_c;
+        steps[AXIS_A_ID] = cmd->steps_a;
+        steps[AXIS_Z_ID] = cmd->steps_z;
+        speed_ovr[AXIS_C_ID] = cmd->speed_c;
+        speed_ovr[AXIS_A_ID] = cmd->speed_a;
+        speed_ovr[AXIS_Z_ID] = cmd->speed_z;
+    } else {
+        size_t idx = axis_to_index(cmd->axis);
+        steps[idx] = cmd->steps;
+        speed_ovr[idx] = cmd->speed_override;
+    }
+
+    // Limites angulares de C/A (malha fechada), sobre a posicao prevista
+    for (size_t i = AXIS_C_ID; i <= AXIS_A_ID; ++i) {
+        if (steps[i] == 0) {
+            continue;
+        }
+        float deg_per_step = get_deg_per_step(ctx, axis_char_from_index(i));
+        if (!force) {
+            if (!pred->deg_read[i]) {
+                pred->deg_read[i] = true;
+                pred->deg_valid[i] = (hardware_read_axis_encoder(axis_char_from_index(i), &pred->deg[i]) == ESP_OK);
+            }
+            if (!pred->deg_valid[i]) {
+                ESP_LOGE(APP_TAG, "MOVE %c rejeitado: encoder indisponivel. Use MOVE_F para malha aberta.",
+                         axis_char_from_index(i));
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            float min_deg = (i == AXIS_C_ID) ? ctx->settings.limit_min_c_deg : ctx->settings.limit_min_a_deg;
+            float max_deg = (i == AXIS_C_ID) ? ctx->settings.limit_max_c_deg : ctx->settings.limit_max_a_deg;
+            int32_t planned = motion_plan_limited_steps(pred->deg[i], 0.0f, min_deg, max_deg, deg_per_step, steps[i]);
+            if (planned != steps[i]) {
+                ESP_LOGW(APP_TAG, "MOVE %c ajustado por limite: pedido=%ld exec=%ld (prev=%.2f limites=[%.2f, %.2f])",
+                         axis_char_from_index(i), (long)steps[i], (long)planned, pred->deg[i], min_deg, max_deg);
+            }
+            steps[i] = planned;
+        }
+        pred->deg[i] += (float)steps[i] * deg_per_step;
+    }
+
+    // Z: bloqueio pelo fim de curso e curso [0, max_passos_z], sobre a posicao prevista
+    if (steps[AXIS_Z_ID] != 0) {
+        if (ctx->state.z_bloqueado) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        int32_t target = pred->z + steps[AXIS_Z_ID];
+        if (target > ctx->settings.max_passos_z) target = ctx->settings.max_passos_z;
+        if (target < 0) target = 0;
+        steps[AXIS_Z_ID] = target - pred->z;
+        pred->z = target;
+    }
+
+    if (steps[0] == 0 && steps[1] == 0 && steps[2] == 0) {
+        item->empty = true;
+        return ESP_OK;
+    }
+
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        float step_size = get_step_size(ctx, axis_char_from_index(i));
+        float speed = axis_nominal_speed(ctx, i, speed_ovr[i]);
+        float accel = axis_accel(ctx, i, accel_ovr);
+        if (i == AXIS_Z_ID) {
+            if (speed > 400.0f) speed = 400.0f;
+            if (accel < 50.0f) accel = 50.0f;
+            if (accel > 5000.0f) accel = 5000.0f;
+        }
+        float vmax = speed / step_size;
+        if (vmax > (float)RMT_MAX_STEP_FREQ_HZ) vmax = (float)RMT_MAX_STEP_FREQ_HZ;
+        float vfloor = axis_start_speed(ctx, i) / step_size;
+        if (vfloor > vmax) vfloor = vmax;
+        item->req.steps[i] = steps[i];
+        item->req.vmax[i] = vmax;
+        item->req.accel[i] = accel / step_size;
+        item->req.v_floor[i] = vfloor;
+    }
+    return ESP_OK;
+}
+
+static void stream_dir_levels(app_context_t *ctx, const mp_request_t *req, int8_t dir[AXIS_COUNT])
+{
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        if (req->steps[i] == 0) {
+            dir[i] = -1;
+            continue;
+        }
+        bool positive = req->steps[i] > 0;
+        if (ctx->state.inverter[i]) {
+            positive = !positive;
+        }
+        if (i == AXIS_Z_ID) {
+            dir[i] = (int8_t)(positive ? Z_DIR_UP : Z_DIR_DOWN);
+        } else {
+            dir[i] = positive ? 1 : 0;
+        }
+    }
+}
+
+/* Movimentos concluidos no hardware: atualiza Z e emite DONE na ordem. */
+static void stream_report_completed(app_context_t *ctx, stream_done_info_t info[2], uint32_t *reported)
+{
+    uint32_t completed = hardware_stream_completed();
+    while (*reported < completed) {
+        stream_done_info_t *d = &info[*reported % 2U];
+        ctx->state.atual_z += d->steps_z;
+        stream_send_event(ctx, d->opcode, ESP_OK);
+        (*reported)++;
+    }
+}
+
+/* Executa `first` e, com lookahead, os comandos seguintes da fila sem parar entre eles.
+ * Retorna o resultado do primeiro comando (ou o erro que interrompeu a cadeia). */
+static esp_err_t motion_stream_chain(app_context_t *ctx, const motion_cmd_t *first)
+{
+    // Encoders sao lidos sob demanda em stream_prepare: MOVE_F e Z nao esperam por um encoder offline
+    stream_prediction_t pred = {.z = ctx->state.atual_z};
+    float jerk_steps[AXIS_COUNT];
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        jerk_steps[i] = ctx->ext.jerk[i] / get_step_size(ctx, axis_char_from_index(i));
+    }
+
+    stream_item_t cur, nxt;
+    esp_err_t err = stream_prepare(ctx, first, &pred, &cur);
+    if (err != ESP_OK || cur.empty) {
+        stream_send_event(ctx, first->opcode, err);
+        return err;
+    }
+    if (xSemaphoreTake(ctx->motion_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        stream_send_event(ctx, first->opcode, ESP_ERR_TIMEOUT);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (hardware_stream_begin() != ESP_OK) {
+        xSemaphoreGive(ctx->motion_mutex);
+        stream_send_event(ctx, first->opcode, ESP_ERR_INVALID_STATE);
+        return ESP_FAIL;
+    }
+
+    stream_done_info_t info[2] = {0};
+    uint32_t committed = 0, reported = 0, pool_idx = 0, chained = 0;
+    float entry_rate = 0.0f;       // do repouso
+    bool have_trailing = false;    // comando reservado que nao entrou na cadeia
+    motion_cmd_t trailing = {0};
+    esp_err_t trailing_err = ESP_OK;
+    bool has_next = false;         // `nxt` reservado da fila (ja fora dela)
+    bool cur_committed = false;    // `cur` ja foi entregue ao RMT
+
+    while (true) {
+        // Lookahead: reserva o proximo comando da fila para calcular a juncao
+        has_next = false;
+        cur_committed = false;
+        float exit_rate = 0.0f, next_entry = 0.0f;
+        motion_cmd_t peek;
+        if (ctx->ext.lookahead && xQueuePeek(ctx->motion_queue, &peek, 0) == pdTRUE &&
+            motion_cmd_streamable(&peek) && peek.stop_gen == s_stop_gen &&
+            !stream_needs_encoder_read(&peek, &pred) &&
+            xQueueReceive(ctx->motion_queue, &peek, 0) == pdTRUE) {
+            stream_prediction_t pred_next = pred;
+            esp_err_t perr = stream_prepare(ctx, &peek, &pred_next, &nxt);
+            if (perr == ESP_OK && !nxt.empty) {
+                pred = pred_next;
+                has_next = true;
+                if (!mp_junction(&cur.req, &nxt.req, jerk_steps, &exit_rate, &next_entry)) {
+                    exit_rate = 0.0f;
+                    next_entry = 0.0f;
+                }
+            } else {
+                // Invalido ou vazio: encerra a cadeia apos o atual e reporta depois
+                pred = pred_next;
+                have_trailing = true;
+                trailing = peek;
+                trailing_err = perr;
+            }
+        }
+
+        // No maximo 2 movimentos em voo: o pool deste plano (usado 2 movimentos atras) precisa estar livre
+        err = hardware_stream_wait(committed > 0U ? committed - 1U : 0U);
+        stream_report_completed(ctx, info, &reported);
+        if (err != ESP_OK) {
+            break;
+        }
+
+        cur.req.rate_entry = entry_rate;
+        cur.req.rate_exit = exit_rate;
+        mp_result_t pr = mp_plan_move(&cur.req, s_stream_pool[pool_idx], STREAM_POOL_WORDS, STREAM_TICK_HZ,
+                                      &s_stream_plan[pool_idx]);
+        if (pr != MP_OK) {
+            ESP_LOGE(APP_TAG, "stream: falha ao planejar movimento (%d)", (int)pr);
+            err = ESP_ERR_INVALID_ARG;
+            break;
+        }
+        const mp_plan_t *plan = &s_stream_plan[pool_idx];
+        int8_t dir[AXIS_COUNT];
+        stream_dir_levels(ctx, &cur.req, dir);
+        err = hardware_stream_commit(plan, dir);
+        if (err != ESP_OK) {
+            break;
+        }
+        cur_committed = true;
+        ESP_LOGD(APP_TAG, "stream: mov %lu dom=%u v=%.0f->%.0f->%.0f passos/s T=%.3fs",
+                 (unsigned long)committed, plan->dom, plan->v_entry, plan->v_cruise, plan->v_exit, plan->duration_s);
+        info[committed % 2U] = (stream_done_info_t){.opcode = cur.cmd.opcode, .steps_z = cur.req.steps[AXIS_Z_ID]};
+        committed++;
+        pool_idx ^= 1U;
+
+        if (!has_next) {
+            break;
+        }
+        // A saida efetiva pode ter sido limitada pelo planejador: entrada do proximo na mesma proporcao
+        next_entry = (exit_rate > 0.0f) ? next_entry * (plan->rate_exit / exit_rate) : 0.0f;
+        if (exit_rate > 0.0f) {
+            chained++;
+        }
+        entry_rate = next_entry;
+        cur = nxt;
+    }
+
+    if (err == ESP_OK) {
+        err = hardware_stream_wait(committed);
+    }
+    stream_report_completed(ctx, info, &reported);
+    if (err != ESP_OK) {
+        // STOP ou falha: movimentos em voo nao terminaram; posicao do Z incerta se havia Z
+        for (uint32_t k = reported; k < committed; ++k) {
+            if (info[k % 2U].steps_z != 0) {
+                ctx->state.homed[AXIS_Z_ID] = false;
+                ESP_LOGW(APP_TAG, "Movimento com Z interrompido: posicao Z incerta, execute HOME Z.");
+            }
+            stream_send_event(ctx, info[k % 2U].opcode, err);
+        }
+        // Comandos que nao chegaram ao RMT (STOP durante a espera do pool)
+        if (!cur_committed) {
+            stream_send_event(ctx, cur.cmd.opcode, err);
+        }
+        if (has_next) {
+            stream_send_event(ctx, nxt.cmd.opcode, err);
+        }
+    }
+    hardware_stream_end();
+    xSemaphoreGive(ctx->motion_mutex);
+
+    if (have_trailing) {
+        // Comando reservado que nao entrou na cadeia: vazio (DONE) ou invalido (ERROR)
+        stream_send_event(ctx, trailing.opcode, (err == ESP_OK) ? trailing_err : ESP_ERR_NOT_FINISHED);
+    }
+    if (chained > 0U) {
+        ESP_LOGI(APP_TAG, "stream: %lu movimento(s), %lu juncao(oes) sem parada.",
+                 (unsigned long)committed, (unsigned long)chained);
+    }
+    return err;
+}
+
+void motion_print_pos_line(app_context_t *ctx)
+{
+    // Linha estruturada para o app (chave=valor, "nan" = invalido); as linhas "Eixo ..." seguem
+    // existindo para compatibilidade com terminais e scripts antigos.
+    float c = 0.0f, a = 0.0f;
+    char c_txt[16] = "nan", a_txt[16] = "nan";
+    if (hardware_read_axis_encoder('C', &c) == ESP_OK) {
+        snprintf(c_txt, sizeof(c_txt), "%.2f", c);
+    }
+    if (hardware_read_axis_encoder('A', &a) == ESP_OK) {
+        snprintf(a_txt, sizeof(a_txt), "%.2f", a);
+    }
+    printf("@POS C=%s A=%s Z=%ld ZMAX=%ld HOMED=%u%u%u MOVING=%u\n", c_txt, a_txt,
+           (long)ctx->state.atual_z, (long)ctx->settings.max_passos_z,
+           ctx->state.homed[0] ? 1U : 0U, ctx->state.homed[1] ? 1U : 0U, ctx->state.homed[2] ? 1U : 0U,
+           ctx->state.in_motion ? 1U : 0U);
 }
 
 static void motion_task(void *arg)
@@ -1277,7 +1749,16 @@ static void motion_task(void *arg)
             }
 
             ESP_LOGI(APP_TAG, "motion_task recebeu cmd type=%d axis=%c steps=%d opcode=0x%02X", (int)cmd.type, cmd.axis, (int)cmd.steps, cmd.opcode);
-            switch (cmd.type) {
+            s_active_gen = cmd.stop_gen;
+            bool events_sent = false;
+            if (motion_abort_hook()) {
+                // Enfileirado antes de um STOP que ocorreu enquanto aguardava na fila
+                err = ESP_ERR_NOT_FINISHED;
+            } else if (ctx->ext.motion_engine == MOTION_ENGINE_STREAM && motion_cmd_streamable(&cmd)) {
+                // Cadeia de movimentos: emite DONE/ERROR de cada comando por conta propria
+                err = motion_stream_chain(ctx, &cmd);
+                events_sent = true;
+            } else switch (cmd.type) {
             case MOTION_CMD_MOVE_REL:
                 err = do_motion_move_axis(ctx, cmd.axis, cmd.steps,
                                           cmd.speed_override, cmd.accel_override);
@@ -1302,16 +1783,24 @@ static void motion_task(void *arg)
             if (ctx->state_mutex && xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 ctx->state.in_motion = false;
                 ctx->state.in_homing = false;
-                if (err == ESP_OK && cmd.type == MOTION_CMD_HOME) {
+                if (cmd.type == MOTION_CMD_HOME) {
                     char ax = (char)toupper((unsigned char)cmd.axis);
-                    if (ax == 'C' || ax == 'X') {
-                        ctx->state.homed[0] = true;
-                    } else if (ax == 'A' || ax == 'Y') {
-                        ctx->state.homed[1] = true;
-                    } else if (ax == 'Z') {
-                        ctx->state.homed[2] = true;
+                    size_t hidx = (ax == 'C' || ax == 'X') ? AXIS_C_ID : ((ax == 'A' || ax == 'Y') ? AXIS_A_ID : AXIS_Z_ID);
+                    ctx->state.homed[hidx] = (err == ESP_OK);
+                    if (err == ESP_OK) {
+                        printf("Home %c finalizado.\n", ax);
+                    } else {
+                        printf("Home %c falhou: %s\n", ax, esp_err_to_name(err));
                     }
-                    printf("Home %c finalizado.\n", ax);
+                }
+                if (err == ESP_ERR_NOT_FINISHED) {
+                    printf("Movimento interrompido por STOP.\n");
+                } else if (err == ESP_ERR_INVALID_STATE && cmd.type != MOTION_CMD_HOME) {
+                    printf("AVISO: Eixo Z bloqueado por seguranca. Use 'ALARM OFF' ou 'HOME Z'.\n");
+                } else if (err == ESP_ERR_INVALID_RESPONSE && cmd.type != MOTION_CMD_HOME) {
+                    printf("ERRO: encoder indisponivel; movimento rejeitado. Use MOVE_F (malha aberta) ou DIAG.\n");
+                } else if (err != ESP_OK && cmd.type != MOTION_CMD_HOME) {
+                    printf("ERRO: movimento falhou: %s\n", esp_err_to_name(err));
                 }
                 xSemaphoreGive(ctx->state_mutex);
             }
@@ -1327,6 +1816,7 @@ static void motion_task(void *arg)
                 printf("Eixo A (Pivot): %.2f deg\n", live_a_deg);
             }
             printf("Eixo Z: %ld / %ld passos\n", (long)ctx->state.atual_z, (long)ctx->settings.max_passos_z);
+            motion_print_pos_line(ctx);
 
             bool can_online = false;
             if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1334,7 +1824,7 @@ static void motion_task(void *arg)
                 xSemaphoreGive(ctx->state_mutex);
             }
 
-            if (can_online && cmd.opcode != 0) {
+            if (can_online && cmd.opcode != 0 && !events_sent) {
                 (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, cmd.opcode, (uint8_t)err);
             }
         }
@@ -1361,12 +1851,51 @@ static esp_err_t validate_motion_enqueue_request(app_context_t *ctx, char axis, 
     return ESP_OK;
 }
 
+esp_err_t motion_apply_speed_level(app_context_t *ctx, uint8_t level)
+{
+    static const uint32_t k_level_delay_us[5] = {2000U, 800U, 400U, 150U, 50U};
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+    if (level < 1U || level > 5U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // O nivel vale para os eixos rotativos C/A (como antes nos MOVE de eixo unico); o Z
+    // mantem sua velocidade em mm/s — 400 us no Z seriam apenas ~15 mm/s.
+    uint32_t delay_us = k_level_delay_us[level - 1U];
+    const size_t axes[2] = {AXIS_C_ID, AXIS_A_ID};
+    for (size_t i = 0; i < 2; ++i) {
+        ctx->state.speed_delay_us[axes[i]] = delay_us;
+        ctx->state.speed[axes[i]] = motion_delay_us_to_speed(ctx, axis_char_from_index(axes[i]), delay_us);
+    }
+    return ESP_OK;
+}
+
+esp_err_t motion_request_stop(app_context_t *ctx)
+{
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+
+    // Invalida o comando em execucao e todos os ja enfileirados (checado a cada passo/poll de 5 ms)
+    (void)__atomic_add_fetch(&s_stop_gen, 1U, __ATOMIC_SEQ_CST);
+
+    uint32_t dropped_count = 0U;
+    if (ctx->motion_queue != NULL) {
+        motion_cmd_t dropped;
+        while (xQueueReceive(ctx->motion_queue, &dropped, 0) == pdTRUE) {
+            notify_discarded_cmd(ctx, &dropped, true);
+            ++dropped_count;
+        }
+    }
+    ESP_LOGW(APP_TAG, "STOP: movimento em curso interrompido, %lu comando(s) descartado(s) da fila.",
+             (unsigned long)dropped_count);
+    return ESP_OK;
+}
+
 esp_err_t motion_init(app_context_t *ctx)
 {
     ctx->motion_queue = xQueueCreate(10, sizeof(motion_cmd_t));
     if (ctx->motion_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    hardware_set_abort_hook(motion_abort_hook);
     BaseType_t created = xTaskCreatePinnedToCore(motion_task, "motion_task", 4096, ctx, 8, NULL, 1);
     if (created != pdPASS) {
         vQueueDelete(ctx->motion_queue);
@@ -1381,9 +1910,16 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
     if (ctx->motion_queue == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (ctx->state.ota_in_progress) {
+        return ESP_ERR_INVALID_STATE; // sessao OTA ativa: nenhum movimento (serial ou CAN)
+    }
+    cmd->stop_gen = s_stop_gen;
     // Homing tem prioridade imediata: descarta movimentos antigos pendentes na fila
     if (cmd->type == MOTION_CMD_HOME) {
-        xQueueReset(ctx->motion_queue);
+        motion_cmd_t dropped;
+        while (xQueueReceive(ctx->motion_queue, &dropped, 0) == pdTRUE) {
+            notify_discarded_cmd(ctx, &dropped, true);
+        }
     }
     // If the new command reverses direction on the same axis, purge stale opposing moves in queue
     if (cmd->type == MOTION_CMD_MOVE_REL || cmd->type == MOTION_CMD_MOVE_FORCE) {
@@ -1395,7 +1931,9 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
                     peek_cmd.axis == cmd->axis &&
                     ((peek_cmd.steps > 0 && cmd->steps < 0) || (peek_cmd.steps < 0 && cmd->steps > 0))) {
                     motion_cmd_t discarded;
-                    xQueueReceive(ctx->motion_queue, &discarded, 0);
+                    if (xQueueReceive(ctx->motion_queue, &discarded, 0) == pdTRUE) {
+                        notify_discarded_cmd(ctx, &discarded, false); // substituido pela reversao do jog
+                    }
                 } else {
                     break;
                 }

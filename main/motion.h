@@ -9,6 +9,16 @@ esp_err_t motion_post_move_axis(app_context_t *ctx, char axis, int32_t steps, ui
 esp_err_t motion_post_move_axis_force(app_context_t *ctx, char axis, int32_t steps, uint8_t sender_id, uint8_t opcode);
 esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id, uint8_t opcode);
 
+/* Parada imediata: interrompe o movimento em curso (RMT e bit-bang) e esvazia a fila.
+ * Pode ser chamada de qualquer tarefa (console, CAN, safety). */
+esp_err_t motion_request_stop(app_context_t *ctx);
+
+/* Nivel de velocidade 1..5 (mesma tabela de CAN_OP_SPEED) aplicado aos eixos C/A em uso. */
+esp_err_t motion_apply_speed_level(app_context_t *ctx, uint8_t level);
+
+/* Linha "@POS C=.. A=.. Z=.. ZMAX=.. HOMED=CAZ MOVING=.." para o app. */
+void motion_print_pos_line(app_context_t *ctx);
+
 uint32_t motion_speed_to_delay_us(app_context_t *ctx, char axis, float speed);
 float motion_delay_us_to_speed(app_context_t *ctx, char axis, uint32_t delay_us);
 void compute_trapezoidal_profile(app_context_t *ctx, char axis, uint32_t start_delay, uint32_t end_delay, uint32_t total_steps, uint32_t ramp_steps, uint32_t *delay_us);

@@ -7,6 +7,10 @@
 #define CAN_NODE_ID_MIN 1U
 #define CAN_NODE_ID_MAX 10U
 
+/* Byte 2 do CAN_EVT_STATUS: bit 6 indica que o frame de posicao (status_base+0x10+node)
+ * usa o formato v2 (C/A int16 em decimos de grau com sinal). Sem o bit: v1 (uint16 centesimos, 0..360). */
+#define CAN_STATUS_FLAG_POS_V2 0x40U
+
 typedef enum {
     CAN_OP_PING = 0x01,
     CAN_OP_STATUS_REQUEST = 0x02,
@@ -19,6 +23,7 @@ typedef enum {
     CAN_OP_HOME = 0x21,
     CAN_OP_MOVE_FORCE = 0x22,
     CAN_OP_MOVE_SYNC = 0x23,
+    CAN_OP_STOP = 0x24,      // Parada imediata (payload: [0x24, flags]; bit0 = apagar lasers / E-STOP)
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
     // Comandos de Atualizacao OTA (Teensy -> Nodes)

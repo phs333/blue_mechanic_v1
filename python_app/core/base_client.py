@@ -81,6 +81,19 @@ class BaseClient(ABC):
         """Move C, A, and Z axes simultaneously in hardware with optional speeds and limit control."""
         return self._unsupported("MOVE_SYNC")
 
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        """Parada imediata: interrompe o movimento em curso e esvazia a fila do nó.
+
+        Com ``lasers_off`` (E-STOP) também apaga os dois lasers. A implementação
+        padrão, usada por backends sem comando de parada, corta os drivers e os
+        lasers — os motores param, mas a fila do firmware não é descartada.
+        """
+        ok = self.set_driver_enabled(False)
+        if lasers_off:
+            ok = self.set_laser(1, 0) and ok
+            ok = self.set_laser(2, 0) and ok
+        return ok
+
     @abstractmethod
     def set_laser(self, laser_index: int, level: int) -> bool:
         """Set laser 1 or 2 level (0..4095)."""
@@ -143,6 +156,25 @@ class BaseClient(ABC):
 
     def apply_driver_settings(self) -> bool:
         return self._unsupported("Aplicação das configurações TMC2209")
+
+    def set_tmc_address(self, axis: str, address: int) -> bool:
+        return self._unsupported("Endereço UART TMC2209")
+
+    def set_tmc_stealth_max(self, axis: str, speed: float) -> bool:
+        return self._unsupported("Limiar stealthChop TMC2209")
+
+    def set_motion_engine(self, engine: str) -> bool:
+        return self._unsupported("Motor de movimento")
+
+    def set_lookahead(self, enabled: bool) -> bool:
+        return self._unsupported("Lookahead de movimento")
+
+    def set_jerk(self, axis: str, value: float) -> bool:
+        return self._unsupported("Jerk de junção")
+
+    def save_nvs(self) -> bool:
+        """Confirma a gravação na NVS; backends sem NVS não têm o que gravar."""
+        return True
 
     def set_can_enabled(self, enabled: bool) -> bool:
         """Enable or disable CAN bus on the node."""

@@ -22,7 +22,7 @@ class RecordingCanClient(CanClient):
         super().__init__(state)
         self.frames = []
 
-    def send_frame(self, arbitration_id, data, desc=""):
+    def send_frame(self, arbitration_id, data, desc="", log=True):
         self.frames.append((arbitration_id, bytes(data), desc))
         return True
 

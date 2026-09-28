@@ -59,11 +59,16 @@ class Kinematic3DView(QFrame):
         self.state.telemetry_updated.connect(self._on_telemetry)
 
     def _on_telemetry(self, t: HardwareTelemetry):
+        lasers_changed = (t.laser1_level != self.laser1_active or t.laser2_level != self.laser2_active)
         self.target_c_deg = t.pos_c_deg
         self.target_a_deg = t.pos_a_deg
         self.target_z_pct = t.z_progress_pct
         self.laser1_active = t.laser1_level
         self.laser2_active = t.laser2_level
+        if not self.anim_timer.isActive():
+            self.anim_timer.start(33)  # retoma a animação só quando há algo a interpolar
+        elif lasers_changed:
+            self.update()
 
     def _on_anim_frame(self):
         # Exponential smoothing interpolation (LERP)
@@ -71,6 +76,14 @@ class Kinematic3DView(QFrame):
         self.cur_c_deg += (self.target_c_deg - self.cur_c_deg) * k
         self.cur_a_deg += (self.target_a_deg - self.cur_a_deg) * k
         self.cur_z_pct += (self.target_z_pct - self.cur_z_pct) * k
+        # Convergiu: fixa no alvo e para o timer (antes redesenhava a 30 FPS mesmo parado)
+        if (abs(self.target_c_deg - self.cur_c_deg) < 0.01 and
+                abs(self.target_a_deg - self.cur_a_deg) < 0.01 and
+                abs(self.target_z_pct - self.cur_z_pct) < 0.01):
+            self.cur_c_deg = self.target_c_deg
+            self.cur_a_deg = self.target_a_deg
+            self.cur_z_pct = self.target_z_pct
+            self.anim_timer.stop()
         self.update()
 
     def mousePressEvent(self, event):

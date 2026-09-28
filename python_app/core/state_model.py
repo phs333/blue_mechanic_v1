@@ -23,6 +23,8 @@ class HardwareTelemetry:
     pos_c_valid: bool = False
     pos_a_valid: bool = False
     pos_z_steps: int = 0    # Atuador Linear
+    homed: List[bool] = field(default_factory=lambda: [False, False, False])  # C, A, Z referenciados
+    in_motion: bool = False
     max_z_steps: int = 38400
     
     # State flags
@@ -143,6 +145,13 @@ class HardwareParameters:
     tmc_ihold_delay: List[int] = field(default_factory=lambda: [6, 6, 6])
     tmc_microsteps: List[int] = field(default_factory=lambda: [16, 16, 16])
     tmc_spreadcycle: List[bool] = field(default_factory=lambda: [False, False, False])
+    # Velocidade até a qual o driver usa stealthChop (acima: spreadCycle). 0 = sempre stealthChop
+    tmc_stealth_max: List[float] = field(default_factory=lambda: [180.0, 180.0, 60.0])
+
+    # Motor de movimento (firmware): STREAM = S-curve no ISR + encadeamento; LEGACY = anterior
+    motion_engine: str = "STREAM"
+    lookahead: bool = True
+    jerk: List[float] = field(default_factory=lambda: [15.0, 15.0, 10.0])
     
     # CAN Settings
     node_id: int = 1
@@ -166,6 +175,7 @@ class DeviceState(QObject):
     raw_message_received = pyqtSignal(str, str) # direction ('TX'/'RX'), text
     can_frame_received = pyqtSignal(dict)   # raw CAN frame info dictionary
     error_occurred = pyqtSignal(str)        # error message
+    config_dump_completed = pyqtSignal()    # fim de um CONFIG DUMP (parâmetros confirmados pelo nó)
     ota_ready = pyqtSignal(int, int)        # node_id, error_code (0=OK)
     ota_progress = pyqtSignal(int, int)     # node_id, pct (0..100)
     ota_done = pyqtSignal(int)              # node_id

@@ -19,6 +19,7 @@ from python_app.ui.widgets.laser_slider import LaserSlider
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, DeviceState
 from python_app.core.protocol_defs import FanMode, calc_ca_steps_for_degrees, calc_z_steps_for_mm, DEFAULT_Z_PULLEY_TEETH
+from python_app.ui.theme import add_class
 
 class DashboardView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -47,7 +48,7 @@ class DashboardView(QWidget):
         title_lbl = QLabel("Blue Mechanic V1 — Painel Central de Controle")
         title_lbl.setStyleSheet("color: #38bdf8; font-size: 15px; font-weight: 700;")
         sub_lbl = QLabel("Controle unificado: Jog, Homing, Zero dos Encoders, Movimento Direto e Telemetria em Tempo Real")
-        sub_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
+        add_class(sub_lbl, "hint")
         title_vbox.addWidget(title_lbl)
         title_vbox.addWidget(sub_lbl)
         header_layout.addLayout(title_vbox)
@@ -159,7 +160,7 @@ class DashboardView(QWidget):
         form_grid.setSpacing(6)
 
         lbl_eixo = QLabel("Eixo:")
-        lbl_eixo.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_eixo, "hint-strong")
         form_grid.addWidget(lbl_eixo, 0, 0)
         self.combo_axis = QComboBox()
         self.combo_axis.addItems(["Eixo C (Base Rotativa)", "Eixo A (Pivot Lasers)", "Eixo Z (Linear)"])
@@ -167,7 +168,7 @@ class DashboardView(QWidget):
         form_grid.addWidget(self.combo_axis, 0, 1)
 
         lbl_passos = QLabel("Passos:")
-        lbl_passos.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_passos, "hint-strong")
         form_grid.addWidget(lbl_passos, 0, 2)
         self.spin_steps = QSpinBox()
         self.spin_steps.setRange(-2000000, 2000000)
@@ -177,7 +178,7 @@ class DashboardView(QWidget):
         form_grid.addWidget(self.spin_steps, 0, 3)
 
         lbl_vel = QLabel("Velocidade:")
-        lbl_vel.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_vel, "hint-strong")
         form_grid.addWidget(lbl_vel, 1, 0)
         self.spin_speed = QDoubleSpinBox()
         self.spin_speed.setRange(0.0, 5000.0)
@@ -222,7 +223,7 @@ class DashboardView(QWidget):
         sync_grid.setSpacing(6)
 
         lbl_sync_c = QLabel("Graus C:")
-        lbl_sync_c.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_sync_c, "hint-strong")
         sync_grid.addWidget(lbl_sync_c, 0, 0)
         self.spin_sync_c = QDoubleSpinBox()
         self.spin_sync_c.setRange(-360.0, 360.0)
@@ -233,7 +234,7 @@ class DashboardView(QWidget):
         sync_grid.addWidget(self.spin_sync_c, 0, 1)
 
         lbl_sync_a = QLabel("Graus A:")
-        lbl_sync_a.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_sync_a, "hint-strong")
         sync_grid.addWidget(lbl_sync_a, 0, 2)
         self.spin_sync_a = QDoubleSpinBox()
         self.spin_sync_a.setRange(-360.0, 360.0)
@@ -244,7 +245,7 @@ class DashboardView(QWidget):
         sync_grid.addWidget(self.spin_sync_a, 0, 3)
 
         lbl_sync_z = QLabel("Desloc. Z:")
-        lbl_sync_z.setStyleSheet("font-size: 11px; font-weight: 600; color: #94a3b8;")
+        add_class(lbl_sync_z, "hint-strong")
         sync_grid.addWidget(lbl_sync_z, 1, 0)
         self.spin_sync_z = QDoubleSpinBox()
         self.spin_sync_z.setRange(-500.0, 500.0)
@@ -298,7 +299,7 @@ class DashboardView(QWidget):
         fan_row.setContentsMargins(0, 0, 0, 0)
         fan_row.setSpacing(8)
         fan_lbl = QLabel("Ventoinha:")
-        fan_lbl.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
+        add_class(fan_lbl, "table-header")
         fan_row.addWidget(fan_lbl)
 
         self.btn_fan_off = QPushButton("Desligada")

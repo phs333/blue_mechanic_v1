@@ -64,6 +64,7 @@ flowchart LR
 | **Laser PWM (12-bit)** | `L <node> <laser> <pwm>` | `<node>`: 0..10<br>`<laser>`: `1` ou `2`<br>`<pwm>`: `0` a `4095` | Ajusta a intensidade do canal de laser especificado (`0` = 0%, `4095` = 100%). | `L 0 1 4095` *(laser 1 em 100% em todos)*<br>`L 1 2 2048` *(laser 2 em 50% no node 1)*<br>`L 0 1 0` *(apaga laser 1 em todos)* |
 | **Ventoinha (Cooler)** | `F <node> <modo>` | `<node>`: 0..10<br>`<modo>`: `0` (Off), `1` (On), `2` (Auto) | Define o modo de controle da ventoinha de resfriamento. | `F 0 2` *(modo térmico automático em todos)*<br>`F 1 1` *(força cooler ligado no node 1)* |
 | **Solicitação de Status** | `R <node>` | `<node>`: 1..10 *(não usar 0)* | Solicita o envio imediato dos frames de **Status** e **Posição** do nó. | `R 1` *(solicita status do node 1)* |
+| **Parada imediata** | `X <node> [flags]`<br>`STOP <node>`<br>`ESTOP <node>` | `<node>`: 0..10 (0 = todos)<br>`flags`: bit 0 = apagar lasers | Interrompe o movimento em curso e esvazia a fila (opcode CAN `0x24`). `ESTOP` = `X <node> 1` (também apaga os lasers). Tem prioridade de TX sobre os demais comandos. Responde `TEENSY_OK STOP <node> <flags>`. | `ESTOP 0`<br>`X 3` |
 | **Ping** | `P <node> [arg0] [arg1]` | `<node>`: 1..10<br>`arg0`, `arg1`: uint8 opcionais | Teste de conectividade. Quando omitidos, o Teensy envia ambos como zero. | `P 1 10 20` |
 | **OTA Iniciar** | `OTA_START <node> <tamanho>` | `<node>`: 0..10<br>`<tamanho>`: uint32 bytes | Inicia sessão OTA no nó (ou 0 para broadcast em todos os 10 nós). O Teensy emite CAN_OP_OTA_START (0x40). | `OTA_START 0 1048576` |
 | **OTA Dados** | `OTA_DATA <node> <seq> <hex_data>` | `<node>`: 0..10<br>`<seq>`: 0..255<br>`<hex_data>`: até 12 chars hex (6 bytes) | Transmite bloco binário de firmware em hexadecimal. O Teensy emite CAN_OP_OTA_DATA (0x41). | `OTA_DATA 0 1 48656C6C6F21` |
@@ -81,8 +82,9 @@ Emitido logo após `STATUS` quando o ESP32 responde a uma solicitação de statu
 ```
 POS <node_id> <pos_c_deg> <pos_a_deg> <pos_z_steps> <temp_c>
 ```
-* `<pos_c_deg>`: Posição angular real do Eixo C em Graus com 2 casas decimais (ex: `120.45`). Se inválido: `-1.00`.
-* `<pos_a_deg>`: Posição angular real do Eixo A em Graus com 2 casas decimais (ex: `89.90`). Se inválido: `-1.00`.
+* `<pos_c_deg>`: Posição angular do Eixo C em graus, **com sinal** (ex: `-45.3`, `540.0`). Se inválido: `nan`.
+* `<pos_a_deg>`: Posição angular do Eixo A em graus, com sinal. Se inválido: `nan`.
+* Nós com firmware novo enviam décimos de grau com sinal (formato v2, indicado no `STATUS`); nós antigos continuam em 0..360 com 2 casas. Antes, `-1.00` indicava inválido — com ângulos negativos isso seria ambíguo.
 * `<pos_z_steps>`: Posição linear atual do Eixo Z em passos (ex: `1500`).
 * `<temp_c>`: Temperatura da placa em Graus Celsius com 1 casa decimal (ex: `28.5`).
 * **Exemplo de linha recebida:**
@@ -127,7 +129,7 @@ STATUS <node_id> <flags> <laser1_pwm> <laser2_pwm> <fan_on> <fan_mode> <speed_lv
 | **`PONG <node> <arg0> <arg1>`** | Resposta ao comando `PING`. | `PONG 1 10 20` |
 | **`TEENSY_ERROR <motivo>`** | Erro de sintaxe ou falha de transmissão na ponte USB/CAN do Teensy. | `TEENSY_ERROR INVALID_NODE_ID 99` |
 
-`opcode` e `err` são impressos com dois dígitos hexadecimais, sem prefixo `0x`. O protocolo CAN atual não possui sequência; por isso, o host não deve manter vários movimentos do mesmo opcode pendentes para o mesmo nó. Um movimento aceito também pode ser removido da fila pelo firmware quando um novo movimento oposto substitui comandos pendentes. Nessa situação, não há `DONE` para o item removido.
+`opcode` e `err` são impressos com dois dígitos hexadecimais, sem prefixo `0x`. O protocolo CAN atual não possui sequência; por isso, o host não deve manter vários movimentos do mesmo opcode pendentes para o mesmo nó. Um movimento aceito também pode ser removido da fila pelo firmware quando um novo movimento oposto substitui comandos pendentes; nesse caso o nó emite `DONE` com `err` = `0C` (`ESP_ERR_NOT_FINISHED`). Comandos descartados por `HOME` ou pelo opcode CAN `0x24` (STOP) recebem `ERROR` com `0C`. Para parar tudo imediatamente use `ESTOP 0` (ou `X <node> [flags]`), que envia o opcode CAN `0x24`.
 
 ---
 

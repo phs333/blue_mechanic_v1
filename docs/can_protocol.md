@@ -158,6 +158,8 @@ Os eventos `ACK`, `DONE` e `ERROR` identificam somente o nó e o opcode. Portant
 | 4     | 150 µs          | Rápida              |
 | 5     | 50 µs           | Mais rápida         |
 
+O nível vale para os eixos rotativos **C e A** em todos os tipos de movimento (`MOVE`, `MOVE_FORCE` e `MOVE_SYNC`) e não é salvo na NVS. O Z mantém sua velocidade em mm/s. O mesmo ajuste existe na serial como `VELOCIDADE <1..5>`. A velocidade resultante é limitada por `SPEED_MAX` do eixo.
+
 **Resposta:** `CAN_EVT_ACK` ou `CAN_EVT_ERROR`.
 
 ---
@@ -259,6 +261,23 @@ Perfis `CAN_OP_MOVE_PROFILE` opcionais podem ser enviados para C, A e Z imediata
 
 **Resposta:** `CAN_EVT_ACK` quando o movimento sincronizado é enfileirado, seguido de `CAN_EVT_DONE` ou `CAN_EVT_ERROR` ao terminar.
 
+O eixo dominante parte da velocidade inicial configurada (`RAMP C|A|Z`). Quando a rampa necessária não cabe no curso (ou excede o limite de amostras do encoder RMT), o pico é reduzido para respeitar a aceleração, e os demais eixos são escalados na mesma proporção. O Z gerado via RMT não checa o fim de curso a cada passo: se o switch acionar, a `safety_task` executa um STOP e marca o Z como não referenciado.
+
+---
+
+### `0x24` — `CAN_OP_STOP`
+
+Parada imediata. Interrompe o movimento em curso (RMT ou bit-bang, latência ≤ 5 ms), descarta todos os comandos na fila e é aceito em qualquer estado, inclusive durante OTA. Envie no ID de broadcast para parar todos os nós.
+
+**DLC esperado:** 2 bytes
+
+| Byte | Conteúdo |
+|------|----------|
+| 0 | Opcode (`0x24`) |
+| 1 | Flags: bit 0 = também apagar os dois lasers (E-STOP); bits 1–7 reservados |
+
+**Resposta:** `CAN_EVT_ACK`. O movimento interrompido termina com `CAN_EVT_ERROR` (`0x0C`, `ESP_ERR_NOT_FINISHED`), e cada comando descartado da fila também recebe `CAN_EVT_ERROR` com `0x0C`. Se o STOP interromper um `MOVE_SYNC` com Z, a posição Z fica incerta e é preciso `HOME Z`.
+
 ---
 
 ### `0x30` — `CAN_OP_LASER`
@@ -328,6 +347,10 @@ Transmite um bloco de bytes do firmware compilado para gravação direta na part
 | 2–7  | Fragmento binário do arquivo `.bin` (1 a 6 bytes) |
 
 **Resposta:** Não responde a cada frame para manter vazão máxima no barramento. A cada 16 KB gravados com sucesso, o nó emite `CAN_EVT_OTA_PROGRESS` com a porcentagem concluída. Emite `CAN_EVT_OTA_ERROR` imediatamente se a gravação flash falhar.
+
+**Sequência:** o primeiro frame após `OTA_START` define a referência; cada frame seguinte deve ter `seq_num` = anterior + 1 (módulo 256). Um frame repetido (mesmo `seq_num` do anterior) é ignorado, o que permite retransmitir um bloco sem corromper a imagem. Uma lacuna invalida a sessão: o nó emite `CAN_EVT_OTA_ERROR` com `0x09` (`ESP_ERR_INVALID_CRC`), ignora os dados restantes e rejeita o `OTA_END`.
+
+**Fluxo recomendado no host:** envie `OTA_START` e aguarde `CAN_EVT_OTA_READY` antes do primeiro `OTA_DATA`. O nó só responde depois de apagar a área da partição de destino, e frames enviados durante o apagamento se perdem. O nó acumula os dados em blocos de 4 KB antes de gravar na flash.
 
 ---
 
@@ -414,13 +437,14 @@ Resposta ao `CAN_OP_STATUS_REQUEST`. Payload de 8 bytes.
 | 3   | `0x08`   | `temp_valid`                   |
 | 4   | `0x10`   | `tmc_uart_ready`               |
 | 5   | `0x20`   | `can_online`                   |
+| 6   | `0x40`   | `pos_v2`: o frame de posição seguinte usa o formato v2 (ângulos com sinal) |
 
 ### Telemetria de posição e temperatura (`own_position_id`)
 
 | Byte | Conteúdo |
 |------|----------|
-| 0–1 | C em centigraus, `uint16` little-endian (`0xFFFF` = inválido) |
-| 2–3 | A em centigraus, `uint16` little-endian (`0xFFFF` = inválido) |
+| 0–1 | C: v2 = décimos de grau, `int16` com sinal (`INT16_MIN` = inválido); v1 = centigraus `uint16` 0..36000 (`0xFFFF` = inválido) |
+| 2–3 | A: mesmo formato de C |
 | 4–5 | Z em passos, `uint16` little-endian (saturado em `65534`) |
 | 6–7 | Temperatura em décimos de °C, `int16` little-endian (`INT16_MIN` = inválida) |
 
@@ -449,8 +473,10 @@ Indica que o processamento de um comando de movimento ou homing terminou. Para m
 | 0    | Evento (`0x84`)   |
 | 1    | Node ID           |
 | 2    | Opcode do comando |
-| 3    | 0 (sucesso)       |
+| 3    | 0 (sucesso) ou `0x0C` |
 | 4–7  | Reservado (0)     |
+
+Com byte 3 = `0x0C` (`ESP_ERR_NOT_FINISHED`), o comando foi aceito mas saiu da fila antes de executar, substituído por um movimento posterior: jog que inverte o sentido no mesmo eixo, ou movimento no mesmo sentido de um eixo já no limite. O host pode tratá-lo como concluído.
 
 ---
 
@@ -534,6 +560,9 @@ Indica que um comando falhou.
 | `0x05` | `ESP_ERR_NOT_FOUND` |
 | `0x06` | `ESP_ERR_NOT_SUPPORTED` |
 | `0x07` | `ESP_ERR_TIMEOUT` |
+| `0x08` | `ESP_ERR_INVALID_RESPONSE` (HOME terminou fora da tolerância; eixo não referenciado) |
+| `0x09` | `ESP_ERR_INVALID_CRC` (OTA com frame perdido) |
+| `0x0C` | `ESP_ERR_NOT_FINISHED` (interrompido por STOP, ou removido da fila por HOME/STOP) |
 | `0xFF` | `ESP_FAIL` |
 
 ---

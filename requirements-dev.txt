@@ -1,0 +1,3 @@
+-r python_app/requirements.txt
+# Compilador C portátil para os testes de host do firmware (tests/host, tests/test_host_c.py)
+ziglang>=0.13

@@ -9,9 +9,9 @@
 
 static const char *TAG = "stepper_motor_encoder";
 
-static float convert_to_smooth_freq(uint32_t freq1, uint32_t freq2, uint32_t freqx)
+static float convert_to_smooth_freq(uint32_t freq1, uint32_t freq2, float freqx)
 {
-    float normalize_x = ((float)(freqx - freq1)) / (freq2 - freq1);
+    float normalize_x = (freqx - (float)freq1) / (float)(freq2 - freq1);
     // third-order "smoothstep" function: https://en.wikipedia.org/wiki/Smoothstep
     float smooth_x = normalize_x * normalize_x * (3 - 2 * normalize_x);
     return smooth_x * (freq2 - freq1) + freq1;
@@ -77,12 +77,16 @@ esp_err_t rmt_new_stepper_motor_curve_encoder(const stepper_motor_curve_encoder_
     ESP_GOTO_ON_ERROR(rmt_new_copy_encoder(&copy_encoder_config, &step_encoder->copy_encoder), err, TAG, "create copy encoder failed");
     bool is_accel_curve = config->start_freq_hz < config->end_freq_hz;
 
-    // prepare the curve table, in RMT symbol format
-    uint32_t curve_step = 0;
+    // prepare the curve table, in RMT symbol format.
+    // Passo em float: com passo inteiro a curva exigia |end - start| >= sample_points e
+    // truncava a frequencia final (ex.: 84 Hz em 200 amostras -> passo 0).
+    float curve_step = 0.0f;
     if (is_accel_curve) {
-        curve_step = (config->end_freq_hz - config->start_freq_hz) / (config->sample_points - 1);
+        curve_step = (config->sample_points > 1) ?
+                     (float)(config->end_freq_hz - config->start_freq_hz) / (float)(config->sample_points - 1) : 0.0f;
         for (uint32_t i = 0; i < config->sample_points; i++) {
-            smooth_freq = convert_to_smooth_freq(config->start_freq_hz, config->end_freq_hz, config->start_freq_hz + curve_step * i);
+            smooth_freq = convert_to_smooth_freq(config->start_freq_hz, config->end_freq_hz,
+                                                 (float)config->start_freq_hz + curve_step * (float)i);
             symbol_duration = config->resolution / smooth_freq / 2;
             step_encoder->curve_table[i].level0 = 1;
             step_encoder->curve_table[i].duration0 = symbol_duration;
@@ -90,9 +94,11 @@ esp_err_t rmt_new_stepper_motor_curve_encoder(const stepper_motor_curve_encoder_
             step_encoder->curve_table[i].duration1 = symbol_duration;
         }
     } else {
-        curve_step = (config->start_freq_hz - config->end_freq_hz) / (config->sample_points - 1);
+        curve_step = (config->sample_points > 1) ?
+                     (float)(config->start_freq_hz - config->end_freq_hz) / (float)(config->sample_points - 1) : 0.0f;
         for (uint32_t i = 0; i < config->sample_points; i++) {
-            smooth_freq = convert_to_smooth_freq(config->end_freq_hz, config->start_freq_hz, config->end_freq_hz + curve_step * i);
+            smooth_freq = convert_to_smooth_freq(config->end_freq_hz, config->start_freq_hz,
+                                                 (float)config->end_freq_hz + curve_step * (float)i);
             symbol_duration = config->resolution / smooth_freq / 2;
             step_encoder->curve_table[config->sample_points - i - 1].level0 = 1;
             step_encoder->curve_table[config->sample_points - i - 1].duration0 = symbol_duration;
@@ -100,7 +106,6 @@ esp_err_t rmt_new_stepper_motor_curve_encoder(const stepper_motor_curve_encoder_
             step_encoder->curve_table[config->sample_points - i - 1].duration1 = symbol_duration;
         }
     }
-    ESP_GOTO_ON_FALSE(curve_step > 0, ESP_ERR_INVALID_ARG, err, TAG, "|end_freq_hz - start_freq_hz| can't be smaller than sample_points");
 
     step_encoder->sample_points = config->sample_points;
     step_encoder->flags.is_accel_curve = is_accel_curve;
@@ -125,6 +130,9 @@ typedef struct {
     uint32_t resolution;
 } rmt_stepper_uniform_encoder_t;
 
+// Chamado tambem a partir do ISR do RMT quando uma transacao pendente e iniciada
+// ao termino da anterior: precisa estar em IRAM como o encoder de curva.
+RMT_ENCODER_FUNC_ATTR
 static size_t rmt_encode_stepper_motor_uniform(rmt_encoder_t *encoder, rmt_channel_handle_t channel, const void *primary_data, size_t data_size, rmt_encode_state_t *ret_state)
 {
     rmt_stepper_uniform_encoder_t *motor_encoder = __containerof(encoder, rmt_stepper_uniform_encoder_t, base);
@@ -151,6 +159,7 @@ static esp_err_t rmt_del_stepper_motor_uniform_encoder(rmt_encoder_t *encoder)
     return ESP_OK;
 }
 
+RMT_ENCODER_FUNC_ATTR
 static esp_err_t rmt_reset_stepper_motor_uniform(rmt_encoder_t *encoder)
 {
     rmt_stepper_uniform_encoder_t *motor_encoder = __containerof(encoder, rmt_stepper_uniform_encoder_t, base);

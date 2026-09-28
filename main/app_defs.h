@@ -233,6 +233,7 @@ typedef struct {
     volatile fan_mode_t fan_mode;
     volatile uint16_t laser_level[2];
     volatile uint32_t speed_delay_us[AXIS_COUNT];
+    volatile float speed[AXIS_COUNT];       // velocidade nominal em uso (fonte unica para todos os tipos de MOVE)
     volatile float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     volatile float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     volatile int32_t atual_z;
@@ -276,10 +277,37 @@ typedef struct {
     float speed_a;          // velocidade individual A (deg/s), -1.0 = usar padrão
     float speed_z;          // velocidade individual Z (mm/s), -1.0 = usar padrão
     bool force_no_encoder;  // true = ignora limites e encoder (sem correção)
+    uint32_t stop_gen;      // geracao de STOP no enfileiramento; divergencia = comando abortado
 } motion_cmd_t;
+
+/*
+ * Configuracoes estendidas: blob NVS proprio ("cfg_ext"), versionado pelo tamanho.
+ * Campos novos entram SEMPRE no fim; um blob antigo (menor) carrega o prefixo e o
+ * restante fica com o padrao — sem resetar persisted_settings_t (SETTINGS_VERSION).
+ */
+typedef struct {
+    uint32_t size;                       // sizeof() gravado
+    float stealth_max_speed[AXIS_COUNT]; // acima disso o TMC troca stealthChop->spreadCycle (TPWMTHRS); 0 = sempre stealthChop
+    uint8_t motion_engine;               // MOTION_ENGINE_STREAM (padrao) ou MOTION_ENGINE_LEGACY
+    uint8_t lookahead;                   // 1 = encadeia movimentos consecutivos sem parar entre eles
+    float jerk[AXIS_COUNT];              // salto maximo de velocidade por eixo numa juncao (deg/s, deg/s, mm/s)
+} ext_settings_t;
+
+#define MOTION_ENGINE_LEGACY 0U
+#define MOTION_ENGINE_STREAM 1U
+
+#define APP_EXT_SETTINGS_DEFAULT_INIT                 \
+    {                                                 \
+        .size = sizeof(ext_settings_t),               \
+        .stealth_max_speed = {180.0f, 180.0f, 60.0f}, \
+        .motion_engine = MOTION_ENGINE_STREAM,        \
+        .lookahead = 1U,                              \
+        .jerk = {15.0f, 15.0f, 10.0f},                \
+    }
 
 typedef struct {
     persisted_settings_t settings;
+    ext_settings_t ext;
     runtime_state_t state;
     SemaphoreHandle_t motion_mutex;
     SemaphoreHandle_t state_mutex;
@@ -333,6 +361,7 @@ typedef struct {
         .fan_mode = FAN_MODE_MANUAL_OFF,  \
         .laser_level = {0, 0},            \
         .speed_delay_us = {400, 400, 400}, \
+        .speed = {140.0f, 140.0f, 250.0f}, \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .atual_z = 0,                     \

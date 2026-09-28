@@ -18,6 +18,7 @@ from python_app.ui.widgets.status_card import StatusCard
 from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import HardwareTelemetry, DeviceState
 from python_app.core.protocol_defs import FanMode
+from python_app.ui.theme import add_class
 
 class PeripheralsView(QWidget):
     def __init__(self, comm: CommManager, state: DeviceState, parent=None):
@@ -45,7 +46,7 @@ class PeripheralsView(QWidget):
         title_lbl = QLabel("Controle de Periféricos & Gestão Térmica")
         title_lbl.setStyleSheet("color: #38bdf8; font-size: 16px; font-weight: 700;")
         sub_lbl = QLabel("Gerenciamento dos Lasers Esquerdo e Direito (Pivot A) e Ventoinha 12V")
-        sub_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
+        add_class(sub_lbl, "muted")
         title_vbox.addWidget(title_lbl)
         title_vbox.addWidget(sub_lbl)
         header_layout.addLayout(title_vbox)
@@ -150,7 +151,7 @@ class PeripheralsView(QWidget):
         fan_card_layout.addLayout(fan_btn_row)
         
         lbl_fan_desc = QLabel("Em modo AUTO: acionamento automático por histerese térmica (40°C a 45°C).")
-        lbl_fan_desc.setStyleSheet("color: #64748b; font-size: 11px;")
+        add_class(lbl_fan_desc, "hint")
         fan_card_layout.addWidget(lbl_fan_desc)
         
         therm_row.addWidget(fan_card, 2)

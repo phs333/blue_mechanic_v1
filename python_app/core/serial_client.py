@@ -17,10 +17,15 @@ import serial
 import serial.tools.list_ports
 
 from .base_client import BaseClient
+from .main_thread import MainThreadRelay
 from .state_model import DeviceState
 from .protocol_defs import FanMode, delay_to_speed_level, translate_teensy_to_serial
 
 class SerialClient(BaseClient):
+    RESET_PULSE_S = 0.1          # EN em nível baixo durante o reset
+    BOOT_TIMEOUT_S = 6.0         # boot do firmware: ~1,5 s de estabilização + drivers/CAN
+    BOOT_READY_MARKER = "SISTEMA PRONTO PARA COMANDOS"
+
     def __init__(self, state: DeviceState):
         super().__init__(state)
         self.serial_port: Optional[serial.Serial] = None
@@ -30,6 +35,9 @@ class SerialClient(BaseClient):
         self.port_name = ""
         self.baudrate = 115200
         self._in_config_dump = False
+        self._relay = MainThreadRelay()
+        self._initial_pending = False
+        self._boot_timer: Optional[threading.Timer] = None
         
     @staticmethod
     def list_available_ports() -> List[Dict[str, str]]:
@@ -42,15 +50,21 @@ class SerialClient(BaseClient):
             })
         return ports
 
-    def connect(self, port: str = "COM3", baudrate: int = 115200, **kwargs) -> bool:
+    def connect(self, port: str = "COM3", baudrate: int = 115200, reset_on_connect: bool = True, **kwargs) -> bool:
         self.disconnect()
         try:
-            self.serial_port = serial.Serial(
-                port=port,
-                baudrate=baudrate,
-                timeout=0.1,
-                write_timeout=0.5
-            )
+            port_obj = serial.Serial()
+            port_obj.port = port
+            port_obj.baudrate = baudrate
+            port_obj.timeout = 0.1
+            port_obj.write_timeout = 0.5
+            # DTR/RTS inativos ANTES de abrir. No circuito de auto-reset do ESP32 (RTS->EN,
+            # DTR->IO0) a abertura padrão do pyserial pode pulsar as linhas e deixar o chip
+            # no bootloader de gravação — e aí ele não responde a comandos até apertar o botão.
+            port_obj.dtr = False
+            port_obj.rts = False
+            port_obj.open()
+            self.serial_port = port_obj
             self.port_name = port
             self.baudrate = baudrate
             self.is_connected = True
@@ -60,12 +74,18 @@ class SerialClient(BaseClient):
             self.reader_thread.start()
             
             self.state.set_connection_status(True, f"COM ({port} @ {baudrate})")
-            
-            # Initial parameters read and status poll
-            time.sleep(0.1)
-            self.request_config_dump()
-            time.sleep(0.05)
-            self.request_status()
+
+            self._initial_pending = True
+            if reset_on_connect:
+                # Leitura inicial só depois do boot (linha "SISTEMA PRONTO" ou timeout):
+                # enviada durante o boot, seria perdida.
+                self.reset_device()
+                self._boot_timer = threading.Timer(self.BOOT_TIMEOUT_S, self._request_initial_state)
+                self._boot_timer.daemon = True
+                self._boot_timer.start()
+            else:
+                time.sleep(0.1)
+                self._request_initial_state()
             return True
         except Exception as e:
             self.state.error_occurred.emit(f"Falha ao abrir porta serial {port}: {e}")
@@ -73,7 +93,38 @@ class SerialClient(BaseClient):
             self.state.set_connection_status(False, "COM")
             return False
 
+    def reset_device(self) -> bool:
+        """Reset por hardware do ESP32 via RTS->EN, com DTR (IO0) inativo: boot normal,
+        nunca o modo de gravação. Equivale a apertar o botão EN/RST da placa."""
+        if not self.serial_port or not self.serial_port.is_open:
+            return False
+        try:
+            with self.lock:
+                self.serial_port.dtr = False   # IO0 alto
+                self.serial_port.rts = True    # EN baixo: chip em reset
+                time.sleep(self.RESET_PULSE_S)
+                self.serial_port.rts = False   # EN alto: boot do firmware
+            self.state.raw_message_received.emit("TX", "[reset do ESP32 via RTS/EN]")
+            return True
+        except (serial.SerialException, OSError) as exc:
+            self.state.error_occurred.emit(f"Falha ao resetar o ESP32 pela serial: {exc}")
+            return False
+
+    def _request_initial_state(self) -> None:
+        if not self._initial_pending or not self.is_connected:
+            return
+        self._initial_pending = False
+        if self._boot_timer is not None:
+            self._boot_timer.cancel()
+            self._boot_timer = None
+        self.request_config_dump()
+        self.request_status()
+
     def disconnect(self) -> None:
+        if self._boot_timer is not None:
+            self._boot_timer.cancel()
+            self._boot_timer = None
+        self._initial_pending = False
         self.stop_event.set()
         if self.reader_thread and self.reader_thread.is_alive():
             self.reader_thread.join(timeout=0.5)
@@ -126,9 +177,8 @@ class SerialClient(BaseClient):
                         line, _, line_buffer = line_buffer.partition(b'\n')
                         text = line.decode('utf-8', errors='ignore').strip()
                         if text:
-                            self.state.raw_message_received.emit("RX", text)
-                            self.state.telemetry.rx_frames += 1
-                            self._parse_response_line(text)
+                            # Parse e alterações de estado na thread da interface
+                            self._relay.post(self._handle_rx_line, text)
                 else:
                     time.sleep(0.01)
             except serial.SerialException as e:
@@ -140,8 +190,45 @@ class SerialClient(BaseClient):
         self.is_connected = False
         self.state.set_connection_status(False, "COM")
 
+    def _handle_rx_line(self, text: str) -> None:
+        self.state.raw_message_received.emit("RX", text)
+        self.state.telemetry.rx_frames += 1
+        try:
+            self._parse_response_line(text)
+        except (ValueError, IndexError) as exc:
+            self.state.error_occurred.emit(f"Linha serial não reconhecida ({exc}): {text}")
+
     def _parse_response_line(self, line: str):
         """Parse status lines printed by Blue Mechanic V1 ESP32 firmware."""
+        # Firmware terminou o boot (após conectar, reset manual ou reinício inesperado):
+        # relê configuração e status para a tela refletir o nó
+        if self.BOOT_READY_MARKER in line:
+            self._initial_pending = True
+            self._request_initial_state()
+            return
+
+        # --- 0. LINHA ESTRUTURADA (@POS chave=valor) ---
+        if line.startswith("@POS "):
+            fields = dict(item.split("=", 1) for item in line[5:].split() if "=" in item)
+            updates = {}
+            for key, attr in (("C", "pos_c"), ("A", "pos_a")):
+                value = float(fields.get(key, "nan"))
+                valid = value == value  # nan != nan
+                updates[f"{attr}_valid"] = valid
+                if valid:
+                    updates[f"{attr}_deg"] = value
+            if "Z" in fields:
+                updates["pos_z_steps"] = int(fields["Z"])
+            if "ZMAX" in fields:
+                updates["max_z_steps"] = int(fields["ZMAX"])
+            homed = fields.get("HOMED", "")
+            if len(homed) == 3:
+                updates["homed"] = [ch == "1" for ch in homed]
+            if "MOVING" in fields:
+                updates["in_motion"] = fields["MOVING"] == "1"
+            self.state.update_telemetry(**updates)
+            return
+
         # --- 1. LIVE TELEMETRY PARSERS (Pure Dynamic State) ---
         # Eixo C (Base): 45.20 deg (Limites: [10.00, 190.00] deg)
         m_c = re.search(r'Eixo\s+[CX](?:\s*\(.*?\))?:\s*([\d\.\-]+)\s*(?:deg|°)', line, re.IGNORECASE)
@@ -245,6 +332,23 @@ class SerialClient(BaseClient):
         if self._in_config_dump and "===================" in line:
             self._in_config_dump = False
             self.state.parameters_updated.emit(self.state.parameters)
+            self.state.config_dump_completed.emit()
+            return
+
+        m_cfg_motion = re.search(r'CONFIG MOTION ENGINE=(\w+)\s+LOOKAHEAD=([01])\s+JERK C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_motion:
+            self.state.parameters.motion_engine = m_cfg_motion.group(1).upper()
+            self.state.parameters.lookahead = m_cfg_motion.group(2) == "1"
+            self.state.parameters.jerk = [float(m_cfg_motion.group(i)) for i in (3, 4, 5)]
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
+            return
+
+        m_cfg_stealth = re.search(r'CONFIG STEALTH_MAX C=([\d\.\-]+)\s+A=([\d\.\-]+)\s+Z=([\d\.\-]+)', line, re.IGNORECASE)
+        if m_cfg_stealth:
+            self.state.parameters.tmc_stealth_max = [float(m_cfg_stealth.group(i)) for i in (1, 2, 3)]
+            if not self._in_config_dump:
+                self.state.parameters_updated.emit(self.state.parameters)
             return
 
         m_cfg_steps = re.search(r'CONFIG STEPS C=(\d+)\s+A=(\d+)\s+Z=(\d+)', line, re.IGNORECASE)
@@ -424,8 +528,8 @@ class SerialClient(BaseClient):
     def request_config_dump(self) -> bool:
         return self.send_raw("CONFIG DUMP")
 
-    def request_config_dump(self) -> bool:
-        return self.send_raw("CONFIG DUMP")
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        return self.send_raw("ESTOP" if lasers_off else "STOP")
 
     def set_driver_enabled(self, enable: bool) -> bool:
         self.state.update_telemetry(drivers_enabled=enable)
@@ -443,9 +547,6 @@ class SerialClient(BaseClient):
         else:
             self.send_raw("DRIVER MODE STEPDIR")
         return self.send_raw("DRIVER APPLY")
-
-    def set_driver_invert(self, axis: str, invert: bool) -> bool:
-        return self.send_raw(f"DRIVER INVERT {axis.upper()} {'ON' if invert else 'OFF'}")
 
     def read_tmc_reg(self, axis: str, reg: int) -> bool:
         return self.send_raw(f"DRIVER REG READ {axis.upper()} {reg}")
@@ -573,6 +674,25 @@ class SerialClient(BaseClient):
 
     def set_tmc_microsteps(self, axis: str, microsteps: int) -> bool:
         return self.send_raw(f"DRIVER UART MICROSTEPS {axis.upper()} {microsteps}")
+
+    def set_tmc_address(self, axis: str, address: int) -> bool:
+        return self.send_raw(f"DRIVER UART ADDR {axis.upper()} {int(address)}")
+
+    def set_tmc_stealth_max(self, axis: str, speed: float) -> bool:
+        return self.send_raw(f"DRIVER UART STEALTH_MAX {axis.upper()} {float(speed):.1f}")
+
+    def set_motion_engine(self, engine: str) -> bool:
+        return self.send_raw(f"MOTION ENGINE {'LEGACY' if engine.upper() == 'LEGACY' else 'STREAM'}")
+
+    def set_lookahead(self, enabled: bool) -> bool:
+        return self.send_raw(f"MOTION LOOKAHEAD {'ON' if enabled else 'OFF'}")
+
+    def set_jerk(self, axis: str, value: float) -> bool:
+        return self.send_raw(f"MOTION JERK {axis.upper()} {float(value):.2f}")
+
+    def save_nvs(self) -> bool:
+        """Força a gravação pendente na NVS (o firmware agrupa alterações por 300 ms)."""
+        return self.send_raw("SAVE")
 
     def read_tmc_register(self, axis: str, reg_addr: int) -> bool:
         return self.send_raw(f"DRIVER REG READ {axis.upper()} 0x{reg_addr:02X}")

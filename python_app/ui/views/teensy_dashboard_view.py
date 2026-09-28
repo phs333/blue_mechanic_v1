@@ -18,6 +18,7 @@ from python_app.core.comm_manager import CommManager
 from python_app.core.state_model import DeviceState, HardwareTelemetry
 from python_app.ui.widgets.jog_pad import JogPad
 from python_app.ui.widgets.laser_slider import LaserSlider
+from python_app.ui.theme import add_class
 
 
 class NodeCardWidget(QFrame):
@@ -127,7 +128,7 @@ class NodeCardWidget(QFrame):
         footer_layout.setSpacing(6)
 
         self.lbl_temp = QLabel("🌡️ -- °C")
-        self.lbl_temp.setStyleSheet("color: #64748b; font-size: 11px;")
+        add_class(self.lbl_temp, "hint")
         footer_layout.addWidget(self.lbl_temp)
 
         footer_layout.addStretch()
@@ -264,7 +265,7 @@ class NodeCardWidget(QFrame):
                 self.lbl_temp.setStyleSheet("color: #34d399; font-weight: 700; font-size: 11px;")
         else:
             self.lbl_temp.setText("🌡️ -- °C")
-            self.lbl_temp.setStyleSheet("color: #64748b; font-size: 11px;")
+            add_class(self.lbl_temp, "hint")
 
         # Lasers
         pct1 = int((t.laser1_level / 4095.0) * 100)
@@ -332,7 +333,7 @@ class TeensyDashboardView(QWidget):
         lbl_title = QLabel("🎛️ Painel dos 10 Nós — Teensy / CAN")
         lbl_title.setStyleSheet("color: #38bdf8; font-size: 17px; font-weight: 800;")
         lbl_sub = QLabel("Monitoramento contínuo em tempo real de todos os 10 nós via Teensy 4.1 USB/CAN Bridge")
-        lbl_sub.setStyleSheet("color: #64748b; font-size: 11px;")
+        add_class(lbl_sub, "hint")
         title_box.addWidget(lbl_title)
         title_box.addWidget(lbl_sub)
         top_row.addLayout(title_box)
@@ -396,7 +397,7 @@ class TeensyDashboardView(QWidget):
         grid_vbox.setSpacing(10)
 
         lbl_grid_title = QLabel("Status dos Nós 1 a 10 no Barramento CAN (Clique em um nó para focar):")
-        lbl_grid_title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 12px;")
+        add_class(lbl_grid_title, "accent")
         grid_vbox.addWidget(lbl_grid_title)
 
         nodes_grid = QGridLayout()

@@ -15,7 +15,8 @@
 #include "storage.h"
 #include "ota_update.h"
 
-#define CAN_RX_POOL_DEPTH 16
+// Folga para gravacoes de 4 KB na flash durante OTA (~11 ms com a can_task ocupada)
+#define CAN_RX_POOL_DEPTH 64
 #define CAN_HEARTBEAT_PERIOD_MS 1000
 #define CAN_TX_TIMEOUT_MS 50
 typedef struct {
@@ -38,6 +39,9 @@ static can_rx_slot_t s_rx_pool[CAN_RX_POOL_DEPTH];
 static volatile uint32_t s_rx_write_index;
 static uint32_t s_rx_read_index;
 static can_motion_profile_t s_motion_profiles[AXIS_COUNT];
+static volatile bool s_bus_off;
+
+#define CAN_BUS_OFF_RECOVER_PERIOD_MS 1000
 
 static bool validate_can_settings(const persisted_settings_t *settings);
 static void prepare_rx_pool_once(void);
@@ -109,6 +113,18 @@ esp_err_t can_bus_apply_settings(app_context_t *ctx)
     return can_node_start(ctx);
 }
 
+static int16_t can_encode_deci_deg(float deg)
+{
+    float deci = deg * 10.0f;
+    if (deci > 32767.0f) {
+        return INT16_MAX;       // saturado (alem de +3276,7 deg)
+    }
+    if (deci < -32767.0f) {
+        return INT16_MIN + 1;   // saturado; INT16_MIN fica reservado para "invalido"
+    }
+    return (int16_t)lroundf(deci);
+}
+
 esp_err_t can_bus_send_status(app_context_t *ctx)
 {
     uint8_t payload[8];
@@ -154,7 +170,8 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
         (alarme_z_ativo ? 0x04U : 0x00U) |
         (temp_valid ? 0x08U : 0x00U) |
         (tmc_uart_ready ? 0x10U : 0x00U) |
-        (can_online ? 0x20U : 0x00U);
+        (can_online ? 0x20U : 0x00U) |
+        CAN_STATUS_FLAG_POS_V2; // frame de posicao seguinte usa angulos com sinal (v2)
     payload[3] = (uint8_t)(laser_level[0] & 0xFF);
     payload[4] = (uint8_t)((laser_level[0] >> 8) & 0xFF);
     payload[5] = (uint8_t)(laser_level[1] & 0xFF);
@@ -164,16 +181,17 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     // Capture live telemetry before any CAN transmission. This keeps the
     // encoder path identical to the direct serial STATUS path and avoids
     // sampling I2C immediately after switching the external CAN transceiver.
+    // Posicao v2: int16 em decimos de grau, com sinal (+-3276,6 deg; INT16_MIN = invalido).
+    // A v1 usava 0..360 deg sem sinal: com limites de +-540 deg, todo angulo negativo ou
+    // acima de uma volta chegava ao host como "invalido".
     float cur_c = 0.0f, cur_a = 0.0f;
-    uint16_t c_centi = UINT16_MAX;
-    uint16_t a_centi = UINT16_MAX;
-    if (hardware_read_axis_encoder('C', &cur_c) == ESP_OK && isfinite(cur_c) &&
-        cur_c >= 0.0f && cur_c <= 360.0f) {
-        c_centi = (uint16_t)lroundf(cur_c * 100.0f);
+    int16_t c_deci = INT16_MIN;
+    int16_t a_deci = INT16_MIN;
+    if (hardware_read_axis_encoder('C', &cur_c) == ESP_OK && isfinite(cur_c)) {
+        c_deci = can_encode_deci_deg(cur_c);
     }
-    if (hardware_read_axis_encoder('A', &cur_a) == ESP_OK && isfinite(cur_a) &&
-        cur_a >= 0.0f && cur_a <= 360.0f) {
-        a_centi = (uint16_t)lroundf(cur_a * 100.0f);
+    if (hardware_read_axis_encoder('A', &cur_a) == ESP_OK && isfinite(cur_a)) {
+        a_deci = can_encode_deci_deg(cur_a);
     }
     uint16_t z_pos = (current_z < 0) ? 0U :
                      (current_z >= (int32_t)UINT16_MAX ? UINT16_MAX - 1U : (uint16_t)current_z);
@@ -183,10 +201,10 @@ esp_err_t can_bus_send_status(app_context_t *ctx)
     }
 
     uint8_t payload_pos[8];
-    payload_pos[0] = (uint8_t)(c_centi & 0xFF);
-    payload_pos[1] = (uint8_t)((c_centi >> 8) & 0xFF);
-    payload_pos[2] = (uint8_t)(a_centi & 0xFF);
-    payload_pos[3] = (uint8_t)((a_centi >> 8) & 0xFF);
+    payload_pos[0] = (uint8_t)((uint16_t)c_deci & 0xFF);
+    payload_pos[1] = (uint8_t)(((uint16_t)c_deci >> 8) & 0xFF);
+    payload_pos[2] = (uint8_t)((uint16_t)a_deci & 0xFF);
+    payload_pos[3] = (uint8_t)(((uint16_t)a_deci >> 8) & 0xFF);
     payload_pos[4] = (uint8_t)(z_pos & 0xFF);
     payload_pos[5] = (uint8_t)((z_pos >> 8) & 0xFF);
     payload_pos[6] = (uint8_t)(temp_deci & 0xFF);
@@ -281,12 +299,22 @@ static void can_task(void *arg)
 {
     app_context_t *ctx = (app_context_t *)arg;
     TickType_t last_heartbeat = xTaskGetTickCount();
+    TickType_t last_recover = 0;
 
     while (true) {
         if (xSemaphoreTake(s_rx_ready_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
             process_can_frame(ctx, &s_rx_pool[s_rx_read_index].frame);
             s_rx_read_index = (s_rx_read_index + 1U) % CAN_RX_POOL_DEPTH;
             xSemaphoreGive(s_rx_free_sem);
+        }
+
+        // Bus-off (ex.: cabo solto, terminacao ausente): o TWAI nao se recupera sozinho.
+        // Inicia a recuperacao periodicamente; on_state_change volta can_online=true ao concluir.
+        if (s_bus_off && s_node != NULL &&
+            (xTaskGetTickCount() - last_recover) >= pdMS_TO_TICKS(CAN_BUS_OFF_RECOVER_PERIOD_MS)) {
+            last_recover = xTaskGetTickCount();
+            esp_err_t rec_err = twai_node_recover(s_node);
+            ESP_LOGW(APP_TAG, "CAN em bus-off: tentando recuperar (%s)", esp_err_to_name(rec_err));
         }
 
         bool can_online = false;
@@ -334,6 +362,7 @@ static esp_err_t can_node_start(app_context_t *ctx)
         .is_ext = false,
     };
 
+    s_bus_off = false;
     ESP_RETURN_ON_ERROR(twai_new_node_onchip(&node_config, &s_node), APP_TAG, "Falha ao criar node TWAI");
     ESP_GOTO_ON_ERROR(twai_node_config_mask_filter(s_node, 0, &cmd_filter), err, APP_TAG, "Falha no filtro de comando");
     ESP_GOTO_ON_ERROR(twai_node_register_event_callbacks(s_node, &callbacks, ctx), err, APP_TAG, "Falha ao registrar callbacks TWAI");
@@ -559,6 +588,19 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         return;
     }
 
+    // STOP e aceito em qualquer estado (inclusive OTA) e tem prioridade sobre os demais comandos
+    if (buf[0] == CAN_OP_STOP) {
+        bool lasers_off = (len >= 2U) && ((buf[1] & 0x01U) != 0U);
+        xSemaphoreGive(ctx->state_mutex);
+        (void)motion_request_stop(ctx);
+        if (lasers_off) {
+            (void)hardware_set_laser_level(ctx, 0, 0);
+            (void)hardware_set_laser_level(ctx, 1, 0);
+        }
+        (void)can_send_event(ctx, CAN_EVT_ACK, CAN_OP_STOP, 0);
+        return;
+    }
+
     // Se uma sessao OTA estiver ativa, bloqueia quaisquer outros comandos para evitar corrupcao/interrupcao
     if (ctx->state.ota_in_progress) {
         xSemaphoreGive(ctx->state_mutex);
@@ -595,37 +637,8 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
     case CAN_OP_SPEED:
         if (len >= 2U) {
-            uint32_t delay_us = 0;
-            switch (buf[1]) {
-            case 1:
-                delay_us = 2000;
-                err = ESP_OK;
-                break;
-            case 2:
-                delay_us = 800;
-                err = ESP_OK;
-                break;
-            case 3:
-                delay_us = 400;
-                err = ESP_OK;
-                break;
-            case 4:
-                delay_us = 150;
-                err = ESP_OK;
-                break;
-            case 5:
-                delay_us = 50;
-                err = ESP_OK;
-                break;
-            default:
-                err = ESP_ERR_INVALID_ARG;
-                break;
-            }
-            if (err == ESP_OK) {
-                for (size_t i = 0; i < AXIS_COUNT; ++i) {
-                    ctx->state.speed_delay_us[i] = delay_us;
-                }
-            }
+            // Mesma tabela do comando serial VELOCIDADE; vale para C/A em todos os tipos de MOVE
+            err = motion_apply_speed_level(ctx, buf[1]);
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_SPEED, (uint8_t)err);
         } else {
@@ -644,6 +657,9 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 uint32_t delay_us = motion_speed_to_delay_us(ctx, axis, speed);
                 ctx->settings.speed_delay_us[axis_index] = delay_us;
                 ctx->state.speed_delay_us[axis_index] = delay_us;
+                // Antes so o delay era atualizado: Z e MOVE_SYNC usavam settings.speed e ignoravam o comando
+                ctx->settings.speed[axis_index] = speed;
+                ctx->state.speed[axis_index] = speed;
                 if (speed > ctx->settings.speed_max[axis_index]) {
                     ctx->settings.speed_max[axis_index] = speed;
                     ctx->state.speed_max[axis_index] = speed;
@@ -651,7 +667,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             }
             xSemaphoreGive(ctx->state_mutex);
             if (err == ESP_OK) {
-                err = storage_save_settings(&ctx->settings);
+                storage_request_save(&ctx->settings);
             }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
                                  CAN_OP_AXIS_SPEED, (uint8_t)err);
@@ -678,7 +694,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             }
             xSemaphoreGive(ctx->state_mutex);
             if (err == ESP_OK) {
-                err = storage_save_settings(&ctx->settings);
+                storage_request_save(&ctx->settings);
             }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
                                  CAN_OP_AXIS_ACCEL, (uint8_t)err);
@@ -940,8 +956,9 @@ static bool IRAM_ATTR can_on_state_change(twai_node_handle_t handle, const twai_
 {
     (void)handle;
     (void)user_ctx;
+    s_bus_off = (edata->new_sta == TWAI_ERROR_BUS_OFF);
     if (s_ctx != NULL) {
-        s_ctx->state.can_online = (edata->new_sta != TWAI_ERROR_BUS_OFF);
+        s_ctx->state.can_online = !s_bus_off;
     }
     return false;
 }

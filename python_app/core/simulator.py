@@ -314,6 +314,17 @@ class SimulatorClient(BaseClient):
         self.state.raw_message_received.emit("RX", f"MOVE {axis} {steps} enfileirado.")
         return True
 
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        # Congela os eixos onde estão (descarta os alvos pendentes)
+        self.target_c_deg = self.sim_c_deg
+        self.target_a_deg = self.sim_a_deg
+        self.target_z_steps = self.sim_z_steps
+        if lasers_off:
+            self.set_laser(1, 0)
+            self.set_laser(2, 0)
+        self.state.raw_message_received.emit("RX", "ESTOP: movimento interrompido e fila esvaziada.")
+        return True
+
     def set_laser(self, laser_index: int, level: int) -> bool:
         level = max(0, min(4095, level))
         if laser_index == 1:
@@ -391,6 +402,34 @@ class SimulatorClient(BaseClient):
         return True
 
     def apply_driver_settings(self) -> bool:
+        return True
+
+    def set_tmc_address(self, axis: str, address: int) -> bool:
+        index = "CAZ".index(axis.upper()[0])
+        values = list(self.state.parameters.tmc_slave_addr)
+        values[index] = int(address)
+        self.state.update_parameters(tmc_slave_addr=values)
+        return True
+
+    def set_motion_engine(self, engine: str) -> bool:
+        self.state.update_parameters(motion_engine="LEGACY" if engine.upper() == "LEGACY" else "STREAM")
+        return True
+
+    def set_lookahead(self, enabled: bool) -> bool:
+        self.state.update_parameters(lookahead=bool(enabled))
+        return True
+
+    def set_jerk(self, axis: str, value: float) -> bool:
+        values = list(self.state.parameters.jerk)
+        values["CAZ".index(axis.upper()[0])] = float(value)
+        self.state.update_parameters(jerk=values)
+        return True
+
+    def set_tmc_stealth_max(self, axis: str, speed: float) -> bool:
+        index = "CAZ".index(axis.upper()[0])
+        values = list(self.state.parameters.tmc_stealth_max)
+        values[index] = float(speed)
+        self.state.update_parameters(tmc_stealth_max=values)
         return True
 
     def set_can_enabled(self, enabled: bool) -> bool:

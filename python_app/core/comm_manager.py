@@ -53,9 +53,9 @@ class CommManager(QObject):
     def get_available_can_channels(self) -> List[str]:
         return CanClient.list_available_channels()
 
-    def connect_serial(self, port: str, baudrate: int = 115200) -> bool:
+    def connect_serial(self, port: str, baudrate: int = 115200, reset_on_connect: bool = True) -> bool:
         self.disconnect_all()
-        success = self.serial_client.connect(port=port, baudrate=baudrate)
+        success = self.serial_client.connect(port=port, baudrate=baudrate, reset_on_connect=reset_on_connect)
         if success:
             self.active_client = self.serial_client
             self.backend_type = "COM"
@@ -125,6 +125,12 @@ class CommManager(QObject):
             return self.active_client.send_raw(cmd)
         return False
 
+    def reset_device(self) -> bool:
+        """Reset por hardware do nó (só na conexão serial direta com o ESP32)."""
+        if self.active_client is self.serial_client:
+            return self.serial_client.reset_device()
+        return False
+
     def request_status(self) -> bool:
         if self.active_client:
             return self.active_client.request_status()
@@ -180,6 +186,11 @@ class CommManager(QObject):
             return self.active_client.move_sync(
                 steps_c, steps_a, steps_z, speed_c, speed_a, speed_z, accel, force_no_encoder
             )
+        return False
+
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        if self.active_client:
+            return self.active_client.stop_all(lasers_off)
         return False
 
     def set_laser(self, laser_index: int, level: int) -> bool:

@@ -2,3 +2,10 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 CONFIG_FREERTOS_HZ=1000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# -O2: laços de passo e planejador de movimento mais rápidos que com -Og (debug)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# UART0 (console/app) continua recebendo durante gravações na flash (NVS/OTA);
+# sem isso bytes de comandos se perdiam no meio de rajadas de configuração
+CONFIG_UART_ISR_IN_IRAM=y
+# Passos RMT continuam saindo durante gravações na flash (sem engasgos no movimento)
+CONFIG_RMT_TX_ISR_CACHE_SAFE=y

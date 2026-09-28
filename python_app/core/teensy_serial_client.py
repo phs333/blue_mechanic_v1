@@ -5,6 +5,7 @@ This backend intentionally implements the Teensy compact ASCII protocol instead
 of reusing the direct ESP32-S3 serial commands.
 """
 
+import math
 import threading
 import time
 from typing import Dict, List, Optional
@@ -13,6 +14,7 @@ import serial
 import serial.tools.list_ports
 
 from .base_client import BaseClient
+from .main_thread import MainThreadRelay
 from .protocol_defs import (
     CanOpcode,
     ESP_ERRORS,
@@ -47,6 +49,7 @@ class TeensySerialClient(BaseClient):
         self._last_actuation_time: float = 0.0
         self._last_tx_time: float = 0.0
         self._ota_active: bool = False
+        self._relay = MainThreadRelay()
 
     @property
     def target_node(self) -> int:
@@ -207,9 +210,8 @@ class TeensySerialClient(BaseClient):
                     line, _, line_buffer = line_buffer.partition(b"\n")
                     text = line.decode("ascii", errors="ignore").strip()
                     if text:
-                        self.state.raw_message_received.emit("RX", text)
-                        self.state.telemetry.rx_frames += 1
-                        self._parse_response_line(text)
+                        # Parse e alterações de estado na thread da interface
+                        self._relay.post(self._handle_rx_line, text)
             except serial.SerialException as exc:
                 self.state.error_occurred.emit(
                     f"Conexão com o Teensy USB/CAN perdida: {exc}"
@@ -258,6 +260,11 @@ class TeensySerialClient(BaseClient):
                         self.send_raw(f"R {self.node_id}")
 
             self.stop_event.wait(0.35)
+
+    def _handle_rx_line(self, text: str) -> None:
+        self.state.raw_message_received.emit("RX", text)
+        self.state.telemetry.rx_frames += 1
+        self._parse_response_line(text)
 
     def _parse_response_line(self, line: str) -> None:
         """Parse the ASCII response contract emitted by the Teensy bridge."""
@@ -311,8 +318,10 @@ class TeensySerialClient(BaseClient):
                 pos_a = float(fields[3])
                 pos_z = int(fields[4], 0)
                 temperature = float(fields[5])
-                pos_c_valid = 0.0 <= pos_c <= 360.0
-                pos_a_valid = 0.0 <= pos_a <= 360.0
+                # Bridge atual: ângulos com sinal e "nan" para inválido. Bridge antigo usava
+                # 0..360 e "-1.00" como inválido — continua reconhecido.
+                pos_c_valid = math.isfinite(pos_c) and fields[2] != "-1.00"
+                pos_a_valid = math.isfinite(pos_a) and fields[3] != "-1.00"
                 temp_valid = temperature != -99.9 and -55.0 <= temperature <= 125.0
 
                 updates = {
@@ -454,6 +463,12 @@ class TeensySerialClient(BaseClient):
 
     def set_driver_enabled(self, enable: bool) -> bool:
         return self.send_raw(f"E {self.target_node} {1 if enable else 0}")
+
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        """STOP/E-STOP em broadcast (opcode CAN 0x24 via bridge): interrompe o movimento e
+        esvazia a fila de todos os nós; ESTOP também apaga os lasers."""
+        self._last_actuation_time = time.time()
+        return self.send_raw("ESTOP 0" if lasers_off else "STOP 0")
 
     def set_alarm_z(self, enable: bool) -> bool:
         return self._unsupported("Configuração do alarme Z via Teensy")

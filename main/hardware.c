@@ -19,12 +19,98 @@
 #include "storage.h"
 
 #include "stepper_motor_encoder.h"
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
 
 static rmt_channel_handle_t s_rmt_chan[AXIS_COUNT] = {NULL, NULL, NULL};
+static app_context_t *s_hw_ctx; // contexto da aplicacao (para marcar home perdido de encoders)
+
+// Transacoes RMT ainda em voo por eixo. Definido pela tarefa antes do primeiro
+// rmt_transmit() de um movimento e decrementado no ISR de conclusao; ao chegar
+// a zero a tarefa que espera (s_rmt_waiter) recebe o bit (1 << eixo).
+static volatile uint32_t s_rmt_pending[AXIS_COUNT];
+static TaskHandle_t s_rmt_waiter = NULL;
+static hardware_abort_hook_t s_abort_hook = NULL;
+
+#define RMT_WAIT_POLL_MS 5
+
+// user_data do callback RMT: com CONFIG_RMT_TX_ISR_CACHE_SAFE precisa apontar para RAM interna
+static DRAM_ATTR uint8_t s_axis_ids[AXIS_COUNT] = {0, 1, 2};
+
+/* ------------------------------------------------------------------------------------ */
+/* Motor de movimento "stream": uma transacao por canal por movimento, gerada no ISR a     */
+/* partir das tabelas do planejador (motion_profile). Os tres canais participam de todo    */
+/* movimento (eixo parado = so espera), entao ficam alinhados movimento apos movimento.   */
+/* ------------------------------------------------------------------------------------ */
+typedef struct {
+    rmt_encoder_handle_t enc;
+    mp_gen_t gen;
+    gpio_num_t dir_pin;
+    volatile uint32_t inflight;   // transacoes enfileiradas ainda nao concluidas
+    volatile uint32_t done_count; // transacoes concluidas desde hardware_stream_begin()
+    volatile int8_t next_dir;     // DIR a aplicar quando a transacao atual terminar (-1 = manter)
+} stream_chan_t;
+
+static DRAM_ATTR stream_chan_t s_stream[AXIS_COUNT];
+static portMUX_TYPE s_stream_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_stream_mode;
+
+static size_t IRAM_ATTR stream_encode_cb(const void *data, size_t data_size, size_t symbols_written,
+                                         size_t symbols_free, rmt_symbol_word_t *symbols, bool *done, void *arg)
+{
+    (void)data_size;
+    stream_chan_t *sc = (stream_chan_t *)arg;
+    if (symbols_written == 0U) {
+        mp_gen_reset(&sc->gen, (const mp_axis_prog_t *)data);
+    }
+    return mp_gen_fill(&sc->gen, (uint32_t *)symbols, symbols_free, done);
+}
+
+static void IRAM_ATTR stream_on_trans_done(uint32_t idx, BaseType_t *woken)
+{
+    stream_chan_t *sc = &s_stream[idx];
+    portENTER_CRITICAL_ISR(&s_stream_mux);
+    if (sc->inflight > 0U) {
+        sc->inflight--;
+    }
+    sc->done_count++;
+    // O callback roda ANTES do driver iniciar a proxima transacao: o DIR do proximo
+    // movimento fica valido antes do primeiro pulso (que ainda comeca em nivel baixo).
+    if (sc->next_dir >= 0 && sc->inflight > 0U) {
+        gpio_ll_set_level(&GPIO, (uint32_t)sc->dir_pin, (uint32_t)sc->next_dir);
+        sc->next_dir = -1;
+    }
+    portEXIT_CRITICAL_ISR(&s_stream_mux);
+    if (s_rmt_waiter != NULL) {
+        xTaskNotifyFromISR(s_rmt_waiter, 1UL << idx, eSetBits, woken);
+    }
+}
+
+static bool IRAM_ATTR rmt_tx_done_cb(rmt_channel_handle_t chan, const rmt_tx_done_event_data_t *edata, void *user_ctx)
+{
+    (void)chan;
+    (void)edata;
+    uint32_t idx = *(const uint8_t *)user_ctx;
+    BaseType_t woken = pdFALSE;
+    if (s_stream_mode) {
+        stream_on_trans_done(idx, &woken);
+        return woken == pdTRUE;
+    }
+    if (s_rmt_pending[idx] > 0U) {
+        s_rmt_pending[idx]--;
+        if (s_rmt_pending[idx] == 0U && s_rmt_waiter != NULL) {
+            xTaskNotifyFromISR(s_rmt_waiter, 1UL << idx, eSetBits, &woken);
+        }
+    }
+    return woken == pdTRUE;
+}
 
 static esp_err_t init_rmt_channels(void)
 {
     const gpio_num_t step_pins[AXIS_COUNT] = {STEP_C, STEP_A, STEP_Z};
+    const rmt_tx_event_callbacks_t cbs = {
+        .on_trans_done = rmt_tx_done_cb,
+    };
 
     for (size_t i = 0; i < AXIS_COUNT; i++) {
         if (s_rmt_chan[i] != NULL) {
@@ -38,9 +124,215 @@ static esp_err_t init_rmt_channels(void)
             .trans_queue_depth = 10,
         };
         ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_chan_config, &s_rmt_chan[i]), APP_TAG, "Falha ao criar canal RMT");
+        // Callbacks devem ser registrados com o canal ainda em estado INIT (antes de rmt_enable)
+        ESP_RETURN_ON_ERROR(rmt_tx_register_event_callbacks(s_rmt_chan[i], &cbs, (void *)&s_axis_ids[i]),
+                            APP_TAG, "Falha ao registrar callback RMT");
         ESP_RETURN_ON_ERROR(rmt_enable(s_rmt_chan[i]), APP_TAG, "Falha ao habilitar canal RMT");
     }
+
+    // Encoders do motor "stream": criados uma unica vez (antes: ate 9 alocacoes por movimento)
+    const gpio_num_t dir_pins[AXIS_COUNT] = {DIR_C, DIR_A, DIR_Z};
+    for (size_t i = 0; i < AXIS_COUNT; i++) {
+        if (s_stream[i].enc != NULL) {
+            continue;
+        }
+        s_stream[i].dir_pin = dir_pins[i];
+        s_stream[i].next_dir = -1;
+        rmt_simple_encoder_config_t enc_cfg = {
+            .callback = stream_encode_cb,
+            .arg = &s_stream[i],
+            .min_chunk_size = 2,
+        };
+        ESP_RETURN_ON_ERROR(rmt_new_simple_encoder(&enc_cfg, &s_stream[i].enc), APP_TAG, "Falha ao criar encoder stream");
+    }
     return ESP_OK;
+}
+
+void hardware_set_abort_hook(hardware_abort_hook_t hook)
+{
+    s_abort_hook = hook;
+}
+
+bool hardware_abort_requested(void)
+{
+    return (s_abort_hook != NULL) && s_abort_hook();
+}
+
+/* Prepara a espera de um novo movimento: registra a tarefa chamadora e limpa bits antigos. */
+static void rmt_begin_move(void)
+{
+    s_rmt_waiter = xTaskGetCurrentTaskHandle();
+    (void)xTaskNotifyStateClear(NULL);
+    (void)ulTaskNotifyValueClear(NULL, 0xFFFFFFFFUL);
+}
+
+/*
+ * Interrompe imediatamente um canal com transacoes em voo.
+ * rmt_disable() recicla apenas a transacao corrente; as pendentes (cruzeiro,
+ * desaceleracao) permanecem na fila e seriam retomadas por rmt_enable().
+ * Por isso repetimos disable/enable ate que nao reste nenhuma em voo.
+ */
+static void rmt_kill_channel(size_t idx)
+{
+    rmt_channel_handle_t ch = s_rmt_chan[idx];
+    if (ch == NULL) {
+        return;
+    }
+    s_rmt_pending[idx] = 0U;
+    esp_log_level_t prev_level = esp_log_level_get("rmt");
+    esp_log_level_set("rmt", ESP_LOG_NONE); // rmt_tx_wait_all_done(0) loga "flush timeout" a cada fase restante
+    for (int i = 0; i < 8; ++i) {
+        (void)rmt_disable(ch);
+        esp_err_t err = rmt_tx_wait_all_done(ch, 0);
+        (void)rmt_enable(ch);
+        if (err == ESP_OK) {
+            break;
+        }
+    }
+    esp_log_level_set("rmt", prev_level);
+}
+
+/*
+ * Aguarda o termino de todos os eixos em `mask`, checando pedidos de STOP a cada
+ * RMT_WAIT_POLL_MS. Em caso de STOP, interrompe os canais e retorna ESP_ERR_NOT_FINISHED.
+ */
+static esp_err_t rmt_wait_moves(uint32_t mask)
+{
+    uint32_t done = 0U;
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        if ((mask & (1UL << i)) && s_rmt_pending[i] == 0U) {
+            done |= (1UL << i);
+        }
+    }
+
+    while ((done & mask) != mask) {
+        uint32_t bits = 0U;
+        if (xTaskNotifyWait(0, mask, &bits, pdMS_TO_TICKS(RMT_WAIT_POLL_MS)) == pdTRUE) {
+            done |= (bits & mask);
+        }
+        if ((done & mask) != mask && hardware_abort_requested()) {
+            for (size_t i = 0; i < AXIS_COUNT; ++i) {
+                if ((mask & (1UL << i)) && !(done & (1UL << i))) {
+                    rmt_kill_channel(i);
+                }
+            }
+            return ESP_ERR_NOT_FINISHED;
+        }
+    }
+
+    // Recicla os descritores concluidos (ja estao na fila COMPLETE, retorno imediato)
+    esp_err_t result = ESP_OK;
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        if (mask & (1UL << i)) {
+            esp_err_t err = rmt_tx_wait_all_done(s_rmt_chan[i], 100);
+            if (err != ESP_OK && result == ESP_OK) {
+                result = err;
+            }
+        }
+    }
+    return result;
+}
+
+static void stream_kill_all(void)
+{
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        rmt_kill_channel(i);
+    }
+    portENTER_CRITICAL(&s_stream_mux);
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        s_stream[i].inflight = 0U;
+        s_stream[i].next_dir = -1;
+    }
+    portEXIT_CRITICAL(&s_stream_mux);
+}
+
+esp_err_t hardware_stream_begin(void)
+{
+    ESP_RETURN_ON_FALSE(s_stream[0].enc && s_stream[1].enc && s_stream[2].enc, ESP_ERR_INVALID_STATE,
+                        APP_TAG, "encoders stream nao inicializados");
+    // Homing/legado podem ter usado os pinos STEP como GPIO
+    hardware_rmt_reacquire_pin(STEP_C);
+    hardware_rmt_reacquire_pin(STEP_A);
+    hardware_rmt_reacquire_pin(STEP_Z);
+    rmt_begin_move();
+    portENTER_CRITICAL(&s_stream_mux);
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        s_stream[i].inflight = 0U;
+        s_stream[i].done_count = 0U;
+        s_stream[i].next_dir = -1;
+    }
+    portEXIT_CRITICAL(&s_stream_mux);
+    s_stream_mode = true;
+    return ESP_OK;
+}
+
+esp_err_t hardware_stream_commit(const mp_plan_t *plan, const int8_t dir_level[AXIS_COUNT])
+{
+    ESP_RETURN_ON_FALSE(plan != NULL && s_stream_mode, ESP_ERR_INVALID_STATE, APP_TAG, "stream inativo");
+
+    bool set_now = false;
+    portENTER_CRITICAL(&s_stream_mux);
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        stream_chan_t *sc = &s_stream[i];
+        if (dir_level[i] >= 0) {
+            if (sc->inflight == 0U) {
+                gpio_ll_set_level(&GPIO, (uint32_t)sc->dir_pin, (uint32_t)dir_level[i]);
+                set_now = true;
+            } else {
+                sc->next_dir = dir_level[i]; // aplicado no ISR, na fronteira entre movimentos
+            }
+        }
+        sc->inflight++;
+    }
+    portEXIT_CRITICAL(&s_stream_mux);
+    if (set_now) {
+        esp_rom_delay_us(2); // setup do DIR antes do primeiro pulso (TMC2209: 20 ns)
+    }
+
+    const rmt_transmit_config_t tx = { .loop_count = 0, .flags = { .eot_level = 0 } };
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        esp_err_t err = rmt_transmit(s_rmt_chan[i], s_stream[i].enc, &plan->axis[i], sizeof(plan->axis[i]), &tx);
+        if (err != ESP_OK) {
+            ESP_LOGE(APP_TAG, "stream: falha ao enfileirar eixo %u (%s)", (unsigned)i, esp_err_to_name(err));
+            stream_kill_all();
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
+uint32_t hardware_stream_completed(void)
+{
+    uint32_t done = UINT32_MAX;
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        uint32_t d = s_stream[i].done_count;
+        if (d < done) {
+            done = d;
+        }
+    }
+    return done;
+}
+
+esp_err_t hardware_stream_wait(uint32_t target_completed)
+{
+    while (hardware_stream_completed() < target_completed) {
+        uint32_t bits = 0U;
+        (void)xTaskNotifyWait(0, 0x7U, &bits, pdMS_TO_TICKS(RMT_WAIT_POLL_MS));
+        if (hardware_stream_completed() < target_completed && hardware_abort_requested()) {
+            stream_kill_all();
+            return ESP_ERR_NOT_FINISHED;
+        }
+    }
+    return ESP_OK;
+}
+
+void hardware_stream_end(void)
+{
+    // Recicla os descritores concluidos antes de voltar ao modo legado
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        (void)rmt_tx_wait_all_done(s_rmt_chan[i], 100);
+    }
+    s_stream_mode = false;
 }
 
 static const gpio_num_t k_laser_pins[2] = {LASER_1_PIN, LASER_2_PIN};
@@ -194,6 +486,7 @@ esp_err_t hardware_init(app_context_t *ctx)
         return ESP_ERR_NO_MEM;
     }
 
+    s_hw_ctx = ctx;
     if (ctx) {
         s_encoder_trackers[0].home_raw = ctx->settings.home_raw[0];
         s_encoder_trackers[1].home_raw = ctx->settings.home_raw[1];
@@ -377,14 +670,6 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
             if (accel_steps < 2U) accel_steps = 2U;
             decel_steps = total_steps - accel_steps;
         }
-        if ((target_freq_hz - start_freq_hz) < accel_steps) {
-            accel_steps = target_freq_hz - start_freq_hz;
-            if (accel_steps < 2U) {
-                use_ramp = false;
-            } else {
-                decel_steps = accel_steps;
-            }
-        }
     }
 
     uint32_t cruise_steps = use_ramp ? (total_steps - accel_steps - decel_steps) : total_steps;
@@ -428,6 +713,9 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
             return d_err;
         }
 
+        rmt_begin_move();
+        s_rmt_pending[axis_idx] = 1U + ((cruise_steps > 0) ? 1U : 0U) + ((decel_steps > 0) ? 1U : 0U);
+
         // Transmit Acceleration phase
         tx_config.loop_count = 0;
         esp_err_t err = rmt_transmit(chan, accel_encoder, &accel_steps, sizeof(accel_steps), &tx_config);
@@ -444,9 +732,11 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
             err = rmt_transmit(chan, decel_encoder, &decel_steps, sizeof(decel_steps), &tx_config);
         }
 
-        // Wait for all hardware pulses to complete
+        // Wait for all hardware pulses to complete (abortavel por STOP)
         if (err == ESP_OK) {
-            err = rmt_tx_wait_all_done(chan, -1);
+            err = rmt_wait_moves(1UL << axis_idx);
+        } else {
+            rmt_kill_channel(axis_idx);
         }
 
         rmt_del_encoder(accel_encoder);
@@ -460,10 +750,14 @@ esp_err_t hardware_step_pulse_rmt_move(char axis, uint32_t total_steps, uint32_t
         rmt_encoder_handle_t uniform_encoder = NULL;
         ESP_RETURN_ON_ERROR(rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &uniform_encoder), APP_TAG, "Falha ao criar encoder uniforme");
 
+        rmt_begin_move();
+        s_rmt_pending[axis_idx] = 1U;
         tx_config.loop_count = (total_steps > 0) ? (total_steps - 1) : 0;
         esp_err_t err = rmt_transmit(chan, uniform_encoder, &target_freq_hz, sizeof(target_freq_hz), &tx_config);
         if (err == ESP_OK) {
-            err = rmt_tx_wait_all_done(chan, -1);
+            err = rmt_wait_moves(1UL << axis_idx);
+        } else {
+            rmt_kill_channel(axis_idx);
         }
         rmt_del_encoder(uniform_encoder);
         return err;
@@ -514,11 +808,6 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 if (accel_c < 2U) accel_c = 2U;
                 decel_c = steps_c - accel_c;
             }
-            if ((target_freq_c - start_freq_c) < accel_c) {
-                accel_c = target_freq_c - start_freq_c;
-                if (accel_c < 2U) use_ramp_c = false;
-                else decel_c = accel_c;
-            }
         }
         cruise_c = use_ramp_c ? (steps_c - accel_c - decel_c) : steps_c;
     }
@@ -540,11 +829,6 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 if (accel_a < 2U) accel_a = 2U;
                 decel_a = steps_a - accel_a;
             }
-            if ((target_freq_a - start_freq_a) < accel_a) {
-                accel_a = target_freq_a - start_freq_a;
-                if (accel_a < 2U) use_ramp_a = false;
-                else decel_a = accel_a;
-            }
         }
         cruise_a = use_ramp_a ? (steps_a - accel_a - decel_a) : steps_a;
     }
@@ -565,11 +849,6 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
                 accel_z = steps_z / 2U;
                 if (accel_z < 2U) accel_z = 2U;
                 decel_z = steps_z - accel_z;
-            }
-            if ((target_freq_z - start_freq_z) < accel_z) {
-                accel_z = target_freq_z - start_freq_z;
-                if (accel_z < 2U) use_ramp_z = false;
-                else decel_z = accel_z;
             }
         }
         cruise_z = use_ramp_z ? (steps_z - accel_z - decel_z) : steps_z;
@@ -644,58 +923,67 @@ esp_err_t hardware_step_pulse_rmt_move_sync3(uint32_t steps_c, uint32_t start_fr
         rmt_new_stepper_motor_uniform_encoder(&uniform_cfg, &unif_enc_z);
     }
 
-    // Transmit Axis C queue in parallel
-    rmt_transmit_config_t tx_c = { .loop_count = 0, .flags = { .eot_level = 0 } };
-    if (steps_c > 0) {
-        if (use_ramp_c && accel_enc_c) {
-            rmt_transmit(chan_c, accel_enc_c, &accel_c, sizeof(accel_c), &tx_c);
+    // Enfileira as fases de cada eixo; o hardware de cada canal inicia assim que
+    // recebe a primeira transacao (inicio praticamente simultaneo entre eixos).
+    struct {
+        size_t idx;
+        uint32_t steps;
+        bool use_ramp;
+        rmt_channel_handle_t chan;
+        rmt_encoder_handle_t accel_enc, unif_enc, decel_enc;
+        uint32_t *accel_n, *cruise_n, *decel_n, *target_hz;
+    } phases[AXIS_COUNT] = {
+        {0, steps_c, use_ramp_c, chan_c, accel_enc_c, unif_enc_c, decel_enc_c, &accel_c, &cruise_c, &decel_c, &target_freq_c},
+        {1, steps_a, use_ramp_a, chan_a, accel_enc_a, unif_enc_a, decel_enc_a, &accel_a, &cruise_a, &decel_a, &target_freq_a},
+        {2, steps_z, use_ramp_z, chan_z, accel_enc_z, unif_enc_z, decel_enc_z, &accel_z, &cruise_z, &decel_z, &target_freq_z},
+    };
+
+    rmt_begin_move();
+    uint32_t wait_mask = 0U;
+    esp_err_t err = ESP_OK;
+    for (size_t p = 0; p < AXIS_COUNT; ++p) {
+        if (phases[p].steps == 0U) {
+            continue;
         }
-        if (cruise_c > 0 && unif_enc_c) {
-            tx_c.loop_count = (cruise_c > 0) ? (cruise_c - 1) : 0;
-            rmt_transmit(chan_c, unif_enc_c, &target_freq_c, sizeof(target_freq_c), &tx_c);
+        bool has_accel = phases[p].use_ramp && phases[p].accel_enc;
+        bool has_cruise = (*phases[p].cruise_n > 0U) && phases[p].unif_enc;
+        bool has_decel = phases[p].use_ramp && phases[p].decel_enc;
+        if ((*phases[p].cruise_n > 0U && !phases[p].unif_enc) || (!has_accel && !has_cruise && !has_decel)) {
+            err = ESP_ERR_NO_MEM; // encoder uniforme nao foi criado: passos seriam perdidos
+            break;
         }
-        if (use_ramp_c && decel_enc_c) {
-            tx_c.loop_count = 0;
-            rmt_transmit(chan_c, decel_enc_c, &decel_c, sizeof(decel_c), &tx_c);
+        s_rmt_pending[phases[p].idx] = (has_accel ? 1U : 0U) + (has_cruise ? 1U : 0U) + (has_decel ? 1U : 0U);
+        wait_mask |= (1UL << phases[p].idx);
+
+        rmt_transmit_config_t tx = { .loop_count = 0, .flags = { .eot_level = 0 } };
+        if (err == ESP_OK && has_accel) {
+            err = rmt_transmit(phases[p].chan, phases[p].accel_enc, phases[p].accel_n, sizeof(uint32_t), &tx);
+        }
+        if (err == ESP_OK && has_cruise) {
+            tx.loop_count = (int)(*phases[p].cruise_n - 1U);
+            err = rmt_transmit(phases[p].chan, phases[p].unif_enc, phases[p].target_hz, sizeof(uint32_t), &tx);
+        }
+        if (err == ESP_OK && has_decel) {
+            tx.loop_count = 0;
+            err = rmt_transmit(phases[p].chan, phases[p].decel_enc, phases[p].decel_n, sizeof(uint32_t), &tx);
+        }
+        if (err != ESP_OK) {
+            break;
         }
     }
 
-    // Transmit Axis A queue in parallel
-    rmt_transmit_config_t tx_a = { .loop_count = 0, .flags = { .eot_level = 0 } };
-    if (steps_a > 0) {
-        if (use_ramp_a && accel_enc_a) {
-            rmt_transmit(chan_a, accel_enc_a, &accel_a, sizeof(accel_a), &tx_a);
+    // Aguarda todos os eixos (abortavel por STOP); em falha de enfileiramento, interrompe tudo
+    esp_err_t err_c = ESP_OK, err_a = ESP_OK, err_z = ESP_OK;
+    if (err == ESP_OK) {
+        err_z = rmt_wait_moves(wait_mask);
+    } else {
+        for (size_t i = 0; i < AXIS_COUNT; ++i) {
+            if (wait_mask & (1UL << i)) {
+                rmt_kill_channel(i);
+            }
         }
-        if (cruise_a > 0 && unif_enc_a) {
-            tx_a.loop_count = (cruise_a > 0) ? (cruise_a - 1) : 0;
-            rmt_transmit(chan_a, unif_enc_a, &target_freq_a, sizeof(target_freq_a), &tx_a);
-        }
-        if (use_ramp_a && decel_enc_a) {
-            tx_a.loop_count = 0;
-            rmt_transmit(chan_a, decel_enc_a, &decel_a, sizeof(decel_a), &tx_a);
-        }
+        err_z = err;
     }
-
-    // Transmit Axis Z queue in parallel
-    rmt_transmit_config_t tx_z = { .loop_count = 0, .flags = { .eot_level = 0 } };
-    if (steps_z > 0) {
-        if (use_ramp_z && accel_enc_z) {
-            rmt_transmit(chan_z, accel_enc_z, &accel_z, sizeof(accel_z), &tx_z);
-        }
-        if (cruise_z > 0 && unif_enc_z) {
-            tx_z.loop_count = (cruise_z > 0) ? (cruise_z - 1) : 0;
-            rmt_transmit(chan_z, unif_enc_z, &target_freq_z, sizeof(target_freq_z), &tx_z);
-        }
-        if (use_ramp_z && decel_enc_z) {
-            tx_z.loop_count = 0;
-            rmt_transmit(chan_z, decel_enc_z, &decel_z, sizeof(decel_z), &tx_z);
-        }
-    }
-
-    // Wait for all active axes to complete
-    esp_err_t err_c = (steps_c > 0) ? rmt_tx_wait_all_done(chan_c, -1) : ESP_OK;
-    esp_err_t err_a = (steps_a > 0) ? rmt_tx_wait_all_done(chan_a, -1) : ESP_OK;
-    esp_err_t err_z = (steps_z > 0) ? rmt_tx_wait_all_done(chan_z, -1) : ESP_OK;
 
     // Clean up all allocated encoders
     if (accel_enc_c) rmt_del_encoder(accel_enc_c);
@@ -978,7 +1266,70 @@ static esp_err_t init_led_pwm(app_context_t *ctx)
     return ESP_OK;
 }
 
-static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val)
+static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw);
+
+/*
+ * Saude dos encoders: apos falhas seguidas o encoder fica "offline" — um log explicativo
+ * (em vez de centenas de "I2C transaction timeout"), reset do barramento e nova tentativa
+ * a cada ENCODER_OFFLINE_RETRY_MS, sem bloquear cada leitura por ~60 ms.
+ */
+#define ENCODER_OFFLINE_AFTER_FAILS 3
+#define ENCODER_OFFLINE_RETRY_MS 500
+#define AS5600_REG_STATUS 0x0BU
+
+typedef struct {
+    uint32_t consecutive_fails;
+    bool offline;
+    int64_t next_try_us;
+} encoder_health_t;
+
+static encoder_health_t s_enc_health[2];
+
+static void encoder_mark_result(size_t idx, esp_err_t err)
+{
+    encoder_health_t *h = &s_enc_health[idx];
+    const char name = (idx == 0) ? 'C' : 'A';
+    if (err == ESP_OK) {
+        if (h->offline) {
+            ESP_LOGW(APP_TAG, "Encoder %c voltou a responder. A contagem de voltas pode ter se perdido "
+                              "enquanto estava sem sinal: confira a posicao ou refaca o home (HOME/SETHOME %c).",
+                     name, name);
+            if (s_hw_ctx != NULL) {
+                s_hw_ctx->state.homed[idx] = false;
+            }
+        }
+        h->consecutive_fails = 0;
+        h->offline = false;
+        return;
+    }
+    h->consecutive_fails++;
+    if (!h->offline && h->consecutive_fails >= ENCODER_OFFLINE_AFTER_FAILS) {
+        h->offline = true;
+        ESP_LOGE(APP_TAG, "Encoder %c sem resposta no I2C (%s). %s Nova tentativa a cada %d ms; use DIAG.",
+                 name, esp_err_to_name(err),
+                 (err == ESP_ERR_TIMEOUT)
+                     ? "Timeout = SDA/SCL presas em nivel baixo: tipico de encoder SEM ALIMENTACAO ou cabo em curto."
+                     : "Sem ACK: encoder desconectado ou endereco errado.",
+                 ENCODER_OFFLINE_RETRY_MS);
+    }
+    if (h->offline) {
+        // 9 pulsos de SCL: libera um AS5600 que tenha ficado segurando SDA (ruido, queda de tensao)
+        if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            (void)i2c_master_bus_reset(k_encoder_buses[idx]);
+            xSemaphoreGive(s_i2c_mutex);
+        }
+        h->next_try_us = esp_timer_get_time() + (int64_t)ENCODER_OFFLINE_RETRY_MS * 1000LL;
+    }
+}
+
+/*
+ * Le o angulo bruto do AS5600. Quando `ticks_from_home` nao e NULL, tambem
+ * atualiza o contador de voltas e calcula a posicao continua — tudo sob o
+ * mesmo mutex da leitura I2C, para que leituras concorrentes (safety_task,
+ * motion_task, console, CAN) nao apliquem amostras fora de ordem nem percam
+ * incrementos de volta.
+ */
+static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val, int32_t *ticks_from_home)
 {
     ESP_RETURN_ON_FALSE(encoder_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Encoder invalido");
     ESP_RETURN_ON_FALSE(raw_val != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "raw_val nulo");
@@ -987,26 +1338,85 @@ static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val)
         return ESP_ERR_INVALID_STATE;
     }
 
+    encoder_health_t *health = &s_enc_health[encoder_index];
+    if (health->offline && esp_timer_get_time() < health->next_try_us) {
+        return ESP_ERR_TIMEOUT; // offline: nao trava o chamador ate a proxima tentativa
+    }
+
     uint8_t reg = ENCODER_REG_RAW_ANGLE;
     uint8_t raw_data[2] = {0};
     esp_err_t last_err = ESP_FAIL;
+    const int attempts = health->offline ? 1 : 3;
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (int attempt = 0; attempt < attempts; ++attempt) {
         if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(ENCODER_I2C_TIMEOUT_MS)) == pdTRUE) {
             last_err = i2c_master_transmit_receive(
                 k_encoder_devices[encoder_index], &reg, sizeof(reg),
                 raw_data, sizeof(raw_data), ENCODER_I2C_TIMEOUT_MS);
+            if (last_err == ESP_OK) {
+                uint16_t raw = (((uint16_t)raw_data[0] << 8) | raw_data[1]) & 0x0FFFU;
+                *raw_val = raw;
+                if (ticks_from_home != NULL) {
+                    update_encoder_tracker(encoder_index, raw);
+                    const encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
+                    *ticks_from_home = (tracker->turns * 4096) + ((int32_t)raw - (int32_t)tracker->home_raw);
+                }
+            }
             xSemaphoreGive(s_i2c_mutex);
 
             if (last_err == ESP_OK) {
-                uint16_t raw = ((uint16_t)raw_data[0] << 8) | raw_data[1];
-                *raw_val = (raw & 0x0FFFU);
+                encoder_mark_result(encoder_index, ESP_OK);
                 return ESP_OK;
             }
         }
         esp_rom_delay_us(200);
     }
+    encoder_mark_result(encoder_index, last_err);
     return last_err;
+}
+
+void hardware_print_diag(void)
+{
+    int sw = gpio_get_level(SWITCH_Z);
+    printf("DIAG SWITCH_Z GPIO%d nivel=%d (%s)\n", (int)SWITCH_Z, sw,
+           sw ? "ACIONADO - ou sensor sem alimentacao / cabo aberto" : "livre");
+
+    const struct {
+        char name;
+        gpio_num_t sda;
+        gpio_num_t scl;
+    } buses[2] = {{'C', SDA_0, SCL_0}, {'A', SDA_1, SCL_1}};
+
+    for (size_t i = 0; i < 2; ++i) {
+        int sda = gpio_get_level(buses[i].sda);
+        int scl = gpio_get_level(buses[i].scl);
+        esp_err_t probe = ESP_ERR_TIMEOUT;
+        esp_err_t st_err = ESP_FAIL;
+        uint8_t status = 0;
+        if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            probe = i2c_master_probe(k_encoder_buses[i], ENCODER_ADDR, 50);
+            if (probe == ESP_OK) {
+                uint8_t reg = AS5600_REG_STATUS;
+                st_err = i2c_master_transmit_receive(k_encoder_devices[i], &reg, 1, &status, 1, 50);
+            }
+            xSemaphoreGive(s_i2c_mutex);
+        }
+        const char *magnet = "-";
+        if (st_err == ESP_OK) {
+            bool md = (status & 0x20U) != 0U;
+            bool ml = (status & 0x10U) != 0U;
+            bool mh = (status & 0x08U) != 0U;
+            magnet = !md ? "NAO DETECTADO" : (ml ? "fraco (longe)" : (mh ? "forte demais (perto)" : "ok"));
+        }
+        const char *hint = "";
+        if (sda == 0 || scl == 0) {
+            hint = " -> linha presa em 0: encoder SEM ALIMENTACAO, curto no cabo ou escravo travado";
+        } else if (probe == ESP_ERR_NOT_FOUND) {
+            hint = " -> sem ACK: encoder desconectado ou sem alimentacao (pull-ups presentes)";
+        }
+        printf("DIAG ENCODER %c: SDA=%d SCL=%d probe=%s ima=%s offline=%s%s\n", buses[i].name, sda, scl,
+               esp_err_to_name(probe), magnet, s_enc_health[i].offline ? "sim" : "nao", hint);
+    }
 }
 
 static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw)
@@ -1039,13 +1449,10 @@ static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw)
 
 void hardware_update_encoders(void)
 {
-    uint16_t raw0 = 0, raw1 = 0;
-    if (read_encoder_raw(0, &raw0) == ESP_OK) {
-        update_encoder_tracker(0, raw0);
-    }
-    if (read_encoder_raw(1, &raw1) == ESP_OK) {
-        update_encoder_tracker(1, raw1);
-    }
+    uint16_t raw = 0;
+    int32_t ticks = 0;
+    (void)read_encoder_raw(0, &raw, &ticks);
+    (void)read_encoder_raw(1, &raw, &ticks);
 }
 
 static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
@@ -1053,18 +1460,14 @@ static esp_err_t read_encoder_deg(size_t encoder_index, float *angle_deg)
     ESP_RETURN_ON_FALSE(encoder_index < 2, ESP_ERR_INVALID_ARG, APP_TAG, "Encoder invalido");
     ESP_RETURN_ON_FALSE(angle_deg != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "angle_deg nulo");
 
+    // Coordenadas incrementais continuas relativas ao Home (zero relativo)
+    // Horario = positivo, Anti-horario = negativo
     uint16_t curr_raw = 0;
-    esp_err_t err = read_encoder_raw(encoder_index, &curr_raw);
+    int32_t ticks_from_home = 0;
+    esp_err_t err = read_encoder_raw(encoder_index, &curr_raw, &ticks_from_home);
     if (err != ESP_OK) {
         return err;
     }
-
-    update_encoder_tracker(encoder_index, curr_raw);
-    encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
-
-    // Calcula coordenadas incrementais contínuas relativas ao Home (zero relativo)
-    // Horário = positivo, Anti-horário = negativo
-    int32_t ticks_from_home = (tracker->turns * 4096) + ((int32_t)curr_raw - (int32_t)tracker->home_raw);
     *angle_deg = ((float)ticks_from_home * 360.0f) / 4096.0f;
     return ESP_OK;
 }
@@ -1082,16 +1485,20 @@ esp_err_t hardware_encoder_set_zero(app_context_t *ctx, char axis)
     }
 
     uint16_t curr_raw = 0;
-    esp_err_t err = read_encoder_raw(idx, &curr_raw);
+    esp_err_t err = read_encoder_raw(idx, &curr_raw, NULL);
     if (err != ESP_OK) {
         return err;
     }
 
+    if (xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
     encoder_tracker_t *tracker = &s_encoder_trackers[idx];
     tracker->home_raw = curr_raw;
     tracker->last_raw = curr_raw;
     tracker->turns = 0;
     tracker->initialized = true;
+    xSemaphoreGive(s_i2c_mutex);
 
     if (ctx) {
         ctx->settings.home_raw[idx] = curr_raw;
@@ -1100,7 +1507,7 @@ esp_err_t hardware_encoder_set_zero(app_context_t *ctx, char axis)
         } else {
             ctx->settings.home_a_deg = 0.0f;
         }
-        (void)storage_save_settings(&ctx->settings);
+        storage_request_save(&ctx->settings);
     }
 
     ESP_LOGI(APP_TAG, "Encoder %c: Zero (Home) gravado em raw=%u (posicao atual definida em 0.00 deg)",

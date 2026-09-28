@@ -11,12 +11,13 @@ from typing import Optional, List, Union
 import can
 
 from .base_client import BaseClient
+from .main_thread import MainThreadRelay
 from .state_model import DeviceState
 from .protocol_defs import (
     CanOpcode, CanEvent, FanMode, ESP_ERRORS,
     STATUS_FLAG_DRIVERS_ENABLED, STATUS_FLAG_Z_BLOQUEADO,
     STATUS_FLAG_ALARME_Z_ATIVO, STATUS_FLAG_TEMP_VALID,
-    STATUS_FLAG_TMC_UART_READY, STATUS_FLAG_CAN_ONLINE,
+    STATUS_FLAG_TMC_UART_READY, STATUS_FLAG_CAN_ONLINE, STATUS_FLAG_POS_V2, STOP_FLAG_LASERS_OFF,
     calc_ca_degrees_per_step, calc_z_mm_per_step,
 )
 
@@ -37,6 +38,9 @@ class CanClient(BaseClient):
         self.status_base_id = 0x280
         self.pos_base_id = 0x290
         self.event_base_id = 0x300
+        # Formato do frame de posição anunciado no último STATUS do nó (v2 = ângulos com sinal)
+        self._pos_v2 = False
+        self._relay = MainThreadRelay()
 
     @staticmethod
     def list_available_channels() -> List[str]:
@@ -112,7 +116,7 @@ class CanClient(BaseClient):
             temp_valid=False,
         )
 
-    def send_frame(self, arbitration_id: int, data: Union[bytearray, bytes], desc: str = "") -> bool:
+    def send_frame(self, arbitration_id: int, data: Union[bytearray, bytes], desc: str = "", log: bool = True) -> bool:
         if not self.is_connected or not self.bus:
             return False
             
@@ -129,14 +133,15 @@ class CanClient(BaseClient):
             self.state.telemetry.tx_frames += 1
             
             # Emit for sniffer
-            self.state.can_frame_received.emit({
-                "timestamp": time.time(),
-                "dir": "TX",
-                "id": f"0x{arbitration_id:03X}",
-                "dlc": len(data),
-                "data": " ".join(f"{b:02X}" for b in data),
-                "desc": desc
-            })
+            if log:
+                self.state.can_frame_received.emit({
+                    "timestamp": time.time(),
+                    "dir": "TX",
+                    "id": f"0x{arbitration_id:03X}",
+                    "dlc": len(data),
+                    "data": " ".join(f"{b:02X}" for b in data),
+                    "desc": desc
+                })
             return True
         except can.CanOperationError:
             self.state.telemetry.error_count += 1
@@ -175,8 +180,8 @@ class CanClient(BaseClient):
             try:
                 msg = self.bus.recv(timeout=0.05)
                 if msg is not None:
-                    self.state.telemetry.rx_frames += 1
-                    self._process_rx_frame(msg)
+                    # Decodificação e alterações de estado na thread da interface
+                    self._relay.post(self._handle_rx_frame, msg)
             except can.CanOperationError:
                 time.sleep(0.05)
             except can.CanError:
@@ -186,6 +191,10 @@ class CanClient(BaseClient):
                 
         self.is_connected = False
         self.state.set_connection_status(False, "PeakCAN")
+
+    def _handle_rx_frame(self, msg: can.Message) -> None:
+        self.state.telemetry.rx_frames += 1
+        self._process_rx_frame(msg)
 
     def _process_rx_frame(self, msg: can.Message):
         frame_id = msg.arbitration_id
@@ -203,6 +212,7 @@ class CanClient(BaseClient):
             if dlc >= 8 and data[0] == CanEvent.STATUS:
                 node = data[1]
                 flags = data[2]
+                self._pos_v2 = bool(flags & STATUS_FLAG_POS_V2)
                 laser1 = (data[3] & 0xFF) | ((data[4] & 0xFF) << 8)
                 laser2 = (data[5] & 0xFF) | ((data[6] & 0xFF) << 8)
                 fan_byte = data[7]
@@ -238,12 +248,18 @@ class CanClient(BaseClient):
             # POS_TELEMETRY: unsigned centidegrees C/A, unsigned Z steps,
             # signed decicelsius. UINT16_MAX / INT16_MIN are invalid sentinels.
             if dlc >= 8:
-                pos_c_raw = struct.unpack('<H', bytes(data[0:2]))[0]
-                pos_a_raw = struct.unpack('<H', bytes(data[2:4]))[0]
+                if self._pos_v2:
+                    # v2: int16 em décimos de grau, com sinal; INT16_MIN = inválido
+                    raw_c, raw_a = struct.unpack('<hh', bytes(data[0:4]))
+                    pos_c_valid, pos_a_valid = raw_c != -32768, raw_a != -32768
+                    pos_c_deg, pos_a_deg = raw_c / 10.0, raw_a / 10.0
+                else:
+                    # v1 (firmware antigo): uint16 em centésimos, 0..360; 0xFFFF = inválido
+                    raw_c, raw_a = struct.unpack('<HH', bytes(data[0:4]))
+                    pos_c_valid, pos_a_valid = raw_c != 0xFFFF and raw_c <= 36000, raw_a != 0xFFFF and raw_a <= 36000
+                    pos_c_deg, pos_a_deg = raw_c / 100.0, raw_a / 100.0
                 pos_z = struct.unpack('<H', bytes(data[4:6]))[0]
                 temp_deci = struct.unpack('<h', bytes(data[6:8]))[0]
-                pos_c_valid = pos_c_raw != 0xFFFF and pos_c_raw <= 36000
-                pos_a_valid = pos_a_raw != 0xFFFF and pos_a_raw <= 36000
                 temp_valid = temp_deci != -32768
                 temp_c = temp_deci / 10.0 if temp_valid else self.state.telemetry.temperature_c
                 temp_valid = temp_valid and -55.0 <= temp_c <= 125.0
@@ -256,20 +272,21 @@ class CanClient(BaseClient):
                     temp_valid=temp_valid,
                 )
                 if pos_c_valid:
-                    updates["pos_c_deg"] = pos_c_raw / 100.0
+                    updates["pos_c_deg"] = pos_c_deg
                 if pos_a_valid:
-                    updates["pos_a_deg"] = pos_a_raw / 100.0
+                    updates["pos_a_deg"] = pos_a_deg
                 self.state.update_telemetry(**updates)
 
-                c_text = f"{pos_c_raw / 100.0:.2f}°" if pos_c_valid else "N/A"
-                a_text = f"{pos_a_raw / 100.0:.2f}°" if pos_a_valid else "N/A"
+                c_text = f"{pos_c_deg:.2f}°" if pos_c_valid else "N/A"
+                a_text = f"{pos_a_deg:.2f}°" if pos_a_valid else "N/A"
                 temp_text = f"{temp_c:.1f}°C" if temp_valid else "N/A"
                 desc = f"POS TELEMETRY: C={c_text} A={a_text} Z={pos_z} Temp={temp_text}"
                 
         elif frame_id == event_id:
             if dlc > 0:
                 evt_type = data[0]
-                node = data[1] if dlc > 1 else self.node_id
+                node_id = data[1] if dlc > 1 else self.node_id
+                node = node_id
                 
                 if evt_type == CanEvent.HEARTBEAT:
                     self.state.telemetry.last_heartbeat_timestamp = time.time()
@@ -352,6 +369,12 @@ class CanClient(BaseClient):
         target_id = self.cmd_base_id + self.node_id
         payload = bytes([CanOpcode.STATUS_REQUEST])
         return self.send_frame(target_id, payload, "STATUS_REQUEST")
+
+    def stop_all(self, lasers_off: bool = True) -> bool:
+        """STOP/E-STOP em todos os nós (ID de broadcast): prioridade máxima no barramento."""
+        flags = STOP_FLAG_LASERS_OFF if lasers_off else 0x00
+        payload = bytes([CanOpcode.STOP, flags])
+        return self.send_frame(self.cmd_base_id, payload, "E-STOP (broadcast)" if lasers_off else "STOP (broadcast)")
 
     def ping(self, arg0: int = 0xAA, arg1: int = 0x55) -> bool:
         target_id = self.cmd_base_id + self.node_id

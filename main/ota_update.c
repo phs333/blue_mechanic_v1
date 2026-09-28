@@ -14,16 +14,45 @@
 
 #include "can_bus.h"
 #include "hardware.h"
+#include "motion.h"
 #include "status_led.h"
+#include "storage.h"
 
 #define TAG "ota_update"
+
+// Tempo de operacao saudavel antes de confirmar um firmware recem-gravado. Se ele
+// travar/reiniciar antes disso, o bootloader volta automaticamente para o anterior.
+#define OTA_VALIDATE_DELAY_MS 20000
+// Blocos de 6 bytes do CAN sao acumulados e gravados na flash em paginas de 4 KB
+#define OTA_WRITE_BUF_SIZE 4096
 
 static esp_ota_handle_t s_ota_handle = 0;
 static const esp_partition_t *s_target_partition = NULL;
 static bool s_ota_in_progress = false;
+static bool s_ota_failed = false;
+static bool s_drivers_were_enabled = false;
+static int s_expected_seq = -1;
 static uint32_t s_bytes_written = 0;
 static uint32_t s_expected_size = 0;
 static uint32_t s_last_progress_bytes = 0;
+static uint8_t s_write_buf[OTA_WRITE_BUF_SIZE];
+static size_t s_write_buf_len = 0;
+
+static void ota_restore_operation(app_context_t *ctx);
+
+static void ota_delayed_validate_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(OTA_VALIDATE_DELAY_MS));
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Firmware validado apos %d s de operacao estavel. Rollback cancelado.",
+                 OTA_VALIDATE_DELAY_MS / 1000);
+    } else {
+        ESP_LOGE(TAG, "Falha ao validar firmware: %s", esp_err_to_name(err));
+    }
+    vTaskDelete(NULL);
+}
 
 esp_err_t ota_update_boot_check(app_context_t *ctx)
 {
@@ -38,13 +67,13 @@ esp_err_t ota_update_boot_check(app_context_t *ctx)
     esp_err_t err = esp_ota_get_state_partition(running, &ota_state);
 
     if (err == ESP_OK && ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_LOGW(TAG, "Boot a partir de particao OTA pendente de verificacao (%s). Validando aplicativo...",
-                 running->label);
-        esp_err_t valid_err = esp_ota_mark_app_valid_cancel_rollback();
-        if (valid_err == ESP_OK) {
-            ESP_LOGI(TAG, "Firmware validado com sucesso! Rollback cancelado. Particao: %s", running->label);
-        } else {
-            ESP_LOGE(TAG, "Falha ao validar particao OTA: %s", esp_err_to_name(valid_err));
+        // Validar logo no boot tornaria o rollback inutil: um firmware que trava segundos
+        // depois (CAN, motion, etc.) ficaria gravado. Confirma so apos operacao estavel.
+        ESP_LOGW(TAG, "Boot de particao OTA pendente de verificacao (%s). Validacao automatica em %d s "
+                      "(ou use OTA CONFIRM).", running->label, OTA_VALIDATE_DELAY_MS / 1000);
+        if (xTaskCreate(ota_delayed_validate_task, "ota_validate", 3072, NULL, 2, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "Falha ao criar tarefa de validacao; validando imediatamente.");
+            (void)esp_ota_mark_app_valid_cancel_rollback();
         }
     } else {
         ESP_LOGI(TAG, "Particao ativa: %s (offset 0x%08" PRIX32 ", tamanho %" PRIu32 " KB, estado_ota=%d)",
@@ -67,7 +96,11 @@ esp_err_t ota_prepare_for_update(app_context_t *ctx, uint32_t image_size)
     hardware_set_laser_level(ctx, 0, 0);
     hardware_set_laser_level(ctx, 1, 0);
 
-    // 2. Desenergiza drivers de passo e interrompe movimentos
+    // 2. Interrompe o movimento em curso (nao so a fila) e so entao desenergiza os drivers
+    if (!s_ota_in_progress) {
+        s_drivers_were_enabled = ctx->state.drivers_enabled;
+    }
+    (void)motion_request_stop(ctx);
     hardware_set_driver_enable(ctx, false);
 
     // 3. Atualiza estado e cancela movimentos na fila
@@ -81,12 +114,6 @@ esp_err_t ota_prepare_for_update(app_context_t *ctx, uint32_t image_size)
         xSemaphoreGive(ctx->state_mutex);
     } else {
         ctx->state.ota_in_progress = true;
-    }
-
-    // 4. Limpa fila de comandos pendentes de movimento
-    if (ctx->motion_queue) {
-        motion_cmd_t dummy;
-        while (xQueueReceive(ctx->motion_queue, &dummy, 0) == pdTRUE) {}
     }
 
     // 5. Sinalizacao no LED RGB (Laranja / Ambar fixo de atencao)
@@ -103,8 +130,7 @@ esp_err_t ota_prepare_for_update(app_context_t *ctx, uint32_t image_size)
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL) {
         ESP_LOGE(TAG, "Nenhuma particao OTA de destino encontrada na tabela de particoes!");
-        ctx->state.ota_in_progress = false;
-        status_led_set_mode(STATUS_LED_MODE_AUTO);
+        ota_restore_operation(ctx);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -112,21 +138,41 @@ esp_err_t ota_prepare_for_update(app_context_t *ctx, uint32_t image_size)
              update_partition->label, update_partition->address, update_partition->size / 1024);
 
     // 8. Inicializa gravacao OTA na particao flash
-    esp_err_t err = esp_ota_begin(update_partition, image_size > 0 ? image_size : OTA_SIZE_UNKNOWN, &s_ota_handle);
+    // Tamanho conhecido: apaga so a area da imagem antes (OTA_READY sai depois disso).
+    // Desconhecido: apaga setor a setor durante a escrita — OTA_SIZE_UNKNOWN apagaria os
+    // 6 MB da particao inteira antes de aceitar dados.
+    esp_err_t err = esp_ota_begin(update_partition, image_size > 0 ? image_size : OTA_WITH_SEQUENTIAL_WRITES,
+                                  &s_ota_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Falha em esp_ota_begin(): %s", esp_err_to_name(err));
-        ctx->state.ota_in_progress = false;
-        status_led_set_mode(STATUS_LED_MODE_AUTO);
+        ota_restore_operation(ctx);
         return err;
     }
 
     s_target_partition = update_partition;
     s_ota_in_progress = true;
+    s_ota_failed = false;
+    s_expected_seq = -1;
+    s_write_buf_len = 0;
     s_bytes_written = 0;
     s_expected_size = image_size;
     s_last_progress_bytes = 0;
 
     ESP_LOGI(TAG, "Nó pronto para receber dados binarios de firmware via CAN/Serial!");
+    return ESP_OK;
+}
+
+static esp_err_t ota_flush_write_buffer(void)
+{
+    if (s_write_buf_len == 0) {
+        return ESP_OK;
+    }
+    esp_err_t err = esp_ota_write(s_ota_handle, s_write_buf, s_write_buf_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Erro ao gravar bloco OTA: %s", esp_err_to_name(err));
+        return err;
+    }
+    s_write_buf_len = 0;
     return ESP_OK;
 }
 
@@ -139,14 +185,44 @@ esp_err_t ota_write_chunk(const void *data, size_t length)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t err = esp_ota_write(s_ota_handle, data, length);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Erro ao gravar bloco OTA: %s", esp_err_to_name(err));
-        return err;
+    // Uma escrita de flash por frame de 6 bytes custaria ~170 mil operacoes por imagem
+    // (cada uma pausando o cache). Acumula em 4 KB e grava de uma vez.
+    const uint8_t *src = (const uint8_t *)data;
+    size_t remaining = length;
+    while (remaining > 0) {
+        size_t room = OTA_WRITE_BUF_SIZE - s_write_buf_len;
+        size_t n = (remaining < room) ? remaining : room;
+        memcpy(&s_write_buf[s_write_buf_len], src, n);
+        s_write_buf_len += n;
+        src += n;
+        remaining -= n;
+        if (s_write_buf_len == OTA_WRITE_BUF_SIZE) {
+            ESP_RETURN_ON_ERROR(ota_flush_write_buffer(), TAG, "flush OTA");
+        }
     }
 
     s_bytes_written += length;
     return ESP_OK;
+}
+
+/* Volta a operacao normal apos OTA abortado/falho: reenergiza os drivers se estavam ligados
+ * antes e invalida o home do Z (desenergizado, o eixo pode ter se deslocado). */
+static void ota_restore_operation(app_context_t *ctx)
+{
+    if (ctx != NULL) {
+        if (ctx->state_mutex && xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            ctx->state.ota_in_progress = false;
+            ctx->state.homed[AXIS_Z_ID] = false;
+            xSemaphoreGive(ctx->state_mutex);
+        } else {
+            ctx->state.ota_in_progress = false;
+            ctx->state.homed[AXIS_Z_ID] = false;
+        }
+        if (s_drivers_were_enabled) {
+            hardware_set_driver_enable(ctx, true);
+        }
+    }
+    status_led_set_mode(STATUS_LED_MODE_AUTO);
 }
 
 esp_err_t ota_finalize_and_reboot(app_context_t *ctx)
@@ -157,28 +233,37 @@ esp_err_t ota_finalize_and_reboot(app_context_t *ctx)
 
     ESP_LOGI(TAG, "Finalizando gravacao OTA. Total gravado: %" PRIu32 " bytes. Validando hash...", s_bytes_written);
 
-    esp_err_t err = esp_ota_end(s_ota_handle);
+    esp_err_t err = s_ota_failed ? ESP_ERR_INVALID_CRC : ota_flush_write_buffer();
+    if (err == ESP_OK && s_expected_size > 0 && s_bytes_written != s_expected_size) {
+        ESP_LOGE(TAG, "Tamanho recebido (%" PRIu32 ") difere do anunciado (%" PRIu32 ")",
+                 s_bytes_written, s_expected_size);
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    if (err == ESP_OK) {
+        err = esp_ota_end(s_ota_handle);
+    } else {
+        esp_ota_abort(s_ota_handle);
+    }
     s_ota_handle = 0;
     s_ota_in_progress = false;
+    s_write_buf_len = 0;
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Validacao do firmware falhou: %s", esp_err_to_name(err));
+        ota_restore_operation(ctx);
         if (ctx) {
-            ctx->state.ota_in_progress = false;
             (void)can_send_event(ctx, CAN_EVT_OTA_ERROR, ctx->settings.node_id, (uint8_t)(err & 0xFF));
         }
-        status_led_set_mode(STATUS_LED_MODE_AUTO);
         return err;
     }
 
     err = esp_ota_set_boot_partition(s_target_partition);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao definir proxima particao de boot: %s", esp_err_to_name(err));
+        ota_restore_operation(ctx);
         if (ctx) {
-            ctx->state.ota_in_progress = false;
             (void)can_send_event(ctx, CAN_EVT_OTA_ERROR, ctx->settings.node_id, (uint8_t)(err & 0xFF));
         }
-        status_led_set_mode(STATUS_LED_MODE_AUTO);
         return err;
     }
 
@@ -194,6 +279,7 @@ esp_err_t ota_finalize_and_reboot(app_context_t *ctx)
 
     ESP_LOGW(TAG, "Reiniciando sistema em 1 segundo para carregar novo firmware...");
     vTaskDelay(pdMS_TO_TICKS(1000));
+    (void)storage_flush(); // nao perder alteracoes ainda pendentes na janela de 300 ms
     esp_restart();
 
     return ESP_OK;
@@ -207,18 +293,12 @@ esp_err_t ota_abort(app_context_t *ctx)
     }
     s_ota_in_progress = false;
     s_bytes_written = 0;
+    s_write_buf_len = 0;
 
+    ota_restore_operation(ctx);
     if (ctx) {
-        if (ctx->state_mutex && xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            ctx->state.ota_in_progress = false;
-            xSemaphoreGive(ctx->state_mutex);
-        } else {
-            ctx->state.ota_in_progress = false;
-        }
         (void)can_send_event(ctx, CAN_EVT_OTA_ERROR, ctx->settings.node_id, 0xFF);
     }
-
-    status_led_set_mode(STATUS_LED_MODE_AUTO);
     ESP_LOGW(TAG, "Atualizacao OTA abortada. Operacao normal restaurada.");
     return ESP_OK;
 }
@@ -237,6 +317,7 @@ esp_err_t ota_mark_valid(void)
 esp_err_t ota_rollback_and_reboot(void)
 {
     ESP_LOGW(TAG, "Forcando rollback para a particao anterior...");
+    (void)storage_flush();
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Falha ao executar rollback: %s", esp_err_to_name(err));
@@ -326,12 +407,29 @@ bool ota_handle_can_cmd(app_context_t *ctx, uint8_t opcode, const uint8_t *data,
 
     case CAN_OP_OTA_DATA: {
         // Formato: [0x41, seq_num, byte0..byte5]
-        if (!s_ota_in_progress) {
+        if (!s_ota_in_progress || s_ota_failed) {
             return true;
         }
         if (len > 2) {
+            // Sequencia de 8 bits (wrap 255->0): duplicata e ignorada; lacuna significa
+            // frame perdido (ex.: RX lotado durante o erase) e a imagem ficaria corrompida.
+            uint8_t seq = data[1];
+            if (s_expected_seq >= 0 && seq != (uint8_t)s_expected_seq) {
+                if (seq == (uint8_t)(s_expected_seq - 1)) {
+                    return true;
+                }
+                ESP_LOGE(TAG, "OTA: frame perdido (esperado seq=%d, recebido %u apos %" PRIu32 " bytes). Sessao invalidada.",
+                         s_expected_seq, (unsigned)seq, s_bytes_written);
+                s_ota_failed = true;
+                (void)can_send_event(ctx, CAN_EVT_OTA_ERROR, ctx->settings.node_id,
+                                     (uint8_t)(ESP_ERR_INVALID_CRC & 0xFF));
+                return true;
+            }
+            s_expected_seq = (int)((seq + 1U) & 0xFFU);
+
             esp_err_t err = ota_write_chunk(&data[2], len - 2);
             if (err != ESP_OK) {
+                s_ota_failed = true;
                 (void)can_send_event(ctx, CAN_EVT_OTA_ERROR, ctx->settings.node_id, (uint8_t)(err & 0xFF));
             } else if ((s_bytes_written - s_last_progress_bytes) >= 16384U) {
                 s_last_progress_bytes = s_bytes_written;

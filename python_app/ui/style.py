@@ -4,6 +4,8 @@ Clean dark palette, neon cyan/blue/emerald accents, glowing badges,
 refined typography, tactile buttons, and sleek card surfaces.
 """
 
+from python_app.ui.theme import THEME_RULES_QSS
+
 DARK_THEME_QSS = """
 /* Global Base */
 QWidget {
@@ -266,6 +268,34 @@ QPushButton.btn-danger:hover {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #b91c1c, stop:1 #dc2626);
     border-color: #fca5a5;
     color: #ffffff;
+}
+
+/* E-STOP: sempre visível na barra superior, maior e com contraste máximo */
+QPushButton#estopButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ef4444, stop:1 #b91c1c);
+    border: 2px solid #fecaca;
+    border-radius: 8px;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    padding: 6px 18px;
+    min-height: 26px;
+}
+
+QPushButton#estopButton:hover {
+    background: #dc2626;
+    border-color: #ffffff;
+}
+
+QPushButton#estopButton:pressed {
+    background: #7f1d1d;
+}
+
+QPushButton#estopButton:disabled {
+    background: #3f1d1d;
+    border-color: #7f1d1d;
+    color: #fca5a5;
 }
 
 QPushButton.btn-warning {
@@ -680,3 +710,6 @@ QPushButton.step-pill-active-z {
     min-height: 22px;
 }
 """
+
+# Classes semânticas geradas a partir da paleta (ui/theme.py)
+DARK_THEME_QSS += THEME_RULES_QSS

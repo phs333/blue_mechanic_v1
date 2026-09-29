@@ -14,7 +14,10 @@ from python_app.core.serial_client import SerialClient
 from python_app.core.simulator import SimulatorClient
 from python_app.core.state_model import DeviceState
 
-from test_protocol import RecordingCanClient, RecordingTeensyClient
+try:
+    from tests.test_protocol import RecordingCanClient, RecordingTeensyClient
+except ImportError:
+    from test_protocol import RecordingCanClient, RecordingTeensyClient
 
 
 class RecordingSerialClient(SerialClient):

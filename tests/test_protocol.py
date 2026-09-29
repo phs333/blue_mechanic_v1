@@ -507,14 +507,17 @@ class SerialProtocolTests(unittest.TestCase):
         app.sendEvent(sp, wheel_up)
         self.assertEqual(sp.value(), 21)
 
+        app.removeEventFilter(filt)
         scroll.close()
+        scroll.deleteLater()
+        QApplication.processEvents()
 
     def test_laser_slider_throttling_and_telemetry_grace(self):
         import time
         from PyQt6.QtWidgets import QApplication
         from python_app.ui.widgets.laser_slider import LaserSlider
 
-        app = QApplication.instance() or QApplication([])
+        app = QApplication.instance() or QApplication(["--platform", "offscreen"])
         slider = LaserSlider(1, "Test Laser")
         emitted = []
         slider.laser_level_changed.connect(lambda idx, val: emitted.append((idx, val)))
@@ -533,6 +536,9 @@ class SerialProtocolTests(unittest.TestCase):
         slider._last_user_time = time.time() - 2.0
         slider.update_from_telemetry(0)
         self.assertEqual(slider.current_percent, 0) # Now accepted!
+
+        slider.deleteLater()
+        QApplication.processEvents()
 
     def test_translate_teensy_to_serial_move_variants(self):
         from python_app.core.protocol_defs import translate_teensy_to_serial

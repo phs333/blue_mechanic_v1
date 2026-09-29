@@ -52,6 +52,7 @@ class SerialClient(BaseClient):
 
     def connect(self, port: str = "COM3", baudrate: int = 115200, reset_on_connect: bool = True, **kwargs) -> bool:
         self.disconnect()
+        self.supports_jog = True  # reavaliado a cada conexão (o firmware pode ter sido regravado)
         try:
             port_obj = serial.Serial()
             port_obj.port = port
@@ -164,6 +165,28 @@ class SerialClient(BaseClient):
                 success = False
         return success
 
+    supports_jog = True  # firmware com JOG contínuo (controle por mouse)
+
+    def jog(self, d_c: float = 0.0, d_a: float = 0.0, d_z: float = 0.0) -> bool:
+        """Incrementa o alvo do jog contínuo do nó (graus C/A, mm Z).
+
+        Não passa pelo log de TX do terminal: no controle por mouse chega a ~50 linhas/s.
+        """
+        if not self.is_connected or not self.serial_port:
+            return False
+        parts = [f"{name} {val:.5f}" for name, val in (("C", d_c), ("A", d_a), ("Z", d_z)) if val]
+        if not parts:
+            return True
+        try:
+            with self.lock:
+                self.serial_port.write(("JOG " + " ".join(parts) + "\r\n").encode("ascii"))
+            self.state.telemetry.tx_frames += 1
+            self._last_jog_time = time.monotonic()
+            return True
+        except Exception as e:
+            self.state.error_occurred.emit(f"Erro ao transmitir JOG: {e}")
+            return False
+
     def _rx_loop(self):
         line_buffer = bytearray()
         while not self.stop_event.is_set():
@@ -207,6 +230,15 @@ class SerialClient(BaseClient):
             self._request_initial_state()
             return
 
+        # Firmware antigo sem JOG: volta ao modo compatível (MOVE_SYNC) nesta conexão
+        if ("Comando desconhecido" in line and self.supports_jog
+                and time.monotonic() - getattr(self, "_last_jog_time", -10.0) < 1.0):
+            self.supports_jog = False
+            self.state.error_occurred.emit(
+                "Firmware do nó sem JOG contínuo: controle por mouse em modo compatível. "
+                "Grave o firmware atualizado para o movimento suave.")
+            return
+
         # --- 0. LINHA ESTRUTURADA (@POS chave=valor) ---
         if line.startswith("@POS "):
             fields = dict(item.split("=", 1) for item in line[5:].split() if "=" in item)
@@ -226,8 +258,22 @@ class SerialClient(BaseClient):
                 updates["homed"] = [ch == "1" for ch in homed]
             if "MOVING" in fields:
                 updates["in_motion"] = fields["MOVING"] == "1"
+            if "ZLOCK" in fields:
+                updates["z_bloqueado"] = fields["ZLOCK"] == "1"
+            if "ALARM" in fields:
+                updates["alarme_z_ativo"] = fields["ALARM"] == "1"
             self.state.update_telemetry(**updates)
             return
+
+        # Mensagens que mudam o estado do Z (firmwares sem ZLOCK/ALARM no @POS também as emitem)
+        if re.search(r'Home\s+Z\s+finalizado', line, re.IGNORECASE):
+            self.state.update_telemetry(z_bloqueado=False)
+        elif re.search(r'Home\s+Z\s+falhou|fim de curso Z acionado inesperadamente', line, re.IGNORECASE):
+            self.state.update_telemetry(z_bloqueado=True)
+        elif "ALARME Z DESATIVADO" in line.upper():
+            self.state.update_telemetry(alarme_z_ativo=False, z_bloqueado=False)
+        elif "ALARME Z ATIVADO" in line.upper():
+            self.state.update_telemetry(alarme_z_ativo=True)
 
         # --- 1. LIVE TELEMETRY PARSERS (Pure Dynamic State) ---
         # Eixo C (Base): 45.20 deg (Limites: [10.00, 190.00] deg)
@@ -598,12 +644,13 @@ class SerialClient(BaseClient):
     ) -> bool:
         cmd_name = "MOVE_SYNC_F" if force_no_encoder else "MOVE_SYNC"
         cmd = f"{cmd_name} C {steps_c} A {steps_a} Z {steps_z}"
+        # 3 casas: em segmentos curtos (controle por mouse) a velocidade define a duração
         if speed_c is not None and speed_c > 0:
-            cmd += f" SC={speed_c:.1f}"
+            cmd += f" SC={speed_c:.3f}"
         if speed_a is not None and speed_a > 0:
-            cmd += f" SA={speed_a:.1f}"
+            cmd += f" SA={speed_a:.3f}"
         if speed_z is not None and speed_z > 0:
-            cmd += f" SZ={speed_z:.1f}"
+            cmd += f" SZ={speed_z:.3f}"
         if accel is not None and accel > 0:
             cmd += f" F={accel:.1f}"
         return self.send_raw(cmd)

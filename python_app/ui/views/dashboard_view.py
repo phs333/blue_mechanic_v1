@@ -9,7 +9,7 @@ Kinematics Architecture:
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QFrame, QScrollArea, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox, QMessageBox,
+    QFrame, QScrollArea, QDoubleSpinBox, QComboBox, QCheckBox, QMessageBox,
     QTabWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt
@@ -157,41 +157,82 @@ class DashboardView(QWidget):
 
         form_grid = QGridLayout()
         form_grid.setContentsMargins(0, 0, 0, 0)
-        form_grid.setSpacing(6)
+        form_grid.setHorizontalSpacing(8)
+        form_grid.setVerticalSpacing(6)
+        form_grid.setColumnStretch(1, 1)
+        form_grid.setColumnStretch(3, 1)
 
-        lbl_eixo = QLabel("Eixo:")
-        add_class(lbl_eixo, "hint-strong")
-        form_grid.addWidget(lbl_eixo, 0, 0)
+        def field_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            add_class(lbl, "hint-strong")
+            return lbl
+
+        # Sem stylesheet inline: um "max-height" no combo também limitava a lista suspensa
+        # (o popup herda o estilo) e cortava os textos das opções.
+        axis_items = ["Eixo C (Base Rotativa)", "Eixo A (Pivot Lasers)", "Eixo Z (Linear)"]
         self.combo_axis = QComboBox()
-        self.combo_axis.addItems(["Eixo C (Base Rotativa)", "Eixo A (Pivot Lasers)", "Eixo Z (Linear)"])
-        self.combo_axis.setStyleSheet("max-height: 26px; font-size: 11px;")
+        self.combo_axis.addItems(axis_items)
+        self.combo_axis.setFixedHeight(28)
+        add_class(self.combo_axis, "compact-combo")
+        fm = self.combo_axis.fontMetrics()
+        self.combo_axis.view().setMinimumWidth(max(fm.horizontalAdvance(t) for t in axis_items) + 40)
+        form_grid.addWidget(field_label("Eixo:"), 0, 0)
         form_grid.addWidget(self.combo_axis, 0, 1)
 
-        lbl_passos = QLabel("Passos:")
-        add_class(lbl_passos, "hint-strong")
-        form_grid.addWidget(lbl_passos, 0, 2)
-        self.spin_steps = QSpinBox()
-        self.spin_steps.setRange(-2000000, 2000000)
-        self.spin_steps.setValue(1000)
-        self.spin_steps.setSingleStep(100)
-        self.spin_steps.setStyleSheet("max-height: 26px; font-size: 11px;")
-        form_grid.addWidget(self.spin_steps, 0, 3)
+        self.spin_distance = QDoubleSpinBox()
+        self.spin_distance.setDecimals(2)
+        self.spin_distance.setFixedHeight(28)
+        self.spin_distance.setToolTip("Deslocamento relativo: graus para C/A, milímetros para Z")
+        add_class(self.spin_distance, "compact-input")
+        self.lbl_distance = field_label("Distância:")
+        form_grid.addWidget(self.lbl_distance, 0, 2)
+        form_grid.addWidget(self.spin_distance, 0, 3)
 
-        lbl_vel = QLabel("Velocidade:")
-        add_class(lbl_vel, "hint-strong")
-        form_grid.addWidget(lbl_vel, 1, 0)
         self.spin_speed = QDoubleSpinBox()
         self.spin_speed.setRange(0.0, 5000.0)
-        self.spin_speed.setValue(0.0)
+        self.spin_speed.setDecimals(1)
+        self.spin_speed.setSingleStep(10.0)
         self.spin_speed.setSpecialValueText("Padrão NVS")
-        self.spin_speed.setStyleSheet("max-height: 26px; font-size: 11px;")
+        self.spin_speed.setFixedHeight(28)
+        add_class(self.spin_speed, "compact-input")
+        form_grid.addWidget(field_label("Velocidade:"), 1, 0)
         form_grid.addWidget(self.spin_speed, 1, 1)
 
-        self.chk_force_direct = QCheckBox("Forçar sem encoder (MOVE_F)")
-        self.chk_force_direct.setStyleSheet("color: #f59e0b; font-size: 11px;")
-        form_grid.addWidget(self.chk_force_direct, 1, 2, 1, 2)
+        self.spin_accel = QDoubleSpinBox()
+        self.spin_accel.setRange(0.0, 50000.0)
+        self.spin_accel.setDecimals(0)
+        self.spin_accel.setSingleStep(100.0)
+        self.spin_accel.setSpecialValueText("Padrão NVS")
+        self.spin_accel.setFixedHeight(28)
+        self.spin_accel.setToolTip("Aceleração só deste movimento (0 = valor gravado na NVS)")
+        add_class(self.spin_accel, "compact-input")
+        form_grid.addWidget(field_label("Aceleração:"), 1, 2)
+        form_grid.addWidget(self.spin_accel, 1, 3)
 
         tab_indiv_layout.addLayout(form_grid)
+
+        opts_row = QHBoxLayout()
+        opts_row.setContentsMargins(0, 0, 0, 0)
+        opts_row.setSpacing(12)
+        self.chk_invert_direct = QCheckBox("Inverter sentido")
+        self.chk_invert_direct.setToolTip("Move no sentido negativo (equivale a distância com sinal trocado)")
+        opts_row.addWidget(self.chk_invert_direct)
+        self.chk_force_direct = QCheckBox("Forçar sem encoder (MOVE_F)")
+        self.chk_force_direct.setStyleSheet("color: #f59e0b;")
+        opts_row.addWidget(self.chk_force_direct)
+        opts_row.addStretch()
+        self.lbl_steps_preview = QLabel()
+        add_class(self.lbl_steps_preview, "hint")
+        opts_row.addWidget(self.lbl_steps_preview)
+        tab_indiv_layout.addLayout(opts_row)
+
+        # Distância lembrada por eixo (graus para C/A, mm para Z)
+        self._direct_distance = {"C": 10.0, "A": 10.0, "Z": 10.0}
+        self._direct_axis = None
+        self.combo_axis.currentIndexChanged.connect(self._on_direct_axis_changed)
+        self.spin_distance.valueChanged.connect(self._update_direct_preview)
+        self.chk_invert_direct.toggled.connect(self._update_direct_preview)
+        self._on_direct_axis_changed(self.combo_axis.currentIndex())
 
         move_btn_row = QHBoxLayout()
         move_btn_row.setContentsMargins(0, 0, 0, 0)
@@ -338,25 +379,68 @@ class DashboardView(QWidget):
         
         # Connect reactive state updates
         self.state.telemetry_updated.connect(self.update_telemetry)
-        
+        self.state.parameters_updated.connect(self._on_parameters_updated)
+
+    def _on_parameters_updated(self, _params):
+        # Limites/curso novos: as barras dependem deles, não só da telemetria
+        self._update_axis_progress(self.state.telemetry)
+        self._update_direct_preview()
+
     def _on_jog(self, axis: str, steps: int, force: bool = False):
         self.comm.move_axis(axis, steps, force_no_encoder=force)
 
     def _on_set_home(self, axis: str):
         self.comm.set_home(axis)
 
+    def _direct_axis_letter(self) -> str:
+        return ("C", "A", "Z")[max(0, self.combo_axis.currentIndex())]
+
+    def _on_direct_axis_changed(self, _index: int):
+        # Guarda a distância do eixo anterior e ajusta unidades/limites ao novo
+        if self._direct_axis is not None:
+            self._direct_distance[self._direct_axis] = self.spin_distance.value()
+        axis = self._direct_axis_letter()
+        self._direct_axis = axis
+        is_z = axis == "Z"
+        unit = "mm" if is_z else "°"
+        self.lbl_distance.setText("Distância (mm):" if is_z else "Ângulo (°):")
+        self.spin_distance.blockSignals(True)
+        self.spin_distance.setRange(-2000.0 if is_z else -3600.0, 2000.0 if is_z else 3600.0)
+        self.spin_distance.setSingleStep(1.0 if is_z else 5.0)
+        self.spin_distance.setSuffix(f" {unit}")
+        self.spin_distance.setValue(self._direct_distance[axis])
+        self.spin_distance.blockSignals(False)
+        self.spin_speed.setSuffix(f" {unit}/s")
+        self.spin_accel.setSuffix(f" {unit}/s²")
+        # Z não tem encoder: MOVE e MOVE_F são equivalentes
+        self.chk_force_direct.setEnabled(not is_z)
+        self._update_direct_preview()
+
+    def _direct_steps(self) -> int:
+        """Distância do campo (graus ou mm, com o sentido escolhido) convertida em passos."""
+        params = self.state.parameters
+        value = self.spin_distance.value()
+        if self.chk_invert_direct.isChecked():
+            value = -value
+        axis = self._direct_axis_letter()
+        if axis == "Z":
+            teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
+            return calc_z_steps_for_mm(value, teeth, params.steps_per_rev[2], params.tmc_microsteps[2])
+        idx = 0 if axis == "C" else 1
+        return calc_ca_steps_for_degrees(value, params.steps_per_rev[idx], params.tmc_microsteps[idx])
+
+    def _update_direct_preview(self, *_):
+        self.lbl_steps_preview.setText(f"= {self._direct_steps():+d} passos")
+
     def _execute_direct_move(self):
-        axis_str = self.combo_axis.currentText()
-        if "Eixo C" in axis_str:
-            axis = 'C'
-        elif "Eixo A" in axis_str:
-            axis = 'A'
-        else:
-            axis = 'Z'
-        steps = self.spin_steps.value()
+        axis = self._direct_axis_letter()
+        steps = self._direct_steps()
+        if steps == 0:
+            return
         spd = self.spin_speed.value() if self.spin_speed.value() > 0 else None
-        force = self.chk_force_direct.isChecked()
-        self.comm.move_axis(axis, steps, speed=spd, force_no_encoder=force)
+        acc = self.spin_accel.value() if self.spin_accel.value() > 0 else None
+        force = self.chk_force_direct.isChecked() and axis != "Z"
+        self.comm.move_axis(axis, steps, speed=spd, accel=acc, force_no_encoder=force)
 
     def _execute_sync_move(self):
         params = self.state.parameters
@@ -379,14 +463,7 @@ class DashboardView(QWidget):
         )
 
     def _execute_direct_sethome(self):
-        axis_str = self.combo_axis.currentText()
-        if "Eixo C" in axis_str:
-            axis = 'C'
-        elif "Eixo A" in axis_str:
-            axis = 'A'
-        else:
-            axis = 'Z'
-        self.comm.set_home(axis)
+        self.comm.set_home(self._direct_axis_letter())
 
     def _toggle_drivers(self):
         new_state = not self.state.telemetry.drivers_enabled
@@ -407,40 +484,40 @@ class DashboardView(QWidget):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
         
+    @staticmethod
+    def _set_angle_progress(card: StatusCard, valid: bool, deg: float, lo: float, hi: float):
+        span = hi - lo
+        if valid and span > 0:
+            card.set_progress(max(0.0, min(100.0, (deg - lo) / span * 100.0)), visible=True)
+            card.progress_bar.setToolTip(f"{deg:.1f}° em [{lo:.1f}° .. {hi:.1f}°]")
+        else:
+            card.set_progress(0, visible=False)
+
+    def _update_axis_progress(self, t: HardwareTelemetry):
+        """Barras de C/A/Z relativas aos limites ATUAIS (chamado também quando eles mudam)."""
+        p = self.state.parameters
+        self._set_angle_progress(self.card_c, t.pos_c_valid, t.pos_c_deg, p.limit_min_deg_c, p.limit_max_deg_c)
+        self._set_angle_progress(self.card_a, t.pos_a_valid, t.pos_a_deg, p.limit_min_deg_a, p.limit_max_deg_a)
+        max_z = p.max_passos_z if p.max_passos_z > 0 else t.max_z_steps
+        pct_z = max(0.0, min(100.0, t.pos_z_steps / max_z * 100.0)) if max_z > 0 else 0.0
+        self.card_z.set_progress(pct_z)
+
     def update_telemetry(self, t: HardwareTelemetry):
         # Update C & A with real encoder communication check and angular progress bar
         if t.pos_c_valid:
             self.card_c.set_value(f"{t.pos_c_deg:.2f}")
             self.card_c.set_badge("AS5600 OK", "green")
-            min_c = self.state.parameters.limit_min_deg_c
-            max_c = self.state.parameters.limit_max_deg_c
-            span_c = max_c - min_c
-            if span_c > 0:
-                pct_c = max(0.0, min(100.0, (t.pos_c_deg - min_c) / span_c * 100.0))
-                self.card_c.set_progress(pct_c, visible=True)
-            else:
-                self.card_c.set_progress(0, visible=False)
         else:
             self.card_c.set_value("--")
             self.card_c.set_badge("SEM ENCODER", "amber")
-            self.card_c.set_progress(0, visible=False)
 
         if t.pos_a_valid:
             self.card_a.set_value(f"{t.pos_a_deg:.2f}")
             self.card_a.set_badge("AS5600 OK", "green")
-            min_a = self.state.parameters.limit_min_deg_a
-            max_a = self.state.parameters.limit_max_deg_a
-            span_a = max_a - min_a
-            if span_a > 0:
-                pct_a = max(0.0, min(100.0, (t.pos_a_deg - min_a) / span_a * 100.0))
-                self.card_a.set_progress(pct_a, visible=True)
-            else:
-                self.card_a.set_progress(0, visible=False)
         else:
             self.card_a.set_value("--")
             self.card_a.set_badge("SEM ENCODER", "amber")
-            self.card_a.set_progress(0, visible=False)
-        
+
         # Update Z
         params = self.state.parameters
         teeth = params.z_pulley_teeth or DEFAULT_Z_PULLEY_TEETH
@@ -450,7 +527,7 @@ class DashboardView(QWidget):
             params.tmc_microsteps[2],
         )
         self.card_z.set_value(f"{t.pos_z_steps} ({pos_z_mm:.2f} mm)")
-        self.card_z.set_progress(t.z_progress_pct)
+        self._update_axis_progress(t)
         if t.z_bloqueado:
             self.card_z.set_badge("BLOQUEADO", "red")
         else:

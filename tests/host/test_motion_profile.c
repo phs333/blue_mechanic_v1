@@ -252,8 +252,46 @@ static void test_junction_and_chained_moves(void)
     free(eb.step_time);
 }
 
+/* Segmento do jog: v_floor = vmax -> velocidade constante, duracao exata, eixos alinhados */
+static void test_jog_constant_velocity_segment(void)
+{
+    const int32_t cases[][3] = {{12, -3, 0}, {1, 0, 0}, {0, 7, 40}, {1, 1, 1}, {125, 0, -2}};
+    const double seg_s[] = {0.010, 0.010, 0.020, 0.080, 0.010};
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); ++k) {
+        mp_request_t r;
+        memset(&r, 0, sizeof(r));
+        for (int i = 0; i < 3; ++i) {
+            float v = fabsf((float)cases[k][i]) / (float)seg_s[k];
+            r.steps[i] = cases[k][i];
+            r.vmax[i] = v;
+            r.v_floor[i] = v;
+            r.accel[i] = 1e9f;
+        }
+        mp_plan_t p;
+        CHECK(mp_plan_move(&r, g_pool, POOL_WORDS, TICK_HZ, &p) == MP_OK, "plan jog %zu", k);
+        uint32_t expect = (uint32_t)(seg_s[k] * TICK_HZ + 0.5);
+        CHECK(p.duration_ticks >= expect - 2U && p.duration_ticks <= expect + 2U,
+              "jog %zu: duracao %u ticks, esperado %u", k, p.duration_ticks, expect);
+        for (int i = 0; i < 3; ++i) {
+            emission_t e = emit(&p.axis[i], 24);
+            uint32_t want = (uint32_t)abs(cases[k][i]);
+            CHECK(e.steps == want && e.bad_symbols == 0, "jog %zu eixo %d: %u passos, %d invalidos",
+                  k, i, e.steps, e.bad_symbols);
+            CHECK(e.end_ticks == p.duration_ticks, "jog %zu eixo %d desalinhado", k, i);
+            if (want >= 3U) {
+                /* Espacamento uniforme: velocidade constante dentro do segmento */
+                double d0 = e.step_time[1] - e.step_time[0];
+                double d1 = e.step_time[want - 1] - e.step_time[want - 2];
+                CHECK(fabs(d0 - d1) < 3e-6, "jog %zu eixo %d nao uniforme: %.1f vs %.1f us", k, i, d0 * 1e6, d1 * 1e6);
+            }
+            free(e.step_time);
+        }
+    }
+}
+
 int main(void)
 {
+    test_jog_constant_velocity_segment();
     test_single_axis_long_move();
     test_short_triangular_move();
     test_sync_axes_stay_coordinated();

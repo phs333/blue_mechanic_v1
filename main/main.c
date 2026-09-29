@@ -61,7 +61,9 @@ static void console_task(void *arg) {
       if (buf_len > 0) {
         buf[buf_len] = '\0';
         snprintf(line, sizeof(line), "%s", buf);
-        ESP_LOGI(APP_TAG, "RX line=[%s]", line);
+        if (strncmp(line, "JOG ", 4) != 0 && strncmp(line, "jog ", 4) != 0) {
+          ESP_LOGI(APP_TAG, "RX line=[%s]", line); // JOG chega a ~50/s: nao polui o console
+        }
         commands_handle_line(ctx, line);
         buf_len = 0;
       }
@@ -87,6 +89,7 @@ static void safety_task(void *arg) {
       (void)motion_request_stop(ctx);
       ESP_LOGE(APP_TAG, "ALARME: fim de curso Z acionado inesperadamente. "
                         "Movimentos interrompidos e eixo Z suspenso.");
+      printf("Estado Z: BLOQUEADO\n"); // o app atualiza o card sem esperar um STATUS
     }
     // Periodico (encoders) ou imediato quando a ISR do fim de curso Z dispara
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));

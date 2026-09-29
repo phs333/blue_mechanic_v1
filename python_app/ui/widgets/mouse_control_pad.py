@@ -9,11 +9,19 @@ Controle manual por mouse (tela Automação & Testes).
 - Mover na vertical: eixo A (para cima = positivo)
 
 Com o modo ativo o cursor é capturado e recentralizado a cada movimento (deslocamento
-relativo ilimitado). Os deslocamentos são acumulados e enviados como MOVE_SYNC a
-intervalos fixos, limitados ao que a máquina percorre nesse intervalo — o motor
-"stream" do firmware encadeia esses lotes sem parar entre eles.
+relativo ilimitado). O mouse define um ALVO de posição.
+
+- Serial direta (firmware com JOG): a cada envio só o deslocamento do mouse é repassado
+  ("JOG C .. A .. Z .."); o próprio nó persegue o alvo com a velocidade/aceleração da NVS em
+  segmentos de 10 ms, sem fila — responde em ~20-30 ms e para exatamente onde o mouse parou.
+- Outros backends: a velocidade suavizada persegue o alvo (variação por segmento <= jerk) e
+  cada trecho vira um MOVE_SYNC com a velocidade embutida; os primeiros segmentos saem
+  juntos para o lookahead do motor "stream" encadear tudo sem parar.
 Sair: botão do meio ou Espaço. Esc continua sendo o E-STOP global (e também sai).
 """
+
+import math
+import time
 
 from PyQt6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen
@@ -21,9 +29,7 @@ from PyQt6.QtWidgets import QWidget
 
 from python_app.core.protocol_defs import (
     calc_ca_degrees_per_step,
-    calc_ca_steps_for_degrees,
     calc_z_mm_per_step,
-    calc_z_steps_for_mm,
     laser_level_to_percent,
     percent_to_laser_level,
 )
@@ -35,24 +41,36 @@ LASER_BUTTONS = {
 }
 
 
+AXES = ("C", "A", "Z")
+DEFAULT_SPEED = {"C": 140.0, "A": 140.0, "Z": 50.0}
+DEFAULT_ACCEL = {"C": 1800.0, "A": 1800.0, "Z": 1000.0}
+DEFAULT_JERK = {"C": 15.0, "A": 15.0, "Z": 10.0}
+
+
 class MouseJogController(QObject):
     """Lógica do controle por mouse, independente do widget (testável)."""
 
     status_changed = pyqtSignal()
 
-    def __init__(self, comm, state, parent=None):
+    PREFILL_SEGMENTS = 3   # segmentos à frente na fila do nó: o lookahead precisa ver o próximo
+    SMOOTH_TAU_S = 0.12    # constante de tempo com que a velocidade persegue o alvo do mouse
+    MAX_LAG_S = 0.35       # alvo à frente da máquina além disso é descartado (não acumula atraso)
+
+    def __init__(self, comm, state, parent=None, clock=time.monotonic):
         super().__init__(parent)
         self.comm = comm
         self.state = state
+        self._clock = clock
         # Sensibilidade
         self.deg_per_px_c = 0.20
         self.deg_per_px_a = 0.20
         self.mm_per_notch_z = 1.0
         self.fade_ms = 1500
-        self.send_interval_ms = 80
+        self.send_interval_ms = 20
         self.hold_delay_ms = 250
-        # Pendências de movimento (unidades físicas)
-        self.pending = {"C": 0.0, "A": 0.0, "Z": 0.0}
+        # Alvo ainda não percorrido (unidades físicas) e estado do perfil de velocidade
+        self.pending = {axis: 0.0 for axis in AXES}
+        self._reset_motion()
         self.active = False
         # Lasers: nível em % (0..100), se está em fade
         self.laser_pct = {1: 0.0, 2: 0.0}
@@ -92,7 +110,9 @@ class MouseJogController(QObject):
         telemetry = self.state.telemetry
         self.laser_pct[1] = float(laser_level_to_percent(telemetry.laser1_level))
         self.laser_pct[2] = float(laser_level_to_percent(telemetry.laser2_level))
-        self.pending = {"C": 0.0, "A": 0.0, "Z": 0.0}
+        self.pending = {axis: 0.0 for axis in AXES}
+        self._reset_motion()
+        self._send_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._send_timer.start(self.send_interval_ms)
         self.status_changed.emit()
 
@@ -103,8 +123,19 @@ class MouseJogController(QObject):
         for idx in (1, 2):
             self._hold_timers[idx].stop()
             self.fading[idx] = False
-        self.pending = {"C": 0.0, "A": 0.0, "Z": 0.0}  # nada de movimento "atrasado" após sair
+        self.pending = {axis: 0.0 for axis in AXES}  # nada de movimento "atrasado" após sair
+        self._reset_motion()
         self.status_changed.emit()
+
+    def _reset_motion(self) -> None:
+        self.velocity = {axis: 0.0 for axis in AXES}  # velocidade comandada (unid./s)
+        self._carry = {axis: 0.0 for axis in AXES}    # fração de passo ainda não enviada
+        self._buffer = []            # segmentos retidos até formar a folga inicial da fila
+        self._streaming = False      # há segmentos na fila do nó (cadeia em andamento)
+        self._stream_t0 = 0.0
+        self._sent_s = 0.0           # soma das durações enviadas desde o início da cadeia
+        self._last_tick = None
+        self._last_emit = None
 
     # --- movimento -------------------------------------------------------------------
     def on_move(self, dx: float, dy: float) -> None:
@@ -120,41 +151,137 @@ class MouseJogController(QObject):
         self.pending["Z"] += notches * self.mm_per_notch_z
         self._clamp_backlog()
 
-    def _max_per_tick(self, axis: str) -> float:
-        """Distância que o eixo percorre num intervalo de envio na velocidade configurada."""
-        idx = "CAZ".index(axis)
-        speed = self.state.parameters.speed[idx] if len(self.state.parameters.speed) > idx else 0.0
-        speed = speed if speed > 0 else (140.0 if axis != "Z" else 50.0)
-        return speed * self.send_interval_ms / 1000.0
+    def _step_size(self, axis: str) -> float:
+        p = self.state.parameters
+        if axis == "Z":
+            return calc_z_mm_per_step(p.z_pulley_teeth, p.steps_per_rev[2], p.tmc_microsteps[2])
+        idx = AXES.index(axis)
+        return calc_ca_degrees_per_step(p.steps_per_rev[idx], p.tmc_microsteps[idx])
+
+    def _limits(self, axis: str):
+        """(velocidade máx., variação máx. de velocidade por segmento) do eixo.
+
+        - Velocidade: a configurada, e no máximo o que ainda permite parar DENTRO de um
+          segmento (o lookahead do nó só enxerga o próximo; acima disso ele reduz e o
+          segmento passa a durar mais que o intervalo).
+        - Variação por segmento <= jerk do eixo: a junção entre segmentos fica sem redução.
+        """
+        p = self.state.parameters
+        idx = AXES.index(axis)
+
+        def param(values, default):
+            v = values[idx] if len(values) > idx else 0.0
+            return v if v and v > 0 else default[axis]
+
+        seg_s = self.send_interval_ms / 1000.0
+        speed = param(p.speed, DEFAULT_SPEED)
+        accel = param(p.accel, DEFAULT_ACCEL)
+        jerk = param(getattr(p, "jerk", []), DEFAULT_JERK)
+        return min(speed, accel * seg_s), max(min(jerk, accel * seg_s), 1e-3)
 
     def _clamp_backlog(self) -> None:
+        if self._uses_node_jog():
+            return  # o nó limita o alvo (limites de curso e atraso máximo)
         # Mouse mais rápido que a máquina: descarta o excesso em vez de acumular atraso
-        for axis in self.pending:
-            limit = 2.0 * self._max_per_tick(axis)
+        for axis in AXES:
+            limit = self._limits(axis)[0] * self.MAX_LAG_S
             self.pending[axis] = max(-limit, min(limit, self.pending[axis]))
 
-    def tick(self) -> bool:
-        """Envia um lote de movimento com o que estiver pendente. Retorna True se enviou."""
+    def _advance_velocity(self, axis: str, dt: float) -> float:
+        """Atualiza a velocidade do eixo em direção ao alvo e retorna o deslocamento do tick."""
+        vmax, dv_max = self._limits(axis)
+        target = self.pending[axis] - self._carry[axis]  # o que falta além do já percorrido
+        dist = abs(target)
+        # Persegue o alvo com constante de tempo e pousa nele: nunca mais rápido do que dá
+        # para frear até o alvo com a variação de velocidade permitida por segmento.
+        brake = dv_max / dt
+        v_des = math.copysign(min(dist / self.SMOOTH_TAU_S, math.sqrt(2.0 * brake * dist), vmax), target)
+        v = self.velocity[axis]
+        v += max(-dv_max, min(dv_max, v_des - v))
+        d = v * dt
+        if d * target > 0 and abs(d) > dist:  # chegaria além do alvo: pousa exatamente nele
+            d = target
+            v = d / dt
+        if dist < 1e-9 and abs(v) <= dv_max:
+            v, d = 0.0, 0.0
+        self.velocity[axis] = v
+        return d
+
+    def _uses_node_jog(self) -> bool:
+        return bool(getattr(self.comm, "supports_jog", False))
+
+    def tick(self, now=None) -> bool:
+        """Um intervalo de envio. Retorna True se algo foi transmitido."""
         if not self.active:
             return False
-        p = self.state.parameters
-        chunk = {}
-        for axis in self.pending:
-            limit = self._max_per_tick(axis)
-            chunk[axis] = max(-limit, min(limit, self.pending[axis]))
+        if self._uses_node_jog():
+            # Jog no nó: só repassa o deslocamento do mouse. O firmware persegue o alvo com
+            # a velocidade/aceleração da NVS, a cada 10 ms, sem fila — acompanha o mouse.
+            d = {axis: self.pending[axis] for axis in AXES}
+            if not any(abs(v) > 1e-9 for v in d.values()):
+                return False
+            self.pending = {axis: 0.0 for axis in AXES}
+            return bool(self.comm.jog(d["C"], d["A"], d["Z"]))
+        return self._tick_stream(now)
 
-        steps_c = calc_ca_steps_for_degrees(chunk["C"], p.steps_per_rev[0], p.tmc_microsteps[0])
-        steps_a = calc_ca_steps_for_degrees(chunk["A"], p.steps_per_rev[1], p.tmc_microsteps[1])
-        steps_z = calc_z_steps_for_mm(chunk["Z"], p.z_pulley_teeth, p.steps_per_rev[2], p.tmc_microsteps[2])
-        if steps_c == 0 and steps_a == 0 and steps_z == 0:
+    def _tick_stream(self, now=None) -> bool:
+        """Backends sem JOG (CAN/Teensy): segmentos MOVE_SYNC com velocidade embutida."""
+        now = self._clock() if now is None else now
+        interval = self.send_interval_ms / 1000.0
+        dt = interval if self._last_tick is None else min(max(now - self._last_tick, 0.25 * interval), 3 * interval)
+        self._last_tick = now
+
+        # A fila do nó esvaziou (fim do movimento anterior): o próximo precisa de nova folga
+        if self._streaming and self._sent_s - (now - self._stream_t0) < -0.5 * interval:
+            self._streaming = False
+
+        steps = {}
+        for axis in AXES:
+            self._carry[axis] += self._advance_velocity(axis, dt)
+            size = self._step_size(axis)
+            steps[axis] = int(round(self._carry[axis] / size))
+            self._carry[axis] -= steps[axis] * size
+            self.pending[axis] -= steps[axis] * size
+
+        if not any(steps.values()):
+            if self._buffer and not any(self.velocity.values()):
+                return self._flush(now)  # movimento curto: não segura o que já foi gerado
             return False
 
-        # Desconta só o que virou passo inteiro (o resto fracionário continua pendente)
-        self.pending["C"] -= steps_c * calc_ca_degrees_per_step(p.steps_per_rev[0], p.tmc_microsteps[0])
-        self.pending["A"] -= steps_a * calc_ca_degrees_per_step(p.steps_per_rev[1], p.tmc_microsteps[1])
-        self.pending["Z"] -= steps_z * calc_z_mm_per_step(p.z_pulley_teeth, p.steps_per_rev[2], p.tmc_microsteps[2])
-        self.comm.move_sync(steps_c=steps_c, steps_a=steps_a, steps_z=steps_z)
+        # Duração = tempo desde o segmento anterior: a máquina executa no mesmo ritmo do mouse
+        # (em baixa velocidade um segmento de 1 passo pode cobrir vários intervalos)
+        idle = not self._streaming and not self._buffer
+        duration = dt if (idle or self._last_emit is None) else min(max(now - self._last_emit, dt), 0.5)
+        self._last_emit = now
+        segment = (steps, duration)
+        if self._streaming:
+            self._send(segment)
+            return True
+        self._buffer.append(segment)
+        if sum(d for _, d in self._buffer) >= self.PREFILL_SEGMENTS * interval - 1e-9:
+            return self._flush(now)
+        return False
+
+    def _flush(self, now: float) -> bool:
+        for segment in self._buffer:
+            self._send(segment)
+        if not self._streaming:
+            self._streaming = True
+            self._stream_t0 = now
+            self._sent_s = sum(duration for _, duration in self._buffer)
+        self._buffer = []
         return True
+
+    def _send(self, segment) -> None:
+        steps, duration = segment
+        speeds = {}
+        for axis in AXES:
+            # Velocidade de cada eixo = trecho / duração: todos terminam juntos, no tempo certo
+            speeds[axis] = abs(steps[axis]) * self._step_size(axis) / duration if steps[axis] else None
+        if self._streaming:
+            self._sent_s += duration
+        self.comm.move_sync(steps_c=steps["C"], steps_a=steps["A"], steps_z=steps["Z"],
+                            speed_c=speeds["C"], speed_a=speeds["A"], speed_z=speeds["Z"])
 
     # --- lasers ----------------------------------------------------------------------
     def on_press(self, laser: int) -> None:

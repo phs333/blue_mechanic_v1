@@ -4,6 +4,7 @@ Enables script-based multi-step command sequences, continuous looping,
 delays, single-step execution, and broadcast execution via Teensy 4.1.
 """
 
+import math
 import os
 import re
 import time
@@ -592,6 +593,152 @@ BLACKOUT 4
 """
 
 
+PRESET_TURRET_CIRCLE = """# -----------------------------------------------------------------
+# 9. Círculo de Laser: 1 m de diâmetro a 3 m (Torre C + A)
+# -----------------------------------------------------------------
+# A base (C, azimute) e o pivot (A, elevação) giram juntos como uma
+# torre: o feixe descreve um cone de meia-abertura atan(0,5/3) = 9,46°
+# e projeta um círculo de 1 m numa parede a 3 m. O laser oposto (2)
+# desenha o mesmo círculo, espelhado, na parede de trás.
+# Partida: C e A no zero (HOME), feixe horizontal apontando para o
+# centro do círculo. Use a Serial direta (a velocidade de cada segmento
+# vai junto no comando para o traço sair com velocidade constante).
+# Edite DIST e DIAM (metros), a duração da volta e o número de voltas.
+# -----------------------------------------------------------------
+E 0 1
+WAIT 300
+
+# Sobe o Z 300 mm
+MS 0 0 0 300
+WAIT 2500
+
+# Vai até a borda do círculo com os lasers apagados (evita um risco radial)
+# TURRET_CIRCLE_START <nó> <distância_m> <diâmetro_m> [elevação_centro_°]
+TURRET_CIRCLE_START 0 3.0 1.0
+WAIT 800
+
+# Liga os dois lasers em 100% (nível 300, o mesmo 100% da interface)
+L 0 1 300
+L 0 2 300
+WAIT 100
+
+# Desenha: 3 voltas de 4 s, 72 segmentos por volta
+# TURRET_CIRCLE <nó> <distância_m> <diâmetro_m> <s_por_volta> [segmentos] [voltas] [elevação_centro_°]
+TURRET_CIRCLE 0 3.0 1.0 4 72 3
+
+# Apaga e volta a mirar o centro
+L 0 1 0
+L 0 2 0
+TURRET_CIRCLE_END 0 3.0 1.0
+WAIT 800
+"""
+
+
+@dataclass
+class ScriptKinematics:
+    """Graus por passo de C/A no nó: os macros geométricos quantizam as metas em passos
+    inteiros para que um trajeto fechado volte exatamente ao ponto de partida."""
+    deg_per_step_c: float = 360.0 / (200 * 16)
+    deg_per_step_a: float = 360.0 / (200 * 16)
+
+    @classmethod
+    def from_parameters(cls, params) -> "ScriptKinematics":
+        def dps(idx: int) -> float:
+            spr = params.steps_per_rev[idx] or 200
+            usteps = params.tmc_microsteps[idx] or 16
+            return 360.0 / (spr * usteps)
+        return cls(dps(0), dps(1))
+
+
+TURRET_PREFILL_SEGMENTS = 3  # segmentos à frente na fila do nó (encadeamento sem parar)
+
+
+def _turret_aim(theta: float, t: float, elev_deg: float) -> Tuple[float, float]:
+    """(azimute C, elevação A relativa ao centro) em graus do feixe no ângulo t do círculo.
+
+    O feixe percorre o cone de meia-abertura theta em torno do eixo central (horizontal
+    girado de elev_deg): d = cos(theta)*f + sin(theta)*(cos(t)*u + sin(t)*v). Numa parede
+    perpendicular ao eixo, a distância D, a projeção é um círculo de raio D*tan(theta).
+    """
+    e0 = math.radians(elev_deg)
+    s, c = math.sin(theta), math.cos(theta)
+    dx = c * math.cos(e0) - s * math.sin(t) * math.sin(e0)
+    dy = s * math.cos(t)
+    dz = c * math.sin(e0) + s * math.sin(t) * math.cos(e0)
+    az = math.degrees(math.atan2(dy, dx))
+    el = math.degrees(math.asin(max(-1.0, min(1.0, dz))))
+    return az, el - elev_deg
+
+
+def _fmt_deg(val: float) -> str:
+    return f"{val:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def _expand_turret_macro(op: str, tokens: List[str], line_num: int, kin: ScriptKinematics) -> List[str]:
+    usage = {
+        "TURRET_CIRCLE": "TURRET_CIRCLE <nó> <distância_m> <diâmetro_m> <s_por_volta> [segmentos=72] [voltas=1] [elevação_°=0]",
+        "TURRET_CIRCLE_START": "TURRET_CIRCLE_START <nó> <distância_m> <diâmetro_m> [elevação_°=0]",
+        "TURRET_CIRCLE_END": "TURRET_CIRCLE_END <nó> <distância_m> <diâmetro_m> [elevação_°=0]",
+    }[op]
+    is_circle = op == "TURRET_CIRCLE"
+    try:
+        node = tokens[1]
+        dist, diam = float(tokens[2]), float(tokens[3])
+        if is_circle:
+            lap_s = float(tokens[4])
+            segments = int(float(tokens[5])) if len(tokens) > 5 else 72
+            laps = int(float(tokens[6])) if len(tokens) > 6 else 1
+            elev = float(tokens[7]) if len(tokens) > 7 else 0.0
+        else:
+            elev = float(tokens[4]) if len(tokens) > 4 else 0.0
+    except (IndexError, ValueError):
+        raise ScriptExpansionError(f"Uso incorreto de {op}. Sintaxe: {usage}", line_num)
+    if dist <= 0 or diam <= 0:
+        raise ScriptExpansionError(f"{op}: distância e diâmetro devem ser positivos", line_num)
+    if is_circle and (lap_s <= 0 or not 8 <= segments <= 720 or laps < 1):
+        raise ScriptExpansionError(f"{op}: use s_por_volta > 0, 8..720 segmentos e voltas >= 1", line_num)
+
+    theta = math.atan((diam / 2.0) / dist)
+    dps_c, dps_a = kin.deg_per_step_c, kin.deg_per_step_a
+
+    def target_steps(t: float) -> Tuple[int, int]:
+        az, el = _turret_aim(theta, t, elev)
+        return round(az / dps_c), round(el / dps_a)
+
+    start = target_steps(0.0)
+    if op == "TURRET_CIRCLE_START":
+        return [f"MS {node} {_fmt_deg(start[0] * dps_c)} {_fmt_deg(start[1] * dps_a)} 0"]
+    if op == "TURRET_CIRCLE_END":
+        return [f"MS {node} {_fmt_deg(-start[0] * dps_c)} {_fmt_deg(-start[1] * dps_a)} 0"]
+
+    # Metas absolutas em passos inteiros: cada volta fecha exatamente (sem deriva entre voltas).
+    points = [target_steps(2.0 * math.pi * i / segments) for i in range(segments)] + [start]
+    seg_s = lap_s / segments
+    seg_ms = seg_s * 1000.0
+    total = segments * laps
+    prefill = min(TURRET_PREFILL_SEGMENTS, total)
+    out = [f"# TURRET_CIRCLE: cone de {math.degrees(theta):.2f}°, {total} segmentos de {seg_ms:.1f} ms"]
+    for j in range(total):
+        i = j % segments
+        dc = (points[i + 1][0] - points[i][0]) * dps_c
+        da = (points[i + 1][1] - points[i][1]) * dps_a
+        # Velocidade de cada eixo = deslocamento / duração do segmento: o planejador do nó
+        # usa a menor taxa entre os eixos, então todos os segmentos duram seg_s (traço constante).
+        cmd = f"MS {node} {_fmt_deg(dc)} {_fmt_deg(da)} 0"
+        if dc:
+            cmd += f" SC={abs(dc) / seg_s:.4f}"
+        if da:
+            cmd += f" SA={abs(da) / seg_s:.4f}"
+        out.append(cmd)
+        # Os primeiros segmentos vão juntos (fila à frente para o lookahead encadear);
+        # depois, um por duração de segmento mantém a fila do nó no mesmo nível.
+        if prefill - 1 <= j < total - 1:
+            out.append(f"WAIT {_fmt_script_num(round(seg_ms, 3))}")
+    # Espera os segmentos que ainda estão na fila terminarem
+    out.append(f"WAIT {int(round(prefill * seg_ms + 150))}")
+    return out
+
+
 def _load_fade_strobe_preset() -> str:
     path = os.path.join(os.path.dirname(__file__), "..", "..", "animacao_laser_fade_strobe.txt")
     if os.path.isfile(path):
@@ -612,6 +759,7 @@ AUTOMATION_PRESETS = {
     "6. Show de Lasers (Nós 1 e 4)": PRESET_LASER_NODES_1_4,
     "7. Fade Suave (1 a 300) & 200 Piscadas (Nós 1 e 4)": _load_fade_strobe_preset(),
     "8. Show com Macros & Loops (FOR, FADE, STROBE)": PRESET_MACROS_SHOW,
+    "9. Círculo de Laser 1 m a 3 m (Torre C + A)": PRESET_TURRET_CIRCLE,
 }
 
 
@@ -664,13 +812,17 @@ def _eval_script_condition(cond_str: str, vars_dict: Dict[str, float], line_num:
         raise ScriptExpansionError(f"Erro ao avaliar condição '{cond_str}': {e}", line_num)
 
 
-def _expand_single_macro(line: str, line_num: int) -> List[str]:
-    """Expands built-in laser macros (FADE, FADE_IN, FADE_OUT, SYNC_FADE, STROBE, STROBE_CROSS, BLACKOUT)."""
+def _expand_single_macro(line: str, line_num: int, kin: Optional[ScriptKinematics] = None) -> List[str]:
+    """Expands built-in macros (FADE, FADE_IN, FADE_OUT, SYNC_FADE, STROBE, STROBE_CROSS, BLACKOUT,
+    TURRET_CIRCLE, TURRET_CIRCLE_START, TURRET_CIRCLE_END)."""
     tokens = line.split()
     if not tokens:
         return [line]
 
     op = tokens[0].upper()
+
+    if op in ("TURRET_CIRCLE", "TURRET_CIRCLE_START", "TURRET_CIRCLE_END"):
+        return _expand_turret_macro(op, tokens, line_num, kin or ScriptKinematics())
 
     if op == "BLACKOUT":
         node = tokens[1] if len(tokens) > 1 else "0"
@@ -820,11 +972,13 @@ def _expand_single_macro(line: str, line_num: int) -> List[str]:
     return [line]
 
 
-def expand_automation_script(script_text: str, max_steps: int = 100000) -> str:
+def expand_automation_script(script_text: str, max_steps: int = 100000,
+                             kinematics: Optional[ScriptKinematics] = None) -> str:
     """
     Expands high-level automation constructs (FOR, REPEAT, WHILE, IF, DEF, FADE, STROBE, etc.)
     into standard sequential commands (L, M, WAIT, etc.).
     Supports nested blocks, variable substitutions, and arithmetic.
+    `kinematics` (graus por passo do nó) é usado pelos macros geométricos (TURRET_CIRCLE).
     """
     raw_lines = script_text.splitlines()
     indexed_lines = [(i + 1, line) for i, line in enumerate(raw_lines)]
@@ -1066,7 +1220,7 @@ def expand_automation_script(script_text: str, max_steps: int = 100000) -> str:
 
             # Regular command or single-line macro: substitute variables first
             sub_line = _substitute_script_vars(clean, variables)
-            expanded_macro_lines = _expand_single_macro(sub_line, line_num)
+            expanded_macro_lines = _expand_single_macro(sub_line, line_num, kinematics)
             for mline in expanded_macro_lines:
                 step_counter[0] += 1
                 if step_counter[0] > max_steps:
@@ -1102,6 +1256,7 @@ def parse_script(
     default_delay_ms: int = 500,
     force_broadcast: bool = False,
     default_node: int = 1,
+    kinematics: Optional[ScriptKinematics] = None,
 ) -> List[AutomationStep]:
     """
     Parse a text script into executable steps.
@@ -1109,7 +1264,7 @@ def parse_script(
     and handles commands, delays (WAIT/DELAY/SLEEP), comments, and node replacements.
     """
     # Pre-process procedural macros, loops, and conditions
-    expanded_text = expand_automation_script(script_text)
+    expanded_text = expand_automation_script(script_text, kinematics=kinematics)
 
     steps: List[AutomationStep] = []
     lines = expanded_text.splitlines()
@@ -1141,17 +1296,18 @@ def parse_script(
         if delay_match:
             value = float(delay_match.group(1))
             unit = (delay_match.group(2) or "ms").lower()
-            if unit in ("s", "seg"):
-                delay_ms = int(value * 1000)
-            else:
-                delay_ms = int(value)
+            # Frações de ms são mantidas: a espera segue uma linha do tempo absoluta, então
+            # 55.556 ms repetidos 200 vezes somam exatamente 11,1 s (truncar acumularia erro)
+            delay_ms = round(value * 1000, 3) if unit in ("s", "seg") else round(value, 3)
+            if delay_ms == int(delay_ms):
+                delay_ms = int(delay_ms)
             steps.append(
                 AutomationStep(
                     line_number=line_idx,
                     raw_line=clean,
                     step_type="DELAY",
                     delay_ms=max(1, delay_ms),
-                    description=f"Aguardar {delay_ms} ms",
+                    description=f"Aguardar {_fmt_script_num(delay_ms)} ms",
                 )
             )
             continue
@@ -1243,6 +1399,7 @@ class AutomationWorker(QThread):
         self._stop_requested = False
         self._pause_requested = False
         self._step_once_requested = False
+        self._deadline: Optional[float] = None  # linha do tempo das esperas (time.monotonic)
 
         self.current_loop = 0
         self.current_step_idx = 0
@@ -1276,21 +1433,35 @@ class AutomationWorker(QThread):
     def request_single_step(self) -> None:
         self._step_once_requested = True
 
-    def _sleep_cancellable(self, duration_ms: int) -> bool:
-        """Sleep in small 20ms slices to react quickly to stop/pause requests."""
-        elapsed = 0
-        slice_ms = 20
-        while elapsed < duration_ms:
+    # Atraso máximo tolerado em relação à linha do tempo antes de ressincronizar (em vez
+    # de disparar uma rajada de comandos para "recuperar" o tempo perdido)
+    TIMELINE_MAX_LAG_S = 0.25
+
+    def _sleep_cancellable(self, duration_ms: float) -> bool:
+        """Espera até o próximo instante da linha do tempo do script, em fatias de até 20 ms.
+
+        As esperas são acumuladas sobre um prazo absoluto (monotonic): o atraso do
+        time.sleep do Windows (~1..15 ms) e o tempo gasto enviando comandos não se somam a
+        cada WAIT. Isso mantém o ritmo exato em sequências longas (ex.: TURRET_CIRCLE,
+        onde a fila do nó precisa ser alimentada na mesma taxa em que os segmentos rodam).
+        """
+        now = time.monotonic()
+        if self._deadline is None or now - self._deadline > self.TIMELINE_MAX_LAG_S:
+            self._deadline = now
+        self._deadline += duration_ms / 1000.0
+        while True:
             if self._stop_requested:
                 return False
-            time.sleep(slice_ms / 1000.0)
-            elapsed += slice_ms
-        return True
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(0.02, remaining))
 
     def run(self) -> None:
         self._stop_requested = False
         self._pause_requested = False
         self._step_once_requested = False
+        self._deadline = None
         self.current_loop = 0
         self.total_commands_sent = 0
         self.error_count = 0
@@ -1326,6 +1497,7 @@ class AutomationWorker(QThread):
                 # Handle pause
                 while self._pause_requested and not self._stop_requested:
                     self.state_changed.emit("PAUSED")
+                    self._deadline = None  # ao retomar, a linha do tempo recomeça do agora
                     time.sleep(0.05)
                 if self._stop_requested:
                     break

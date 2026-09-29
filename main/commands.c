@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +73,7 @@ void commands_print_help(void)
     puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("MOVE_F C|A|Z <steps> [S<speed>] [F<accel>]");
     puts("MOVE_SYNC C <steps_c> A <steps_a> Z <steps_z> [S<speed>] [F<accel>]");
+    puts("JOG C <graus> A <graus> Z <mm> (incrementa o alvo do jog continuo; limites e velocidade da NVS)");
     puts("LASER 1|2 ON|OFF|0..100%|0..4095");
     puts("FAN 0|1|AUTO");
     puts("TEMP");
@@ -249,6 +251,39 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             puts("ESTOP: movimento interrompido, fila esvaziada e lasers apagados.");
         } else {
             puts("STOP: movimento interrompido e fila esvaziada.");
+        }
+        return;
+    }
+
+    // JOG C <d_deg> A <d_deg> Z <d_mm>: incrementos do alvo do jog continuo (controle por
+    // mouse). Silencioso de proposito: chega a ~50 linhas/s.
+    if (strncmp(cmd, "JOG", 3) == 0 && (cmd[3] == ' ' || cmd[3] == '\0')) {
+        float delta[AXIS_COUNT] = {0.0f, 0.0f, 0.0f};
+        const char *p = cmd + 3;
+        bool ok = true;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            char ax = *p++;
+            size_t idx = (ax == 'C' || ax == 'X') ? AXIS_C_ID : (ax == 'A' || ax == 'Y') ? AXIS_A_ID
+                         : (ax == 'Z') ? AXIS_Z_ID : AXIS_COUNT;
+            while (*p == ' ' || *p == '=') p++;
+            char *end = NULL;
+            float v = strtof(p, &end);
+            if (idx == AXIS_COUNT || end == p || !isfinite(v)) {
+                ok = false;
+                break;
+            }
+            delta[idx] += v;
+            p = end;
+        }
+        if (!ok) {
+            puts("ERRO: use JOG C <graus> A <graus> Z <mm> (incrementos).");
+            return;
+        }
+        esp_err_t err = motion_jog_add(ctx, delta[AXIS_C_ID], delta[AXIS_A_ID], delta[AXIS_Z_ID]);
+        if (err != ESP_OK) {
+            printf("ERRO no JOG: %s\n", esp_err_to_name(err));
         }
         return;
     }

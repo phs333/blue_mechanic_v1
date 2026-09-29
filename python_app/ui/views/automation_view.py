@@ -20,6 +20,7 @@ from python_app.core.test_automation import (
     PRESET_SWEEP_CAZ,
     AutomationWorker,
     ScriptExpansionError,
+    ScriptKinematics,
     expand_automation_script,
     parse_script,
 )
@@ -441,12 +442,13 @@ class AutomationView(QWidget):
                  "Milímetros do eixo Z por clique da roda (negativo inverte o sentido)")
         add_spin(4, "Fade laser", "fade_ms", 100, 20000, 100, 0, " ms",
                  "Tempo do fade de 0 a 100% ao segurar o botão")
-        add_spin(5, "Envio", "send_interval_ms", 30, 500, 10, 0, " ms",
-                 "Intervalo entre lotes de movimento (menor = mais responsivo, mais comandos)")
+        add_spin(5, "Envio", "send_interval_ms", 10, 150, 5, 0, " ms",
+                 "Intervalo entre envios do deslocamento do mouse ao nó (padrão 20 ms)")
 
         hint = QLabel(
-            "Os lotes usam MOVE_SYNC com os limites de encoder e do Z. "
-            "Movimento mais rápido que a máquina é descartado (não acumula atraso).\n\n"
+            "Serial direta: o nó segue o mouse sozinho (JOG contínuo) com a velocidade e a "
+            "aceleração de cada eixo gravadas na NVS — para mais rápido/mais brusco, aumente-as "
+            "na aba Parâmetros. Respeita os limites de C/A e o curso do Z.\n\n"
             "Esc aciona o E-STOP e sai do modo."
         )
         hint.setWordWrap(True)
@@ -525,7 +527,8 @@ class AutomationView(QWidget):
             return
 
         try:
-            expanded = expand_automation_script(script_text)
+            expanded = expand_automation_script(
+                script_text, kinematics=ScriptKinematics.from_parameters(self.state.parameters))
             lines = [l for l in expanded.splitlines() if l.strip() and not l.strip().startswith(("#", "//"))]
             count = len(lines)
             preview_sample = "\n".join(lines[:12])
@@ -579,6 +582,7 @@ class AutomationView(QWidget):
                 default_delay_ms=default_delay,
                 force_broadcast=force_bcast,
                 default_node=default_node,
+                kinematics=ScriptKinematics.from_parameters(self.state.parameters),
             )
         except ScriptExpansionError as err:
             QMessageBox.critical(

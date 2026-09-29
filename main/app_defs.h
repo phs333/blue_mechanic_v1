@@ -260,6 +260,7 @@ typedef enum {
     MOTION_CMD_HOME,
     MOTION_CMD_MOVE_FORCE,
     MOTION_CMD_MOVE_SYNC,
+    MOTION_CMD_JOG,         // jog continuo: segue o alvo de motion_jog_add() ate ficar ocioso
 } motion_cmd_type_t;
 
 typedef struct {

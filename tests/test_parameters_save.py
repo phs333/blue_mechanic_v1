@@ -132,6 +132,27 @@ class ParametersSaveTests(unittest.TestCase):
         self.assertEqual(t.homed, [True, False, True])
         self.assertTrue(t.in_motion)
 
+    def test_pos_line_carries_z_lock_and_alarm(self):
+        self.state.update_telemetry(z_bloqueado=True, alarme_z_ativo=False)
+        self.client._parse_response_line("@POS C=0.00 A=0.00 Z=0 ZMAX=38400 HOMED=001 MOVING=0 ZLOCK=0 ALARM=1")
+        t = self.state.telemetry
+        self.assertFalse(t.z_bloqueado)
+        self.assertTrue(t.alarme_z_ativo)
+
+    def test_home_z_messages_update_lock_state(self):
+        # Firmware antigo: sem ZLOCK no @POS, o estado vem das mensagens do HOME/alarme
+        self.client._parse_response_line("Home Z falhou: ESP_ERR_TIMEOUT")
+        self.assertTrue(self.state.telemetry.z_bloqueado)
+        self.client._parse_response_line("Home Z finalizado.")
+        self.assertFalse(self.state.telemetry.z_bloqueado)
+        self.client._parse_response_line(
+            "E (1234) blue_mechanic: ALARME: fim de curso Z acionado inesperadamente. Movimentos interrompidos")
+        self.assertTrue(self.state.telemetry.z_bloqueado)
+        self.client._parse_response_line("ALARME Z DESATIVADO. Fim de curso ignorado.")
+        self.assertEqual((self.state.telemetry.z_bloqueado, self.state.telemetry.alarme_z_ativo), (False, False))
+        self.client._parse_response_line("ALARME Z ATIVADO. Fim de curso em vigia.")
+        self.assertTrue(self.state.telemetry.alarme_z_ativo)
+
     def test_config_motion_line(self):
         self.client._parse_response_line("CONFIG MOTION ENGINE=LEGACY LOOKAHEAD=0 JERK C=20.00 A=12.50 Z=8.00")
         p = self.state.parameters

@@ -13,6 +13,11 @@ esp_err_t motion_post_home_axis(app_context_t *ctx, char axis, uint8_t sender_id
  * Pode ser chamada de qualquer tarefa (console, CAN, safety). */
 esp_err_t motion_request_stop(app_context_t *ctx);
 
+/* Jog continuo (controle por mouse): soma incrementos (graus C/A, mm Z) ao alvo. O motion_task
+ * persegue o alvo com a velocidade/aceleracao da NVS, em segmentos de 10 ms no stream RMT,
+ * respeitando limites de C/A (encoder) e o curso/bloqueio do Z. Encerra sozinho quando ocioso. */
+esp_err_t motion_jog_add(app_context_t *ctx, float d_c, float d_a, float d_z);
+
 /* Nivel de velocidade 1..5 (mesma tabela de CAN_OP_SPEED) aplicado aos eixos C/A em uso. */
 esp_err_t motion_apply_speed_level(app_context_t *ctx, uint8_t level);
 

@@ -188,6 +188,16 @@ class CommManager(QObject):
             )
         return False
 
+    @property
+    def supports_jog(self) -> bool:
+        """O backend ativo tem jog contínuo no nó (JOG): hoje só a serial direta com o ESP32."""
+        return bool(getattr(self.active_client, "supports_jog", False))
+
+    def jog(self, d_c: float = 0.0, d_a: float = 0.0, d_z: float = 0.0) -> bool:
+        if self.active_client and self.supports_jog:
+            return self.active_client.jog(d_c, d_a, d_z)
+        return False
+
     def stop_all(self, lasers_off: bool = True) -> bool:
         if self.active_client:
             return self.active_client.stop_all(lasers_off)

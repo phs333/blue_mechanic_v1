@@ -51,4 +51,6 @@ esp_err_t can_bus_init(app_context_t *ctx);
 esp_err_t can_bus_apply_settings(app_context_t *ctx);
 esp_err_t can_bus_send_status(app_context_t *ctx);
 void can_bus_print_status(const app_context_t *ctx);
+/* Autoteste: loopback interno (controlador) e pelo transceiver (sem ACK); restaura o CAN normal. */
+esp_err_t can_bus_self_test(app_context_t *ctx);
 esp_err_t can_send_event(app_context_t *ctx, can_event_t event_id, uint8_t arg0, uint8_t arg1);

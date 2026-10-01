@@ -1,6 +1,8 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -163,6 +165,25 @@ void app_main(void) {
   uart_vfs_dev_use_driver(UART_NUM_0);
   setvbuf(stdin, NULL, _IONBF, 0);
   setvbuf(stdout, NULL, _IONBF, 0);
+
+  // Motivo do ultimo reset: separa queda de alimentacao (brownout/power-on) de reset pelo
+  // pino EN (circuito de auto-reset DTR/RTS do conversor USB) ou travamento (panic/WDT)
+  esp_reset_reason_t rr = esp_reset_reason();
+  static const char *const k_rr_names[] = {
+      [ESP_RST_UNKNOWN] = "DESCONHECIDO", [ESP_RST_POWERON] = "POWER-ON (energizado agora)",
+      [ESP_RST_EXT] = "PINO EXTERNO", [ESP_RST_SW] = "SOFTWARE (esp_restart)",
+      [ESP_RST_PANIC] = "PANIC (travamento)", [ESP_RST_INT_WDT] = "WATCHDOG DE INTERRUPCAO",
+      [ESP_RST_TASK_WDT] = "WATCHDOG DE TAREFA", [ESP_RST_WDT] = "WATCHDOG",
+      [ESP_RST_DEEPSLEEP] = "DEEP SLEEP", [ESP_RST_BROWNOUT] = "BROWNOUT (tensao caiu)",
+      [ESP_RST_SDIO] = "SDIO",
+  };
+  const char *rr_name = ((size_t)rr < sizeof(k_rr_names) / sizeof(k_rr_names[0]) && k_rr_names[rr])
+                            ? k_rr_names[rr] : "OUTRO";
+  printf("BOOT motivo do reset: %s (%d)\n", rr_name, (int)rr);
+  if (rr == ESP_RST_BROWNOUT) {
+    puts("AVISO: a alimentacao de 3V3 caiu abaixo do limite. Verifique a fonte do node "
+         "(ele pode estar dependendo dos 5V do USB).");
+  }
 
   g_app.motion_mutex = xSemaphoreCreateMutex();
   if (g_app.motion_mutex == NULL) {

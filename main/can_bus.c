@@ -913,6 +913,109 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
     }
 }
 
+/* ------------------------------------------------------------------------------------ */
+/* CAN TEST: separa falha do controlador, do transceiver e do barramento entre as placas */
+/* ------------------------------------------------------------------------------------ */
+
+static volatile uint32_t s_test_rx;
+static volatile uint32_t s_test_err;
+
+static bool IRAM_ATTR can_test_rx_cb(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *user_ctx)
+{
+    (void)edata;
+    (void)user_ctx;
+    uint8_t data[TWAI_FRAME_MAX_LEN];
+    twai_frame_t frame = {.buffer = data, .buffer_len = sizeof(data)};
+    if (twai_node_receive_from_isr(handle, &frame) == ESP_OK) {
+        s_test_rx++;
+    }
+    return false;
+}
+
+static bool IRAM_ATTR can_test_err_cb(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *user_ctx)
+{
+    (void)handle;
+    (void)user_ctx;
+    s_test_err |= edata->err_flags.val;
+    return false;
+}
+
+/* Envia 3 frames em modo self-test (sem exigir ACK) + loopback e conta quantos voltam. */
+static esp_err_t can_test_run(uint32_t bitrate, gpio_num_t rx_pin, uint32_t *rx, uint32_t *errs, uint16_t *tec)
+{
+    twai_onchip_node_config_t cfg = {
+        .io_cfg = {.tx = CAN_TX_PIN, .rx = rx_pin, .quanta_clk_out = GPIO_NUM_NC, .bus_off_indicator = GPIO_NUM_NC},
+        .bit_timing = can_get_bit_timing_config(bitrate),
+        .fail_retry_cnt = 0,
+        .tx_queue_depth = 4,
+        .flags = {.enable_self_test = 1, .enable_loopback = 1},
+    };
+    twai_event_callbacks_t cbs = {.on_rx_done = can_test_rx_cb, .on_error = can_test_err_cb};
+    twai_node_handle_t node = NULL;
+    s_test_rx = 0U;
+    s_test_err = 0U;
+    ESP_RETURN_ON_ERROR(twai_new_node_onchip(&cfg, &node), APP_TAG, "CAN TEST: falha ao criar node");
+    esp_err_t err = twai_node_register_event_callbacks(node, &cbs, NULL);
+    if (err == ESP_OK) {
+        err = twai_node_enable(node);
+    }
+    if (err == ESP_OK) {
+        uint8_t data[4] = {'T', 'E', 'S', 'T'};
+        for (int i = 0; i < 3; ++i) {
+            twai_frame_t frame = {.header.id = 0x7F0U, .buffer = data, .buffer_len = sizeof(data)};
+            (void)twai_node_transmit(node, &frame, 20);
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        twai_node_status_t st = {0};
+        if (twai_node_get_info(node, &st, NULL) == ESP_OK) {
+            *tec = st.tx_error_count;
+        }
+        (void)twai_node_disable(node);
+    }
+    (void)twai_node_delete(node);
+    *rx = s_test_rx;
+    *errs = s_test_err;
+    return err;
+}
+
+esp_err_t can_bus_self_test(app_context_t *ctx)
+{
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+    uint32_t bitrate = ctx->settings.can_bitrate ? ctx->settings.can_bitrate : DEFAULT_CAN_BITRATE;
+    can_node_stop(ctx);
+
+    uint32_t rx1 = 0, err1 = 0, rx2 = 0, err2 = 0;
+    uint16_t tec1 = 0, tec2 = 0;
+    // 1) TX e RX no mesmo GPIO: o sinal volta por dentro do chip, sem depender do transceiver
+    esp_err_t e1 = can_test_run(bitrate, CAN_TX_PIN, &rx1, &err1, &tec1);
+    // 2) Pinos reais: o frame sai pelo transceiver e precisa voltar lido do barramento
+    esp_err_t e2 = can_test_run(bitrate, CAN_RX_PIN, &rx2, &err2, &tec2);
+    bool ok1 = (e1 == ESP_OK && rx1 >= 3U);
+    bool ok2 = (e2 == ESP_OK && rx2 >= 3U && err2 == 0U);
+
+    printf("CAN TEST bitrate=%" PRIu32 " TX=GPIO%d RX=GPIO%d\n", bitrate, (int)CAN_TX_PIN, (int)CAN_RX_PIN);
+    printf("CAN TEST 1 controlador (loopback interno): %s rx=%" PRIu32 "/3 erros=0x%02" PRIX32 " TEC=%u\n",
+           ok1 ? "OK" : "FALHOU", rx1, err1, (unsigned)tec1);
+    printf("CAN TEST 2 transceiver (sai e volta pelo barramento): %s rx=%" PRIu32 "/3 erros=0x%02" PRIX32 " TEC=%u\n",
+           ok2 ? "OK" : "FALHOU", rx2, err2, (unsigned)tec2);
+    if (!ok1) {
+        puts("CAN TEST diagnostico: falha no proprio controlador/GPIO do ESP32 (verifique conflito no GPIO39).");
+    } else if (!ok2) {
+        puts("CAN TEST diagnostico: o ESP nao le de volta o que transmite -> transceiver sem alimentacao (3V3/5V), "
+             "pino de standby (S/RS) em nivel alto, TX/RX trocados entre ESP e transceiver, ou GPIO39/40 "
+             "sem contato. Erro 0x02 = bit error (nivel lido diferente do transmitido).");
+    } else {
+        puts("CAN TEST diagnostico: ESP e transceiver OK. Se o Teensy nao recebe ACK, o problema esta no "
+             "barramento entre as placas: CANH/CANL abertos ou invertidos, falta de GND comum ou de "
+             "terminacao 120R nas pontas, ou o transceiver do Teensy (pinos 22=CTX1 / 23=CRX1).");
+    }
+
+    esp_err_t restore = can_bus_apply_settings(ctx);
+    printf("CAN TEST: configuracao normal restaurada (%s).\n", esp_err_to_name(restore));
+    return (ok1 && ok2) ? ESP_OK : ESP_FAIL;
+}
+
 static twai_timing_basic_config_t can_get_bit_timing_config(uint32_t bitrate)
 {
     twai_timing_basic_config_t timing = {

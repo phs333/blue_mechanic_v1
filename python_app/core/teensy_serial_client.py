@@ -117,6 +117,13 @@ class TeensySerialClient(BaseClient):
 
             # USB CDC may reset its line state when the host opens the port.
             time.sleep(0.1)
+            # Ressincroniza o parser de linhas do Teensy: uma linha parcial/estourada de uma
+            # sessão anterior faria o primeiro comando ser descartado como LINE_TOO_LONG.
+            try:
+                with self.lock:
+                    self.serial_port.write(b"\r\n")
+            except Exception:
+                pass
             self.request_status()
             return True
         except Exception as exc:

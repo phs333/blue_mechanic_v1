@@ -90,6 +90,7 @@ void commands_print_help(void)
     puts("DRIVER APPLY");
     puts("CAN STATUS");
     puts("CAN ON / CAN OFF / CAN APPLY");
+    puts("CAN TEST (autoteste: controlador e transceiver; diz onde esta a falha)");
     puts("CAN NODE <1..10>");
     puts("CAN BITRATE <125000|250000|500000|1000000>");
     puts("CAN BASE CMD|STATUS|EVENT <id>");
@@ -1205,6 +1206,11 @@ void commands_handle_line(app_context_t *ctx, const char *line)
 
     if (strcmp(cmd, "CAN STATUS") == 0) {
         can_bus_print_status(ctx);
+        return;
+    }
+
+    if (strcmp(cmd, "CAN TEST") == 0) {
+        (void)can_bus_self_test(ctx);
         return;
     }
 

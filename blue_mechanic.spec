@@ -52,7 +52,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='BlueMechanic',
+    name='BlueMechanic_v2.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

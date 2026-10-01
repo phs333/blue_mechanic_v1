@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
         self.state = state
         self.last_heartbeat_time = 0
         
-        self.setWindowTitle("Blue Mechanic V1 — Control & Telemetry Suite")
+        self.setWindowTitle("Blue Mechanic V2.0 — Control & Telemetry Suite")
         self.resize(1280, 850)
         self.setMinimumSize(1024, 700)
         
@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         lbl_brand.setObjectName("sidebarTitle")
         sidebar_layout.addWidget(lbl_brand)
         
-        lbl_subbrand = QLabel("Hardware Suite v1.0")
+        lbl_subbrand = QLabel("Hardware Suite v2.0")
         lbl_subbrand.setObjectName("sidebarSubTitle")
         sidebar_layout.addWidget(lbl_subbrand)
         

@@ -1,0 +1,5 @@
+# Blue Mechanic V1 - Dependências do Python App e Testes
+PyQt6>=6.8.0
+pyserial>=3.5
+python-can>=4.5.0
+ziglang>=0.14.0

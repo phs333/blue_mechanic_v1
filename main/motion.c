@@ -1935,7 +1935,7 @@ typedef struct {
     float vmax_track;         /* passos/s: maximo do eixo (streaming U, a trajetoria e do TD) */
     mp_track_limits_t lim;
     mp_track_state_t trk;     /* posicao comandada com fracao, velocidade, aceleracao */
-    float lead_s;             /* atraso do pipeline + media movel, compensado no alvo do U */
+    float smooth_delay_s;     /* atraso da media movel, compensado no alvo do U */
     float lo, hi;             /* alvo permitido, em passos relativos ao inicio */
     float target;             /* alvo (passos, relativo) */
     int32_t pos_int;          /* passos inteiros ja emitidos */
@@ -1994,8 +1994,8 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         ax[i].lim.vmax = ax[i].vmax_jog;
         ax[i].lim.accel = accel / ax[i].step_size;
         ax[i].lim.smooth_n = mp_track_smooth_periods(accel, ctx->ext.track_jerk[i], JOG_DT_S);
-        // O segmento planejado agora roda depois do que esta em voo; a media movel atrasa (N-1)/2
-        ax[i].lead_s = JOG_DT_S + 0.5f * (float)(ax[i].lim.smooth_n - 1U) * JOG_DT_S;
+        // A media movel atrasa (N-1)/2 periodos; o atraso do pipeline e medido a cada periodo
+        ax[i].smooth_delay_s = 0.5f * (float)(ax[i].lim.smooth_n - 1U) * JOG_DT_S;
         mp_track_reset(&ax[i].trk, 0.0f);
     }
     // Limites de C/A sobre a posicao do encoder no inicio; sem encoder o eixo fica travado
@@ -2044,6 +2044,11 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
     uint32_t committed = 0, reported = 0, pool_idx = 0;
     int32_t seg_steps[AXIS_COUNT] = {0, 0, 0};
     uint32_t seg_periods = 0;
+    // Fim previsto do ultimo segmento entregue ao RMT. Em baixa velocidade varios periodos
+    // viram um segmento so (calculados de uma vez) e ate 2 segmentos longos ficam em voo:
+    // o alvo do U tem de ser avaliado no instante em que CADA periodo vai executar, senao
+    // fica congelado dentro do bloco e o feedforward passa dele (trepidacao em movimento lento).
+    int64_t inflight_end_us = 0;
 
     while (true) {
         if (motion_abort_hook()) {
@@ -2086,6 +2091,9 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         // pelo atraso do pipeline; a velocidade vai ao seguidor como feedforward
         float target_vel[AXIS_COUNT] = {0.0f, 0.0f, 0.0f};
         int64_t now_us = esp_timer_get_time();
+        // Este periodo comeca quando o que esta em voo acabar, mais os periodos ja acumulados
+        float ahead_s = (float)((inflight_end_us > now_us) ? (inflight_end_us - now_us) : 0) * 1e-6f +
+                        (float)seg_periods * JOG_DT_S;
         for (size_t i = 0; i < AXIS_COUNT; ++i) {
             ax[i].lim.vmax = track_active ? ax[i].vmax_track : ax[i].vmax_jog;
         }
@@ -2101,7 +2109,7 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
                 continue;
             }
             float abs_target = 0.0f, abs_vel = 0.0f;
-            mp_track_feed_eval(&feed[i], now_us, ax[i].lead_s, &abs_target, &abs_vel);
+            mp_track_feed_eval(&feed[i], now_us, ahead_s + ax[i].smooth_delay_s, &abs_target, &abs_vel);
             float scale = (i == AXIS_Z_ID) ? 1.0f : 1.0f / ax[i].step_size;
             float t = (abs_target - start_pos[i]) * scale;
             float v = abs_vel * scale;
@@ -2171,6 +2179,9 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
             for (size_t i = 0; i < AXIS_COUNT; ++i) {
                 seg_ring[committed % 4U][i] = seg_steps[i];
             }
+            int64_t commit_us = esp_timer_get_time();
+            int64_t seg_start_us = (inflight_end_us > commit_us) ? inflight_end_us : commit_us;
+            inflight_end_us = seg_start_us + (int64_t)lroundf(seg_s * 1e6f);
             committed++;
             pool_idx ^= 1U;
             seg_steps[0] = seg_steps[1] = seg_steps[2] = 0;

@@ -44,6 +44,10 @@ static void notify_discarded_cmd(app_context_t *ctx, const motion_cmd_t *cmd, bo
     if (cmd->opcode == 0U || !ctx->state.can_online) {
         return;
     }
+    // Comandos de streaming rapido (MOVE_UNIFIED) descartados por atualizacao mais recente nao geram flood no CAN
+    if (cmd->opcode == CAN_OP_MOVE_UNIFIED && !as_error) {
+        return;
+    }
     (void)can_send_event(ctx, as_error ? CAN_EVT_ERROR : CAN_EVT_DONE, cmd->opcode,
                          (uint8_t)(ESP_ERR_NOT_FINISHED & 0xFF));
 }
@@ -784,6 +788,23 @@ static esp_err_t do_motion_move_axis_force(app_context_t *ctx, char axis, int32_
          esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, abs_steps, start_freq_hz, target_freq_hz, ramp_steps);
          ESP_LOGI(APP_TAG, "MOVE_F %c concluido: %s", axis_upper, esp_err_to_name(rmt_err));
 
+         if (rmt_err == ESP_OK) {
+             float deg_moved = (float)requested_steps * step_size;
+             if (axis_upper == 'C' || axis_upper == 'X') {
+                 ctx->state.pos_c_deg += deg_moved;
+                 float enc = 0.0f;
+                 if (hardware_read_axis_encoder('C', &enc) == ESP_OK && isfinite(enc)) {
+                     ctx->state.pos_c_deg = enc;
+                 }
+             } else {
+                 ctx->state.pos_a_deg += deg_moved;
+                 float enc = 0.0f;
+                 if (hardware_read_axis_encoder('A', &enc) == ESP_OK && isfinite(enc)) {
+                     ctx->state.pos_a_deg = enc;
+                 }
+             }
+         }
+
          xSemaphoreGive(ctx->motion_mutex);
          return rmt_err;
     }
@@ -970,6 +991,7 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
     } else {
         return ESP_ERR_INVALID_ARG;
     }
+    (void)home_deg;
 
     float actual_deg = 0.0f;
     esp_err_t enc_err = hardware_read_axis_encoder(axis_upper, &actual_deg);
@@ -1025,6 +1047,22 @@ static esp_err_t do_motion_move_axis_relative(app_context_t *ctx, char axis, int
 
     esp_err_t rmt_err = hardware_step_pulse_rmt_move(axis_upper, steps_to_execute,
                                                      start_freq_hz, target_freq_hz, ramp_steps);
+
+    if (rmt_err == ESP_OK) {
+        if (axis_upper == 'C' || axis_upper == 'X') {
+            ctx->state.pos_c_deg += permitted_move_deg;
+            float enc = 0.0f;
+            if (hardware_read_axis_encoder('C', &enc) == ESP_OK && isfinite(enc)) {
+                ctx->state.pos_c_deg = enc;
+            }
+        } else {
+            ctx->state.pos_a_deg += permitted_move_deg;
+            float enc = 0.0f;
+            if (hardware_read_axis_encoder('A', &enc) == ESP_OK && isfinite(enc)) {
+                ctx->state.pos_a_deg = enc;
+            }
+        }
+    }
 
     xSemaphoreGive(ctx->motion_mutex);
     return rmt_err;
@@ -1412,6 +1450,9 @@ static bool stream_needs_encoder_read(const motion_cmd_t *cmd, const stream_pred
 static void stream_send_event(app_context_t *ctx, uint8_t opcode, esp_err_t err)
 {
     if (opcode != 0U && ctx->state.can_online) {
+        if (opcode == CAN_OP_MOVE_UNIFIED && err == ESP_OK) {
+            return; // Streaming unificado de alta taxa nao inunda CAN com DONE
+        }
         (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, opcode, (uint8_t)err);
     }
 }
@@ -1525,6 +1566,20 @@ static esp_err_t stream_prepare(app_context_t *ctx, const motion_cmd_t *cmd, str
         float vmax = speed / step_size;
         if (vmax > (float)RMT_MAX_STEP_FREQ_HZ) vmax = (float)RMT_MAX_STEP_FREQ_HZ;
         float vfloor = axis_start_speed(ctx, i) / step_size;
+
+        // Suavizacao de micro-deslocamentos: elimina o "soquinho" no Z e rotativos
+        uint32_t abs_steps = (uint32_t)abs(steps[i]);
+        if (abs_steps > 0 && abs_steps < 48) {
+            float v_reach = sqrtf(2.0f * (accel / step_size) * (float)abs_steps);
+            if (vmax > v_reach) {
+                vmax = v_reach;
+            }
+            float scale = (float)abs_steps / 48.0f;
+            vfloor *= (scale * scale);
+            if (vfloor < 10.0f) {
+                vfloor = 10.0f;
+            }
+        }
         if (vfloor > vmax) vfloor = vmax;
         item->req.steps[i] = steps[i];
         item->req.vmax[i] = vmax;
@@ -1674,6 +1729,34 @@ static esp_err_t motion_stream_chain(app_context_t *ctx, const motion_cmd_t *fir
         pool_idx ^= 1U;
 
         if (!has_next) {
+            // Se o hardware ainda esta executando o movimento atual, aguarda ate 15 ms
+            // para absorver o proximo comando de streaming continuo sem interromper o hardware stream:
+            int64_t t0 = esp_timer_get_time();
+            while (hardware_stream_completed() < committed && (esp_timer_get_time() - t0) < 15000LL) {
+                if (xQueuePeek(ctx->motion_queue, &peek, 0) == pdTRUE &&
+                    motion_cmd_streamable(&peek) && peek.stop_gen == s_stop_gen) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+
+            if (xQueuePeek(ctx->motion_queue, &peek, 0) == pdTRUE &&
+                motion_cmd_streamable(&peek) && peek.stop_gen == s_stop_gen &&
+                xQueueReceive(ctx->motion_queue, &peek, 0) == pdTRUE) {
+                stream_prediction_t pred_next = pred;
+                esp_err_t perr = stream_prepare(ctx, &peek, &pred_next, &nxt);
+                if (perr == ESP_OK && !nxt.empty) {
+                    pred = pred_next;
+                    entry_rate = 0.0f;
+                    cur = nxt;
+                    continue;
+                } else {
+                    pred = pred_next;
+                    have_trailing = true;
+                    trailing = peek;
+                    trailing_err = perr;
+                }
+            }
             break;
         }
         // A saida efetiva pode ter sido limitada pelo planejador: entrada do proximo na mesma proporcao
@@ -2156,7 +2239,9 @@ static void motion_task(void *arg)
             }
 
             if (can_online && cmd.opcode != 0 && !events_sent) {
-                (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, cmd.opcode, (uint8_t)err);
+                if (cmd.opcode != CAN_OP_MOVE_UNIFIED || err != ESP_OK) {
+                    (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_DONE : CAN_EVT_ERROR, cmd.opcode, (uint8_t)err);
+                }
             }
         }
     }
@@ -2251,6 +2336,25 @@ static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd)
         motion_cmd_t dropped;
         while (xQueueReceive(ctx->motion_queue, &dropped, 0) == pdTRUE) {
             notify_discarded_cmd(ctx, &dropped, true);
+        }
+    }
+    // Para movimentos sincronizados continuos (ex: TouchDesigner / CAN_OP_MOVE_UNIFIED):
+    // Se ja houver comandos MOVE_SYNC pendentes na fila aguardando execucao,
+    // descarta os intermediarios obsoletos para manter a latencia minima (tempo real).
+    if (cmd->type == MOTION_CMD_MOVE_SYNC) {
+        motion_cmd_t peek_cmd;
+        UBaseType_t count = uxQueueMessagesWaiting(ctx->motion_queue);
+        for (UBaseType_t i = 0; i < count; i++) {
+            if (xQueuePeek(ctx->motion_queue, &peek_cmd, 0) == pdTRUE) {
+                if (peek_cmd.type == MOTION_CMD_MOVE_SYNC) {
+                    motion_cmd_t discarded;
+                    if (xQueueReceive(ctx->motion_queue, &discarded, 0) == pdTRUE) {
+                        notify_discarded_cmd(ctx, &discarded, false);
+                    }
+                } else {
+                    break;
+                }
+            }
         }
     }
     // If the new command reverses direction on the same axis, purge stale opposing moves in queue

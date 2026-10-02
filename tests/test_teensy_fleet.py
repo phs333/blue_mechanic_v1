@@ -247,7 +247,7 @@ class TeensyFleetTelemetryTests(unittest.TestCase):
         # Envia coordenadas absolutas C=45.2, A=-12.5, Z=150.00, Laser1=2048, Laser2=1024
         result = self.client.send_unified(45.2, -12.5, 150.0, laser1=2048, laser2=1024)
         self.assertTrue(result)
-        self.assertEqual(sent[-1], "U 2 45.2 -12.5 150.00 2048 1024")
+        self.assertEqual(sent[-1], "U 2 45.20 -12.50 150.00 2048 1024")
 
     def test_send_unified_broadcast_and_force(self):
         sent = []
@@ -256,7 +256,7 @@ class TeensyFleetTelemetryTests(unittest.TestCase):
         # Broadcast para todos os nós (node=0) com force_no_encoder=True (UF)
         result = self.client.send_unified(0.0, 0.0, 0.0, laser1=4095, laser2=4095, force_no_encoder=True, node_id=0)
         self.assertTrue(result)
-        self.assertEqual(sent[-1], "UF 0 0.0 0.0 0.00 4095 4095")
+        self.assertEqual(sent[-1], "UF 0 0.00 0.00 0.00 4095 4095")
 
     def test_send_unified_clamps_laser_values(self):
         sent = []
@@ -264,7 +264,7 @@ class TeensyFleetTelemetryTests(unittest.TestCase):
 
         # Lasers acima de 4095 ou negativos devem ser clampados
         self.client.send_unified(10.0, 20.0, 30.0, laser1=5000, laser2=-50, node_id=4)
-        self.assertEqual(sent[-1], "U 4 10.0 20.0 30.00 4095 0")
+        self.assertEqual(sent[-1], "U 4 10.00 20.00 30.00 4095 0")
 
     def test_move_sync_deg_formats_absolute_command(self):
         sent = []
@@ -285,7 +285,7 @@ class TeensyFleetTelemetryTests(unittest.TestCase):
         self.comm.active_client = self.client
 
         self.comm.send_unified(25.0, -10.0, 100.0, laser1=1000, laser2=2000, node_id=3)
-        self.assertEqual(sent[-1], "U 3 25.0 -10.0 100.00 1000 2000")
+        self.assertEqual(sent[-1], "U 3 25.00 -10.00 100.00 1000 2000")
 
         self.comm.move_sync_deg(10.0, 20.0, 30.0, node_id=3)
         self.assertEqual(sent[-1], "MS 3 10.0 20.0 30.00")

@@ -1,6 +1,7 @@
 #include "hardware.h"
 
 #include <ctype.h>
+#include <math.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -1359,7 +1360,15 @@ static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val, int32
                 if (ticks_from_home != NULL) {
                     update_encoder_tracker(encoder_index, raw);
                     const encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
-                    *ticks_from_home = (tracker->turns * 4096) + ((int32_t)raw - (int32_t)tracker->home_raw);
+                    int32_t diff_raw = (int32_t)raw - (int32_t)tracker->home_raw;
+                    int32_t raw_counts_in_turn = diff_raw;
+                    while (raw_counts_in_turn < 0) {
+                        raw_counts_in_turn += 4096;
+                    }
+                    while (raw_counts_in_turn >= 4096) {
+                        raw_counts_in_turn -= 4096;
+                    }
+                    *ticks_from_home = (tracker->turns * 4096) + raw_counts_in_turn;
                 }
             }
             xSemaphoreGive(s_i2c_mutex);
@@ -1422,29 +1431,30 @@ void hardware_print_diag(void)
 static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw)
 {
     encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
-    if (!tracker->initialized) {
-        tracker->last_raw = curr_raw;
-        tracker->initialized = true;
-        int32_t diff = (int32_t)curr_raw - (int32_t)tracker->home_raw;
-        if (diff > 2048) {
-            tracker->turns = -1;
-        } else if (diff < -2048) {
-            tracker->turns = 1;
-        } else {
-            tracker->turns = 0;
+    int32_t diff_raw = (int32_t)curr_raw - (int32_t)tracker->home_raw;
+    int32_t raw_counts_in_turn = diff_raw;
+    while (raw_counts_in_turn < 0) {
+        raw_counts_in_turn += 4096;
+    }
+    while (raw_counts_in_turn >= 4096) {
+        raw_counts_in_turn -= 4096;
+    }
+    float raw_turn_deg = ((float)raw_counts_in_turn * 360.0f) / 4096.0f;
+
+    float expected_deg = 0.0f;
+    if (s_hw_ctx != NULL) {
+        expected_deg = (encoder_index == 0) ? s_hw_ctx->state.pos_c_deg : s_hw_ctx->state.pos_a_deg;
+        if (!isfinite(expected_deg)) {
+            expected_deg = 0.0f;
         }
-        return;
+    } else if (tracker->initialized) {
+        expected_deg = (float)tracker->turns * 360.0f + raw_turn_deg;
     }
 
-    int32_t diff = (int32_t)curr_raw - (int32_t)tracker->last_raw;
-    if (diff < -2048) {
-        // Passou de 4095 para 0 no sentido horario (+)
-        tracker->turns++;
-    } else if (diff > 2048) {
-        // Passou de 0 para 4095 no sentido anti-horario (-)
-        tracker->turns--;
-    }
+    int32_t turns = (int32_t)lroundf((expected_deg - raw_turn_deg) / 360.0f);
+    tracker->turns = turns;
     tracker->last_raw = curr_raw;
+    tracker->initialized = true;
 }
 
 void hardware_update_encoders(void)
@@ -1504,8 +1514,10 @@ esp_err_t hardware_encoder_set_zero(app_context_t *ctx, char axis)
         ctx->settings.home_raw[idx] = curr_raw;
         if (idx == 0) {
             ctx->settings.home_c_deg = 0.0f;
+            ctx->state.pos_c_deg = 0.0f;
         } else {
             ctx->settings.home_a_deg = 0.0f;
+            ctx->state.pos_a_deg = 0.0f;
         }
         storage_request_save(&ctx->settings);
     }

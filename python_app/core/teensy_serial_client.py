@@ -628,8 +628,8 @@ class TeensySerialClient(BaseClient):
     ) -> bool:
         """Envia comando unificado com coordenadas absolutas dos 3 eixos e 2 lasers (TouchDesigner).
 
-        :param c_deg: Coordenada angular absoluta do eixo C em graus (-3276.7 a +3276.7).
-        :param a_deg: Coordenada angular absoluta do eixo A em graus (-3276.7 a +3276.7).
+        :param c_deg: Coordenada angular absoluta do eixo C em graus (-2621.4 a +2621.4).
+        :param a_deg: Coordenada angular absoluta do eixo A em graus (-2621.4 a +2621.4).
         :param z_mm: Coordenada linear absoluta do eixo Z em mm (0.00 a 327.67).
         :param laser1: Nível PWM 12-bit do Laser 1 (0 a 4095).
         :param laser2: Nível PWM 12-bit do Laser 2 (0 a 4095).
@@ -642,7 +642,7 @@ class TeensySerialClient(BaseClient):
         l2 = max(0, min(4095, int(laser2)))
         command = "UF" if force_no_encoder else "U"
         return self.send_raw(
-            f"{command} {target} {float(c_deg):.1f} {float(a_deg):.1f} {float(z_mm):.2f} {l1} {l2}"
+            f"{command} {target} {float(c_deg):.2f} {float(a_deg):.2f} {float(z_mm):.2f} {l1} {l2}"
         )
 
     def set_laser(self, laser_index: int, level: int) -> bool:

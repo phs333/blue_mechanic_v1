@@ -57,6 +57,8 @@ static float can_decode_float_le(const uint8_t *data);
 static int16_t can_decode_i16_le(const uint8_t *data);
 static int32_t can_sync_angle_to_steps(const app_context_t *ctx, size_t axis_index,
                                        int16_t angle_deci_deg);
+static int32_t can_sync_angle_to_steps_centi(const app_context_t *ctx, size_t axis_index,
+                                             int32_t angle_centi_deg);
 static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_centi_mm);
 static bool can_speed_is_valid(char axis, float speed);
 static bool can_accel_is_valid(char axis, float accel);
@@ -415,7 +417,6 @@ static esp_err_t can_send_payload(app_context_t *ctx, uint16_t frame_id, const u
     };
 
     ESP_RETURN_ON_ERROR(twai_node_transmit(s_node, &frame, CAN_TX_TIMEOUT_MS), APP_TAG, "Falha ao enfileirar TX TWAI");
-    ESP_RETURN_ON_ERROR(twai_node_transmit_wait_all_done(s_node, CAN_TX_TIMEOUT_MS), APP_TAG, "Timeout TX TWAI");
     if (xSemaphoreTake(ctx->state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         ctx->state.can_tx_count++;
         xSemaphoreGive(ctx->state_mutex);
@@ -511,6 +512,23 @@ static int32_t can_sync_angle_to_steps(const app_context_t *ctx, size_t axis_ind
     }
 
     float angle_deg = (float)angle_deci_deg / 10.0f;
+    return (int32_t)lroundf(angle_deg * (float)steps_per_rev *
+                           (float)microsteps / 360.0f);
+}
+
+static int32_t can_sync_angle_to_steps_centi(const app_context_t *ctx, size_t axis_index,
+                                             int32_t angle_centi_deg)
+{
+    uint16_t steps_per_rev = ctx->settings.steps_per_rev[axis_index];
+    uint16_t microsteps = ctx->settings.tmc_microsteps[axis_index];
+    if (steps_per_rev == 0U) {
+        steps_per_rev = 200U;
+    }
+    if (microsteps == 0U) {
+        microsteps = 16U;
+    }
+
+    float angle_deg = (float)angle_centi_deg / 100.0f;
     return (int32_t)lroundf(angle_deg * (float)steps_per_rev *
                            (float)microsteps / 360.0f);
 }
@@ -795,18 +813,43 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
     case CAN_OP_MOVE_SYNC:
     case CAN_OP_MOVE_UNIFIED:
         if (len == 8U) {
-            int16_t angle_c_deci = can_decode_i16_le(&buf[1]);
-            int16_t angle_a_deci = can_decode_i16_le(&buf[3]);
-            int16_t distance_z_centi_mm = can_decode_i16_le(&buf[5]);
             uint8_t flags = buf[7];
+            int32_t angle_c_centi = 0;
+            int32_t angle_a_centi = 0;
+            int16_t angle_c_deci = 0;
+            int16_t angle_a_deci = 0;
+            int16_t distance_z_centi_mm = can_decode_i16_le(&buf[5]);
             float speed_c = -1.0f;
             float speed_a = -1.0f;
             float speed_z = -1.0f;
             float accel = -1.0f;
 
-            if ((flags & ~0x01U) != 0U) {
-                err = ESP_ERR_INVALID_ARG;
+            if (buf[0] == CAN_OP_MOVE_UNIFIED) {
+                // Decodifica angulos de 19 bits assinados em centesimos de grau (+-2621.43 deg)
+                // Byte 7: bit0=force_no_encoder, bits 1..3=C bits 16..18, bits 4..6=A bits 16..18, bit 7=reservado (0)
+                if ((flags & 0x80U) != 0U) {
+                    err = ESP_ERR_INVALID_ARG;
+                }
+                uint32_t c_u32 = (uint32_t)buf[1] | ((uint32_t)buf[2] << 8) | (((uint32_t)(flags >> 1) & 0x07U) << 16);
+                if ((c_u32 & (1U << 18)) != 0U) {
+                    c_u32 |= ~0x7FFFFU;
+                }
+                angle_c_centi = (int32_t)c_u32;
+
+                uint32_t a_u32 = (uint32_t)buf[3] | ((uint32_t)buf[4] << 8) | (((uint32_t)(flags >> 4) & 0x07U) << 16);
+                if ((a_u32 & (1U << 18)) != 0U) {
+                    a_u32 |= ~0x7FFFFU;
+                }
+                angle_a_centi = (int32_t)a_u32;
             } else {
+                if ((flags & ~0x01U) != 0U) {
+                    err = ESP_ERR_INVALID_ARG;
+                }
+                angle_c_deci = can_decode_i16_le(&buf[1]);
+                angle_a_deci = can_decode_i16_le(&buf[3]);
+            }
+
+            if (err == ESP_OK) {
                 float *sync_speeds[AXIS_COUNT] = {&speed_c, &speed_a, &speed_z};
                 for (size_t i = 0; i < AXIS_COUNT; ++i) {
                     if (s_motion_profiles[i].valid) {
@@ -823,8 +866,15 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 }
             }
 
-            int32_t steps_c = can_sync_angle_to_steps(ctx, AXIS_C_ID, angle_c_deci);
-            int32_t steps_a = can_sync_angle_to_steps(ctx, AXIS_A_ID, angle_a_deci);
+            int32_t steps_c;
+            int32_t steps_a;
+            if (buf[0] == CAN_OP_MOVE_UNIFIED) {
+                steps_c = can_sync_angle_to_steps_centi(ctx, AXIS_C_ID, angle_c_centi);
+                steps_a = can_sync_angle_to_steps_centi(ctx, AXIS_A_ID, angle_a_centi);
+            } else {
+                steps_c = can_sync_angle_to_steps(ctx, AXIS_C_ID, angle_c_deci);
+                steps_a = can_sync_angle_to_steps(ctx, AXIS_A_ID, angle_a_deci);
+            }
             int32_t steps_z = can_sync_z_to_steps(ctx, distance_z_centi_mm);
             xSemaphoreGive(ctx->state_mutex);
 
@@ -834,8 +884,12 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                                             (flags & 0x01U) != 0U,
                                             ctx->settings.node_id, buf[0]);
             }
-            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
-                                 buf[0], (uint8_t)err);
+            // Para CAN_OP_MOVE_UNIFIED (streaming continuo do TouchDesigner), suprime CAN_EVT_ACK
+            // de sucesso para nao saturar o barramento CAN nem gerar overhead reverso no canal USB.
+            if (buf[0] != CAN_OP_MOVE_UNIFIED || err != ESP_OK) {
+                (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
+                                     buf[0], (uint8_t)err);
+            }
         } else {
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, CAN_EVT_ERROR, buf[0],

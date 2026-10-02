@@ -204,6 +204,34 @@ class DeviceState(QObject):
                 if 1 <= node_id <= 10:
                     self.update_node_telemetry(node_id, **kwargs)
 
+    def update_link_telemetry(self, **kwargs):
+        """Atualiza a telemetria do node focado SEM tratá-la como resposta do node.
+
+        update_telemetry() espelha os campos no node focado e, como qualquer atualização
+        de node, renova last_seen/online. Para reset local (conectar, desconectar, link
+        perdido) isso marcava o node focado como online sem que ele tivesse respondido.
+        """
+        self._in_node_telemetry_update = True
+        try:
+            self.update_telemetry(**kwargs)
+        finally:
+            self._in_node_telemetry_update = False
+
+    def mark_all_nodes_offline(self):
+        """Fim da sessão com o barramento: nenhum node pode continuar aparecendo online."""
+        for node_id in range(1, 11):
+            node_t = self.nodes_telemetry.get(node_id)
+            if node_t is None:
+                continue
+            was_online = node_t.online or node_t.last_heartbeat_timestamp > 0 or node_t.last_seen_timestamp > 0
+            node_t.online = False
+            node_t.can_online = False
+            node_t.last_heartbeat_timestamp = 0.0
+            node_t.last_seen_timestamp = 0.0
+            if was_online:
+                self.node_telemetry_updated.emit(node_id, node_t)
+        self.nodes_summary_updated.emit(0)
+
     def update_node_telemetry(self, node_id: int, **kwargs):
         """Update telemetry for a specific node (1..10) in the fleet."""
         if not (1 <= node_id <= 10):

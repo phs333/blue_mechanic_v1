@@ -50,6 +50,7 @@ class TeensySerialClient(BaseClient):
         self._last_actuation_time: float = 0.0
         self._last_tx_time: float = 0.0
         self._ota_active: bool = False
+        self._session: int = 0  # incrementa a cada conexao: threads antigas nao mexem na nova
         self._relay = MainThreadRelay()
 
     @property
@@ -111,13 +112,24 @@ class TeensySerialClient(BaseClient):
             self.serial_port.dtr = True
             self.serial_port.rts = True
 
+            # USB CDC may reset its line state when the host opens the port.
+            time.sleep(0.1)
+            # Com a COM fechada o Teensy continua enfileirando HEARTBEAT/POS no buffer USB; ao
+            # abrir, essas linhas antigas chegariam de uma vez e marcariam como online nodes
+            # que podem nem estar mais no barramento.
+            try:
+                self.serial_port.reset_input_buffer()
+            except Exception:
+                pass
+
             self.port_name = port
             self.baudrate = baudrate
             self.node_id = selected_node
             self.is_connected = True
+            self._session += 1
             self.stop_event.clear()
 
-            self.reader_thread = threading.Thread(target=self._rx_loop, daemon=True)
+            self.reader_thread = threading.Thread(target=self._rx_loop, args=(self._session,), daemon=True)
             self.reader_thread.start()
             self.poll_thread = threading.Thread(target=self._auto_poll_loop, daemon=True)
             self.poll_thread.start()
@@ -128,10 +140,8 @@ class TeensySerialClient(BaseClient):
             self.state.set_connection_status(True, label)
             # A porta USB aberta não garante que o barramento CAN ou o node
             # estejam online; o bit CAN_ONLINE da resposta STATUS é a fonte.
-            self.state.update_telemetry(can_online=False)
+            self.state.update_link_telemetry(can_online=False)
 
-            # USB CDC may reset its line state when the host opens the port.
-            time.sleep(0.1)
             # Ressincroniza o parser de linhas do Teensy: uma linha parcial/estourada de uma
             # sessão anterior faria o primeiro comando ser descartado como LINE_TOO_LONG.
             try:
@@ -177,12 +187,24 @@ class TeensySerialClient(BaseClient):
         self.is_connected = False
         self._ota_active = False
         self.state.set_connection_status(False, "Teensy USB/CAN")
-        self.state.update_telemetry(
+        self.state.update_link_telemetry(
             can_online=False,
             pos_c_valid=False,
             pos_a_valid=False,
             temp_valid=False,
         )
+        self.state.mark_all_nodes_offline()
+
+    def _on_link_lost(self, session: int, reason: str) -> None:
+        """COM caiu (cabo, Teensy reiniciado): na thread da interface, uma única vez e só se a
+        sessão ainda for a atual (a thread de uma conexão anterior não derruba a nova)."""
+        if session != self._session or not self.is_connected:
+            return
+        self.state.error_occurred.emit(f"Conexão com o Teensy USB/CAN perdida: {reason}")
+        self.disconnect()
+
+    def _post_link_lost(self, args) -> None:
+        self._on_link_lost(*args)
 
     def send_raw(self, data: str) -> bool:
         if not self.is_connected or not self.serial_port:
@@ -217,13 +239,15 @@ class TeensySerialClient(BaseClient):
             )
             return False
 
-    def _rx_loop(self) -> None:
+    def _rx_loop(self, session: int) -> None:
+        # Esta thread so le bytes: estado e sinais da UI ficam na thread da interface (relay)
+        port = self.serial_port
         line_buffer = bytearray()
         while not self.stop_event.is_set():
-            if not self.serial_port or not self.serial_port.is_open:
+            if port is None or not port.is_open:
                 break
             try:
-                data = self.serial_port.read(self.serial_port.in_waiting or 1)
+                data = port.read(port.in_waiting or 1)
                 if not data:
                     time.sleep(0.01)
                     continue
@@ -235,17 +259,14 @@ class TeensySerialClient(BaseClient):
                     if text:
                         # Parse e alterações de estado na thread da interface
                         self._relay.post(self._handle_rx_line, text)
-            except serial.SerialException as exc:
-                self.state.error_occurred.emit(
-                    f"Conexão com o Teensy USB/CAN perdida: {exc}"
-                )
-                break
+                if len(line_buffer) > 4096:
+                    line_buffer.clear()  # lixo sem fim de linha: nao cresce sem limite
+            except (serial.SerialException, OSError) as exc:
+                if not self.stop_event.is_set():
+                    self._relay.post(self._post_link_lost, (session, str(exc)))
+                return
             except Exception:
                 time.sleep(0.01)
-
-        self.is_connected = False
-        self.state.set_connection_status(False, "Teensy USB/CAN")
-        self.state.update_telemetry(can_online=False)
 
     def _auto_poll_loop(self) -> None:
         """
@@ -406,6 +427,11 @@ class TeensySerialClient(BaseClient):
                 return
 
             if message_type == "PONG" and len(fields) == 4:
+                node = int(fields[1])
+                if 1 <= node <= 10:
+                    # Resposta ao ping: prova que o node esta vivo no CAN
+                    self.node_offline_until.pop(node, None)
+                    self.state.update_node_telemetry(node, last_seen_timestamp=time.time())
                 return
 
             if message_type in ("ACK", "DONE") and len(fields) == 3:
@@ -466,6 +492,8 @@ class TeensySerialClient(BaseClient):
                 if 1 <= node <= 10:
                     node_t = self.state.get_node_telemetry(node)
                     node_t.error_count += 1
+                    # Quem responde ERROR esta vivo (ex.: encoder offline): nao some do painel
+                    self.state.update_node_telemetry(node, last_seen_timestamp=time.time())
                 self.state.error_occurred.emit(
                     f"Teensy/CAN Node {node}: comando {opcode_name} falhou: {error_name}"
                 )

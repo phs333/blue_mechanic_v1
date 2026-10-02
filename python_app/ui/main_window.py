@@ -535,8 +535,10 @@ class MainWindow(QMainWindow):
             self.lbl_status_hb.setText(f"💓 Heartbeat: Sem sinal ({int(time.time() - self.last_heartbeat_time)}s)")
             self.lbl_status_hb.setStyleSheet("color: #f87171; font-size: 11px; margin-right: 15px;")
 
-        # Telemetry is event-driven (ESP32 pushes updates on move finish / parameter changes)
-        pass
+        # Nodes que saem por timeout (sem heartbeat) nao geram sinal: recalcula a contagem
+        # aqui, senao "Nos Online" ficava congelado no ultimo valor
+        if self.combo_backend.currentIndex() == 1:
+            self._on_nodes_summary_updated(self.state.get_online_nodes_count())
 
     def closeEvent(self, event):
         try:

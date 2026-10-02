@@ -109,12 +109,13 @@ class CanClient(BaseClient):
             
         self.is_connected = False
         self.state.set_connection_status(False, "PeakCAN")
-        self.state.update_telemetry(
+        self.state.update_link_telemetry(
             can_online=False,
             pos_c_valid=False,
             pos_a_valid=False,
             temp_valid=False,
         )
+        self.state.mark_all_nodes_offline()
 
     def send_frame(self, arbitration_id: int, data: Union[bytearray, bytes], desc: str = "", log: bool = True) -> bool:
         if not self.is_connected or not self.bus:

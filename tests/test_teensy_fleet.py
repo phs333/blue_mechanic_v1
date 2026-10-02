@@ -187,6 +187,109 @@ class TeensyFleetTelemetryTests(unittest.TestCase):
         self.client._parse_response_line("TEENSY_ERROR CAN_TX_FAILED 1 -3")
         self.assertTrue(self.state.is_node_online(1))
 
+    def test_poll_all_nodes_queries_all_ten_nodes(self):
+        commands_sent = []
+        self.comm.send_raw = lambda cmd: commands_sent.append(cmd) or True
+        dash = TeensyDashboardView(self.comm, self.state)
+
+        # Even when all nodes are offline, _poll_all_nodes MUST query all 10 nodes
+        dash._poll_all_nodes()
+        expected = [f"R {i}" for i in range(1, 11)]
+        self.assertEqual(commands_sent, expected)
+
+    def test_request_status_all_sends_commands_to_all_ten_nodes(self):
+        raw_commands = []
+        self.client.send_raw = lambda cmd: raw_commands.append(cmd) or True
+
+        result = self.client.request_status_all()
+        self.assertTrue(result)
+        expected = [f"R {i}" for i in range(1, 11)]
+        self.assertEqual(raw_commands, expected)
+
+    def test_pos_parsing_handles_nan_and_valid_values(self):
+        # Node 2 sends POS with nan angles (uncalibrated / read error) and -99.9 temp
+        self.client._parse_response_line("POS 2 nan nan 450 -99.9")
+        t2 = self.state.get_node_telemetry(2)
+        self.assertFalse(t2.pos_c_valid)
+        self.assertFalse(t2.pos_a_valid)
+        self.assertEqual(t2.pos_z_steps, 450)
+        self.assertFalse(t2.temp_valid)
+        self.assertTrue(self.state.is_node_online(2))
+
+        # Node 2 sends valid POS with negative angle and 31.5 C
+        self.client._parse_response_line("POS 2 -15.5 42.0 1200 31.5")
+        self.assertTrue(t2.pos_c_valid)
+        self.assertAlmostEqual(t2.pos_c_deg, -15.5)
+        self.assertTrue(t2.pos_a_valid)
+        self.assertAlmostEqual(t2.pos_a_deg, 42.0)
+        self.assertEqual(t2.pos_z_steps, 1200)
+        self.assertTrue(t2.temp_valid)
+        self.assertAlmostEqual(t2.temperature_c, 31.5)
+
+    def test_device_state_update_telemetry_syncs_with_nodes_telemetry(self):
+        self.state.parameters.node_id = 3
+        self.state.update_telemetry(
+            pos_c_deg=35.0,
+            pos_c_valid=True,
+            temperature_c=28.0,
+            temp_valid=True,
+        )
+        t3 = self.state.get_node_telemetry(3)
+        self.assertAlmostEqual(t3.pos_c_deg, 35.0)
+        self.assertTrue(t3.pos_c_valid)
+        self.assertAlmostEqual(t3.temperature_c, 28.0)
+        self.assertTrue(t3.temp_valid)
+    def test_send_unified_formats_command_correctly(self):
+        sent = []
+        self.client.send_raw = lambda cmd: sent.append(cmd) or True
+        self.client.target_node = 2
+
+        # Envia coordenadas absolutas C=45.2, A=-12.5, Z=150.00, Laser1=2048, Laser2=1024
+        result = self.client.send_unified(45.2, -12.5, 150.0, laser1=2048, laser2=1024)
+        self.assertTrue(result)
+        self.assertEqual(sent[-1], "U 2 45.2 -12.5 150.00 2048 1024")
+
+    def test_send_unified_broadcast_and_force(self):
+        sent = []
+        self.client.send_raw = lambda cmd: sent.append(cmd) or True
+
+        # Broadcast para todos os nós (node=0) com force_no_encoder=True (UF)
+        result = self.client.send_unified(0.0, 0.0, 0.0, laser1=4095, laser2=4095, force_no_encoder=True, node_id=0)
+        self.assertTrue(result)
+        self.assertEqual(sent[-1], "UF 0 0.0 0.0 0.00 4095 4095")
+
+    def test_send_unified_clamps_laser_values(self):
+        sent = []
+        self.client.send_raw = lambda cmd: sent.append(cmd) or True
+
+        # Lasers acima de 4095 ou negativos devem ser clampados
+        self.client.send_unified(10.0, 20.0, 30.0, laser1=5000, laser2=-50, node_id=4)
+        self.assertEqual(sent[-1], "U 4 10.0 20.0 30.00 4095 0")
+
+    def test_move_sync_deg_formats_absolute_command(self):
+        sent = []
+        self.client.send_raw = lambda cmd: sent.append(cmd) or True
+        self.client.target_node = 5
+
+        result = self.client.move_sync_deg(30.5, -5.0, 80.25)
+        self.assertTrue(result)
+        self.assertEqual(sent[-1], "MS 5 30.5 -5.0 80.25")
+
+        # Com force_no_encoder
+        self.client.move_sync_deg(15.0, 10.0, 50.0, force_no_encoder=True)
+        self.assertEqual(sent[-1], "MSF 5 15.0 10.0 50.00")
+
+    def test_comm_manager_forwards_unified_and_move_sync_deg(self):
+        sent = []
+        self.client.send_raw = lambda cmd: sent.append(cmd) or True
+        self.comm.active_client = self.client
+
+        self.comm.send_unified(25.0, -10.0, 100.0, laser1=1000, laser2=2000, node_id=3)
+        self.assertEqual(sent[-1], "U 3 25.0 -10.0 100.00 1000 2000")
+
+        self.comm.move_sync_deg(10.0, 20.0, 30.0, node_id=3)
+        self.assertEqual(sent[-1], "MS 3 10.0 20.0 30.00")
+
 
 if __name__ == "__main__":
     unittest.main()

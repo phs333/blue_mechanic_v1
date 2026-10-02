@@ -70,9 +70,10 @@ void commands_print_help(void)
     puts("VELOCIDADE <1..5> (nivel de velocidade de C/A em uso, nao salvo na NVS)");
     puts("ACCEL C|A <deg/s^2> | Z <mm/s^2>");
     puts("SPEED_MAX C|A|Z <value> | ACCEL_MAX C|A|Z <value>");
-    puts("MOVE C|A|Z <steps> [S<speed>] [F<accel>]");
-    puts("MOVE_F C|A|Z <steps> [S<speed>] [F<accel>]");
-    puts("MOVE_SYNC C <steps_c> A <steps_a> Z <steps_z> [S<speed>] [F<accel>]");
+    puts("MOVE C|A|Z <target_steps> [S<speed>] [F<accel>] (alvo absoluto em passos)");
+    puts("MOVE_F C|A|Z <target_steps> [S<speed>] [F<accel>] (alvo absoluto malha aberta)");
+    puts("MOVE_SYNC C <steps_c> A <steps_a> Z <steps_z> [S<speed>] [F<accel>] (coordenadas absolutas)");
+    puts("U / UNIFIED <c_deg> <a_deg> <z_mm> <laser1> <laser2> (comando unificado TouchDesigner)");
     puts("JOG C <graus> A <graus> Z <mm> (incrementa o alvo do jog continuo; limites e velocidade da NVS)");
     puts("LASER 1|2 ON|OFF|0..100%|0..4095");
     puts("FAN 0|1|AUTO");
@@ -1534,6 +1535,52 @@ void commands_handle_line(app_context_t *ctx, const char *line)
             printf("ERRO no MOVE_SYNC: %s\n", esp_err_to_name(err));
         }
         return;
+    }
+
+    if (strncmp(cmd, "U ", 2) == 0 || strncmp(cmd, "UNIFIED ", 8) == 0) {
+        const char *p = (cmd[0] == 'U' && cmd[1] == ' ') ? (cmd + 2) : (cmd + 8);
+        float c_deg = 0.0f, a_deg = 0.0f, z_mm = 0.0f;
+        unsigned laser1 = 0, laser2 = 0;
+        unsigned node_dummy = 0;
+        int parsed = sscanf(p, "%u %f %f %f %u %u", &node_dummy, &c_deg, &a_deg, &z_mm, &laser1, &laser2);
+        if (parsed != 6) {
+            parsed = sscanf(p, "%f %f %f %u %u", &c_deg, &a_deg, &z_mm, &laser1, &laser2);
+        }
+        if (parsed == 6 || parsed == 5) {
+            uint16_t msteps_c = ctx->settings.tmc_microsteps[AXIS_C_ID] ? ctx->settings.tmc_microsteps[AXIS_C_ID] : 16;
+            float spr_c = ctx->settings.steps_per_rev[AXIS_C_ID] ? (float)ctx->settings.steps_per_rev[AXIS_C_ID] : 200.0f;
+            float deg_per_step_c = 360.0f / (spr_c * (float)msteps_c);
+
+            uint16_t msteps_a = ctx->settings.tmc_microsteps[AXIS_A_ID] ? ctx->settings.tmc_microsteps[AXIS_A_ID] : 16;
+            float spr_a = ctx->settings.steps_per_rev[AXIS_A_ID] ? (float)ctx->settings.steps_per_rev[AXIS_A_ID] : 200.0f;
+            float deg_per_step_a = 360.0f / (spr_a * (float)msteps_a);
+
+            uint16_t z_teeth = ctx->settings.z_pulley_teeth ? ctx->settings.z_pulley_teeth : DEFAULT_Z_PULLEY_TEETH;
+            uint16_t msteps_z = ctx->settings.tmc_microsteps[AXIS_Z_ID] ? ctx->settings.tmc_microsteps[AXIS_Z_ID] : 16;
+            float spr_z = ctx->settings.steps_per_rev[AXIS_Z_ID] ? (float)ctx->settings.steps_per_rev[AXIS_Z_ID] : 200.0f;
+            float mm_per_step_z = (float)(z_teeth * Z_BELT_PITCH_MM) / (spr_z * (float)msteps_z);
+
+            int32_t steps_c = (int32_t)lroundf(c_deg / deg_per_step_c);
+            int32_t steps_a = (int32_t)lroundf(a_deg / deg_per_step_a);
+            int32_t steps_z = (int32_t)lroundf(z_mm / mm_per_step_z);
+
+            esp_err_t err = motion_post_move_sync(ctx, steps_c, steps_a, steps_z,
+                                                  -1.0f, -1.0f, -1.0f, -1.0f, false, 0, 0);
+            if (err == ESP_OK) {
+                if (laser1 > 4095U) laser1 = 4095U;
+                if (laser2 > 4095U) laser2 = 4095U;
+                (void)hardware_set_laser_level(ctx, 0, (uint16_t)laser1);
+                (void)hardware_set_laser_level(ctx, 1, (uint16_t)laser2);
+                printf("UNIFIED C=%.1f A=%.1f Z=%.2f mm L1=%u L2=%u enfileirado.\n",
+                       c_deg, a_deg, z_mm, laser1, laser2);
+            } else {
+                printf("ERRO no comando UNIFIED: %s\n", esp_err_to_name(err));
+            }
+            return;
+        } else {
+            puts("Uso: U <c_deg> <a_deg> <z_mm> <laser1 0..4095> <laser2 0..4095>");
+            return;
+        }
     }
 
     puts("Comando desconhecido. Use HELP.");

@@ -237,6 +237,8 @@ typedef struct {
     volatile float speed_max[AXIS_COUNT];   // velocidade máxima: deg/s para X/Y, mm/s para Z
     volatile float accel_max[AXIS_COUNT];   // aceleração máxima: deg/s² para X/Y, mm/s² para Z
     volatile int32_t atual_z;
+    volatile float pos_c_deg;               // Posição angular estimada/absoluta do Eixo C
+    volatile float pos_a_deg;               // Posição angular estimada/absoluta do Eixo A
     volatile float last_temp_c;
     volatile bool temp_valid;
     volatile driver_bus_mode_t driver_mode_requested;

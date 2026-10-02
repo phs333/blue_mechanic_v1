@@ -582,9 +582,6 @@ class TeensyDashboardView(QWidget):
         self.comm.send_raw("L 0 2 0")
 
     def _poll_all_nodes(self):
-        online_nodes = [i for i in range(1, 11) if self.state.is_node_online(i, timeout_sec=3.5)]
-        if online_nodes:
-            for i in online_nodes:
-                self.comm.send_raw(f"R {i}")
-        else:
-            self.comm.send_raw(f"R {self.selected_node}")
+        """Força a solicitação de status (R) para todos os nós 1..10."""
+        for i in range(1, 11):
+            self.comm.send_raw(f"R {i}")

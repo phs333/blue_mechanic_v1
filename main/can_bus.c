@@ -793,6 +793,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         break;
 
     case CAN_OP_MOVE_SYNC:
+    case CAN_OP_MOVE_UNIFIED:
         if (len == 8U) {
             int16_t angle_c_deci = can_decode_i16_le(&buf[1]);
             int16_t angle_a_deci = can_decode_i16_le(&buf[3]);
@@ -831,13 +832,13 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 err = motion_post_move_sync(ctx, steps_c, steps_a, steps_z,
                                             speed_c, speed_a, speed_z, accel,
                                             (flags & 0x01U) != 0U,
-                                            ctx->settings.node_id, CAN_OP_MOVE_SYNC);
+                                            ctx->settings.node_id, buf[0]);
             }
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR,
-                                 CAN_OP_MOVE_SYNC, (uint8_t)err);
+                                 buf[0], (uint8_t)err);
         } else {
             xSemaphoreGive(ctx->state_mutex);
-            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_MOVE_SYNC,
+            (void)can_send_event(ctx, CAN_EVT_ERROR, buf[0],
                                  (uint8_t)ESP_ERR_INVALID_SIZE);
         }
         break;
@@ -874,6 +875,25 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER, (uint8_t)err);
         } else {
             xSemaphoreGive(ctx->state_mutex);
+        }
+        break;
+
+    case CAN_OP_LASER_DUAL:
+        if (len >= 5U) {
+            uint16_t lvl1 = (uint16_t)buf[1] | ((uint16_t)buf[2] << 8);
+            uint16_t lvl2 = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
+            if (lvl1 > 4095U) lvl1 = 4095U;
+            if (lvl2 > 4095U) lvl2 = 4095U;
+            ESP_LOGI(APP_TAG, "CAN comando LASER_DUAL -> L1=%u L2=%u (12-bit)", (unsigned)lvl1, (unsigned)lvl2);
+            err = hardware_set_laser_level(ctx, 0, lvl1);
+            if (err == ESP_OK) {
+                err = hardware_set_laser_level(ctx, 1, lvl2);
+            }
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER_DUAL, (uint8_t)err);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_LASER_DUAL, (uint8_t)ESP_ERR_INVALID_SIZE);
         }
         break;
 

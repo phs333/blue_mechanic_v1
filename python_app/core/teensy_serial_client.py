@@ -56,6 +56,15 @@ class TeensySerialClient(BaseClient):
         """Retorna 0 se o modo broadcast estiver ativo; caso contrário, o node_id específico."""
         return 0 if self.broadcast_mode else self.node_id
 
+    @target_node.setter
+    def target_node(self, value: int) -> None:
+        val = int(value)
+        if val == 0:
+            self.broadcast_mode = True
+        else:
+            self.broadcast_mode = False
+            self.node_id = max(1, min(10, val))
+
     def set_broadcast_mode(self, enable: bool) -> None:
         self.broadcast_mode = bool(enable)
 
@@ -96,6 +105,11 @@ class TeensySerialClient(BaseClient):
                 timeout=0.1,
                 write_timeout=0.5,
             )
+            # Assert DTR e RTS para que o driver USB CDC ACM do Teensy/Zephyr
+            # reconheça ativamente a conexão do host no Windows
+            self.serial_port.dtr = True
+            self.serial_port.rts = True
+
             self.port_name = port
             self.baudrate = baudrate
             self.node_id = selected_node
@@ -124,7 +138,8 @@ class TeensySerialClient(BaseClient):
                     self.serial_port.write(b"\r\n")
             except Exception:
                 pass
-            self.request_status()
+            # Solicita status inicial de todos os nós para popular o painel imediatamente
+            self.request_status_all()
             return True
         except Exception as exc:
             self.stop_event.set()
@@ -179,7 +194,7 @@ class TeensySerialClient(BaseClient):
 
         tokens = command.split()
         op = tokens[0].upper() if tokens else ""
-        if op in ("M", "MF", "MSM", "MSMF", "MS", "MSF", "L", "E", "H", "S", "CFG", "OTA_START", "OTA_END", "OTA_ABORT"):
+        if op in ("M", "MF", "MSM", "MSMF", "MS", "MSF", "U", "UF", "TD", "SYNC", "L", "E", "H", "S", "CFG", "OTA_START", "OTA_END", "OTA_ABORT"):
             self._last_actuation_time = time.time()
 
         try:
@@ -233,38 +248,51 @@ class TeensySerialClient(BaseClient):
 
     def _auto_poll_loop(self) -> None:
         """
-        Poll nodes based on heartbeat presence.
-        Connected ESP32 nodes broadcast HEARTBEAT every 1000ms autonomously.
-        We ONLY poll nodes that are confirmed online via heartbeat or recent activity.
-        Background polling automatically yields when actuation commands (moves, lasers,
-        enables, homing) are active, guaranteeing zero bus collisions for automation and manual jog.
+        Poll nodes continuously.
+        - Actively polls confirmed online nodes round-robin (~350ms) to maintain fresh
+          kinematics, temperature, and status.
+        - Continuously probes offline nodes (round-robin across 1..10) to discover newly
+          connected nodes and recover disconnected/restarted nodes without delay.
+        - Background polling automatically yields when actuation commands (moves, lasers,
+          enables, homing) or OTA are active, guaranteeing zero bus collisions.
         """
-        idx = 0
-        last_initial_probe = 0.0
+        online_idx = 0
+        offline_idx = 0
+        last_discovery_probe = 0.0
+
         while not self.stop_event.is_set():
             if self.is_connected:
                 now = time.time()
-                # Yield auto-poll if OTA is active or actuation command was sent recently (within 600ms)
-                if self._ota_active or (now - self._last_actuation_time) < 0.6:
-                    self.stop_event.wait(0.10)
+                # Yield auto-poll if OTA is active or actuation command was sent recently (within 100ms)
+                if self._ota_active or (now - self._last_actuation_time) < 0.10:
+                    self.stop_event.wait(0.05)
                     continue
 
-                # Poll ONLY confirmed online nodes (received heartbeat/telemetry in last 3.5s)
                 online_nodes = [
                     node for node in range(1, 11)
                     if self.state.is_node_online(node, timeout_sec=3.5)
                 ]
+                offline_nodes = [
+                    node for node in range(1, 11)
+                    if node not in online_nodes
+                ]
 
                 if online_nodes:
-                    target = online_nodes[idx % len(online_nodes)]
-                    idx = (idx + 1) % len(online_nodes)
+                    # Interleave live online telemetry and periodic offline recovery
+                    if offline_nodes and (now - last_discovery_probe) >= 1.5:
+                        last_discovery_probe = now
+                        target = offline_nodes[offline_idx % len(offline_nodes)]
+                        offline_idx = (offline_idx + 1) % len(offline_nodes)
+                    else:
+                        target = online_nodes[online_idx % len(online_nodes)]
+                        online_idx = (online_idx + 1) % len(online_nodes)
                     self.send_raw(f"R {target}")
                 else:
-                    # If no node has been detected yet, gently probe only the selected node
-                    # at most once every 2.0s until heartbeats start flowing in
-                    if (now - last_initial_probe) >= 2.0:
-                        last_initial_probe = now
-                        self.send_raw(f"R {self.node_id}")
+                    # No nodes confirmed online yet: cycle through all nodes 1..10 in round-robin
+                    # so any connected node is discovered within ~3.5 seconds
+                    target = 1 + (offline_idx % 10)
+                    offline_idx = (offline_idx + 1) % 10
+                    self.send_raw(f"R {target}")
 
             self.stop_event.wait(0.35)
 
@@ -302,7 +330,6 @@ class TeensySerialClient(BaseClient):
                     drivers_enabled=bool(flags & STATUS_FLAG_DRIVERS_ENABLED),
                     z_bloqueado=bool(flags & STATUS_FLAG_Z_BLOQUEADO),
                     alarme_z_ativo=bool(flags & STATUS_FLAG_ALARME_Z_ATIVO),
-                    temp_valid=temp_flag,
                     tmc_uart_ready=bool(flags & STATUS_FLAG_TMC_UART_READY),
                     can_online=bool(flags & STATUS_FLAG_CAN_ONLINE),
                     laser1_level=laser1,
@@ -311,6 +338,8 @@ class TeensySerialClient(BaseClient):
                     fan_mode=fan_mode,
                     speed_level=max(1, min(5, speed_level)),
                 )
+                if temp_flag:
+                    status_updates["temp_valid"] = True
                 self.state.update_node_telemetry(node, **status_updates)
                 if node == self.node_id:
                     self.state.update_telemetry(**status_updates)
@@ -321,15 +350,28 @@ class TeensySerialClient(BaseClient):
                 if not (1 <= node <= 10):
                     return
                 self.node_offline_until.pop(node, None)
-                pos_c = float(fields[2])
-                pos_a = float(fields[3])
-                pos_z = int(fields[4], 0)
-                temperature = float(fields[5])
+                try:
+                    pos_c = float(fields[2])
+                except (ValueError, TypeError):
+                    pos_c = float("nan")
+                try:
+                    pos_a = float(fields[3])
+                except (ValueError, TypeError):
+                    pos_a = float("nan")
+                try:
+                    pos_z = int(fields[4], 0)
+                except (ValueError, TypeError):
+                    pos_z = 0
+                try:
+                    temperature = float(fields[5])
+                except (ValueError, TypeError):
+                    temperature = -99.9
+
                 # Bridge atual: ângulos com sinal e "nan" para inválido. Bridge antigo usava
                 # 0..360 e "-1.00" como inválido — continua reconhecido.
                 pos_c_valid = math.isfinite(pos_c) and fields[2] != "-1.00"
                 pos_a_valid = math.isfinite(pos_a) and fields[3] != "-1.00"
-                temp_valid = temperature != -99.9 and -55.0 <= temperature <= 125.0
+                temp_valid = math.isfinite(temperature) and temperature != -99.9 and -55.0 <= temperature <= 125.0
 
                 updates = {
                     "pos_c_valid": pos_c_valid,
@@ -526,6 +568,7 @@ class TeensySerialClient(BaseClient):
         accel: Optional[float] = None,
         force_no_encoder: bool = False,
     ) -> bool:
+        """Envia movimento sincronizado em coordenadas absolutas a partir de passos absolutos."""
         params = self.state.parameters
         angle_c_deg = int(steps_c) * calc_ca_degrees_per_step(
             params.steps_per_rev[0], params.tmc_microsteps[0]
@@ -555,6 +598,51 @@ class TeensySerialClient(BaseClient):
         return self.send_raw(
             f"{command} {self.target_node} {angle_c_deci / 10.0:.1f} "
             f"{angle_a_deci / 10.0:.1f} {distance_z_centi / 100.0:.2f}"
+        )
+
+    def move_sync_deg(
+        self,
+        c_deg: float,
+        a_deg: float,
+        z_mm: float,
+        force_no_encoder: bool = False,
+        node_id: Optional[int] = None,
+    ) -> bool:
+        """Envia movimento sincronizado em coordenadas absolutas físicas (graus para C/A, mm para Z)."""
+        target = self.target_node if node_id is None else int(node_id)
+        target = max(0, min(10, target))
+        command = "MSF" if force_no_encoder else "MS"
+        return self.send_raw(
+            f"{command} {target} {float(c_deg):.1f} {float(a_deg):.1f} {float(z_mm):.2f}"
+        )
+
+    def send_unified(
+        self,
+        c_deg: float,
+        a_deg: float,
+        z_mm: float,
+        laser1: int = 0,
+        laser2: int = 0,
+        force_no_encoder: bool = False,
+        node_id: Optional[int] = None,
+    ) -> bool:
+        """Envia comando unificado com coordenadas absolutas dos 3 eixos e 2 lasers (TouchDesigner).
+
+        :param c_deg: Coordenada angular absoluta do eixo C em graus (-3276.7 a +3276.7).
+        :param a_deg: Coordenada angular absoluta do eixo A em graus (-3276.7 a +3276.7).
+        :param z_mm: Coordenada linear absoluta do eixo Z em mm (0.00 a 327.67).
+        :param laser1: Nível PWM 12-bit do Laser 1 (0 a 4095).
+        :param laser2: Nível PWM 12-bit do Laser 2 (0 a 4095).
+        :param force_no_encoder: Se True, comanda em malha aberta (UF).
+        :param node_id: Nó alvo (1..10) ou 0 para broadcast. None usa self.target_node.
+        """
+        target = self.target_node if node_id is None else int(node_id)
+        target = max(0, min(10, target))
+        l1 = max(0, min(4095, int(laser1)))
+        l2 = max(0, min(4095, int(laser2)))
+        command = "UF" if force_no_encoder else "U"
+        return self.send_raw(
+            f"{command} {target} {float(c_deg):.1f} {float(a_deg):.1f} {float(z_mm):.2f} {l1} {l2}"
         )
 
     def set_laser(self, laser_index: int, level: int) -> bool:

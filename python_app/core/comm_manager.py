@@ -131,9 +131,20 @@ class CommManager(QObject):
             return self.serial_client.reset_device()
         return False
 
-    def request_status(self) -> bool:
-        if self.active_client:
+    def request_status(self, node_id: Optional[int] = None) -> bool:
+        if self.active_client and hasattr(self.active_client, 'request_status'):
+            import inspect
+            sig = inspect.signature(self.active_client.request_status)
+            if len(sig.parameters) > 0 and node_id is not None:
+                return self.active_client.request_status(node_id)
             return self.active_client.request_status()
+        return False
+
+    def request_status_all(self) -> bool:
+        if self.active_client and hasattr(self.active_client, 'request_status_all'):
+            return self.active_client.request_status_all()
+        elif self.active_client and hasattr(self.active_client, 'send_raw'):
+            return all(self.active_client.send_raw(f"R {i}") for i in range(1, 11))
         return False
 
     def request_config_dump(self) -> bool:
@@ -185,6 +196,37 @@ class CommManager(QObject):
         if self.active_client:
             return self.active_client.move_sync(
                 steps_c, steps_a, steps_z, speed_c, speed_a, speed_z, accel, force_no_encoder
+            )
+        return False
+
+    def move_sync_deg(
+        self,
+        c_deg: float,
+        a_deg: float,
+        z_mm: float,
+        force_no_encoder: bool = False,
+        node_id: Optional[int] = None,
+    ) -> bool:
+        if self.active_client and hasattr(self.active_client, "move_sync_deg"):
+            return self.active_client.move_sync_deg(
+                c_deg, a_deg, z_mm, force_no_encoder, node_id
+            )
+        return False
+
+    def send_unified(
+        self,
+        c_deg: float,
+        a_deg: float,
+        z_mm: float,
+        laser1: int = 0,
+        laser2: int = 0,
+        force_no_encoder: bool = False,
+        node_id: Optional[int] = None,
+    ) -> bool:
+        """Envia comando unificado (TouchDesigner) com coordenadas absolutas de 3 eixos e 2 lasers."""
+        if self.active_client and hasattr(self.active_client, "send_unified"):
+            return self.active_client.send_unified(
+                c_deg, a_deg, z_mm, laser1, laser2, force_no_encoder, node_id
             )
         return False
 

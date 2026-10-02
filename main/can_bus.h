@@ -24,8 +24,10 @@ typedef enum {
     CAN_OP_MOVE_FORCE = 0x22,
     CAN_OP_MOVE_SYNC = 0x23,
     CAN_OP_STOP = 0x24,      // Parada imediata (payload: [0x24, flags]; bit0 = apagar lasers / E-STOP)
+    CAN_OP_MOVE_UNIFIED = 0x25, // Movimento unificado 3 eixos absolutos
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
+    CAN_OP_LASER_DUAL = 0x32, // Controle simultâneo dos 2 lasers: [0x32, L1_lo, L1_hi, L2_lo, L2_hi]
     // Comandos de Atualizacao OTA (Teensy -> Nodes)
     CAN_OP_OTA_START = 0x40, // Inicia sessao OTA (payload: [0x40, target_node (0=todos 10 nos, 1..10=especifico), size_b0..b3, flags])
     CAN_OP_OTA_DATA  = 0x41, // Bloco de dados binarios de firmware (payload: [0x41, seq_num, d0..d5])

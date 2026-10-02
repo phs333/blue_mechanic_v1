@@ -290,6 +290,11 @@ class CanClient(BaseClient):
                 
                 if evt_type == CanEvent.HEARTBEAT:
                     self.state.telemetry.last_heartbeat_timestamp = time.time()
+                    self.state.update_node_telemetry(
+                        node,
+                        last_heartbeat_timestamp=time.time(),
+                        can_online=True,
+                    )
                     self.state.heartbeat_received.emit(node)
                     desc = f"HEARTBEAT (Node {node})"
                     

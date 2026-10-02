@@ -199,6 +199,10 @@ class DeviceState(QObject):
                 changed = True
         if changed:
             self.telemetry_updated.emit(self.telemetry)
+            if not getattr(self, "_in_node_telemetry_update", False):
+                node_id = getattr(self.parameters, "node_id", 1)
+                if 1 <= node_id <= 10:
+                    self.update_node_telemetry(node_id, **kwargs)
 
     def update_node_telemetry(self, node_id: int, **kwargs):
         """Update telemetry for a specific node (1..10) in the fleet."""
@@ -215,15 +219,19 @@ class DeviceState(QObject):
                 kwargs["last_seen_timestamp"] = now
             kwargs["online"] = True
 
-        changed = False
-        for key, value in kwargs.items():
-            if hasattr(node_t, key) and getattr(node_t, key) != value:
-                setattr(node_t, key, value)
-                changed = True
+        self._in_node_telemetry_update = True
+        try:
+            changed = False
+            for key, value in kwargs.items():
+                if hasattr(node_t, key) and getattr(node_t, key) != value:
+                    setattr(node_t, key, value)
+                    changed = True
 
-        if changed:
-            self.node_telemetry_updated.emit(node_id, node_t)
-            self.nodes_summary_updated.emit(self.get_online_nodes_count())
+            if changed:
+                self.node_telemetry_updated.emit(node_id, node_t)
+                self.nodes_summary_updated.emit(self.get_online_nodes_count())
+        finally:
+            self._in_node_telemetry_update = False
 
     def mark_node_offline(self, node_id: int):
         """Explicitly mark a node as offline in the fleet."""

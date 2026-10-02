@@ -45,7 +45,7 @@ class DashboardView(QWidget):
         header_layout.setContentsMargins(14, 8, 14, 8)
         
         title_vbox = QVBoxLayout()
-        title_lbl = QLabel("Blue Mechanic V2.0 — Painel Central de Controle")
+        title_lbl = QLabel("Blue Mechanic V2.1 — Painel Central de Controle")
         title_lbl.setStyleSheet("color: #38bdf8; font-size: 15px; font-weight: 700;")
         sub_lbl = QLabel("Controle unificado: Jog, Homing, Zero dos Encoders, Movimento Direto e Telemetria em Tempo Real")
         add_class(sub_lbl, "hint")

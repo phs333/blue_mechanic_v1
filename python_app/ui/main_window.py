@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
         self.state = state
         self.last_heartbeat_time = 0
         
-        self.setWindowTitle("Blue Mechanic V2.0 — Control & Telemetry Suite")
+        self.setWindowTitle("Blue Mechanic V2.1 — Control & Telemetry Suite")
         self.resize(1280, 850)
         self.setMinimumSize(1024, 700)
         
@@ -72,7 +72,7 @@ class MainWindow(QMainWindow):
         lbl_brand.setObjectName("sidebarTitle")
         sidebar_layout.addWidget(lbl_brand)
         
-        lbl_subbrand = QLabel("Hardware Suite v2.0")
+        lbl_subbrand = QLabel("Hardware Suite v2.1")
         lbl_subbrand.setObjectName("sidebarSubTitle")
         sidebar_layout.addWidget(lbl_subbrand)
         
@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
         
         self.lbl_can_bit = QLabel("Bitrate:", top_bar)
         self.combo_can_bit = QComboBox(top_bar)
-        self.combo_can_bit.addItems(["500000", "250000", "125000", "1000000"])
+        self.combo_can_bit.addItems(["1000000", "500000", "250000", "125000"])
 
         self.lbl_can_node = QLabel("Node:", top_bar)
         self.spin_can_node = QSpinBox(top_bar)

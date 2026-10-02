@@ -78,6 +78,63 @@ float mp_max_rate(const mp_request_t *req);
 float mp_stoppable_entry_rate(const mp_request_t *req);
 
 /* ------------------------------------------------------------------------------------ */
+/* Seguidor de alvo em tempo real (jog e streaming absoluto U): um eixo, periodo fixo dt.  */
+/* ------------------------------------------------------------------------------------ */
+
+#define MP_TRACK_MAX_SMOOTH 16U
+
+typedef struct {
+    float vmax;        /* passos/s */
+    float accel;       /* passos/s^2 */
+    uint8_t smooth_n;  /* periodos da media movel (jerk <= 2*accel / (smooth_n * dt)); 1 = sem */
+} mp_track_limits_t;
+
+typedef struct {
+    float pos_in, vel_in;             /* seguidor interno (aceleracao limitada) */
+    float hist[MP_TRACK_MAX_SMOOTH];  /* deslocamentos dos ultimos periodos */
+    uint8_t idx;
+    float pos;                        /* posicao comandada suavizada (passos, com fracao) */
+    float vel;                        /* passos/s */
+    float acc;                        /* passos/s^2 */
+} mp_track_state_t;
+
+float mp_track_brake_speed(float dist, float accel);
+/* Periodos da media movel que dao o jerk pedido (1..MP_TRACK_MAX_SMOOTH). */
+uint8_t mp_track_smooth_periods(float accel, float jerk, float dt);
+void mp_track_reset(mp_track_state_t *s, float pos);
+
+/*
+ * Avanca um periodo `dt`. `target` e o alvo no inicio do periodo e `target_vel` sua
+ * velocidade (feedforward): com ela o seguidor acompanha um alvo em movimento sem o
+ * atraso v/2a de um seguidor so de posicao. Seguidor interno com aceleracao limitada
+ * que nunca cruza o alvo + media movel de smooth_n periodos (curva S, jerk limitado).
+ * A media atrasa (smooth_n - 1)/2 periodos: compense avaliando o alvo a frente.
+ */
+void mp_track_step(mp_track_state_t *s, const mp_track_limits_t *lim, float target, float target_vel, float dt);
+/* true quando parado e sem deslocamento pendente na media. */
+bool mp_track_idle(const mp_track_state_t *s);
+
+/*
+ * Feedforward de um alvo recebido em amostras (frames U do TouchDesigner, taxa qualquer):
+ * estima a velocidade pela diferenca entre amostras e extrapola o alvo entre elas, ate
+ * 1,25 intervalo (folga para o jitter de USB/CAN). Sem amostra nova, o alvo para ali.
+ * Taxa variavel e suportada: o intervalo medio se adapta e lacunas (> 250 ms ou frame
+ * perdido) zeram a velocidade em vez de gerar um salto.
+ */
+typedef struct {
+    float target;        /* ultima amostra */
+    float vel;           /* unidades/s */
+    float interval_s;    /* intervalo medio entre amostras (0 = desconhecido) */
+    int64_t t_us;        /* instante da ultima amostra */
+    bool valid;
+} mp_track_feed_t;
+
+void mp_track_feed_reset(mp_track_feed_t *f);
+void mp_track_feed_update(mp_track_feed_t *f, float target, int64_t t_us);
+/* Alvo extrapolado para t_us + lead_s (lead compensa o atraso do pipeline/suavizacao). */
+void mp_track_feed_eval(const mp_track_feed_t *f, int64_t t_us, float lead_s, float *target, float *vel);
+
+/* ------------------------------------------------------------------------------------ */
 /* Gerador de simbolos (ISR): so aritmetica inteira — float e proibido em ISR no Xtensa.   */
 /* ------------------------------------------------------------------------------------ */
 

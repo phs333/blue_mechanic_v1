@@ -8,6 +8,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "hardware.h"
@@ -40,6 +41,36 @@ static volatile uint32_t s_rx_write_index;
 static uint32_t s_rx_read_index;
 static can_motion_profile_t s_motion_profiles[AXIS_COUNT];
 static volatile bool s_bus_off;
+static volatile uint32_t s_pending_bitrate; // CAN_OP_SET_BITRATE: aplicado pela can_task apos o ACK sair
+
+/*
+ * U com commit sincronizado: o Teensy envia os U de todos os nos em sequencia (o no 10
+ * recebe ~1-2 ms depois do no 1) e no fim da rajada um CAN_OP_SYNC_COMMIT em broadcast.
+ * Todos os nos aplicam o alvo no mesmo instante, e o feedforward mede o intervalo entre
+ * frames sem o jitter da posicao de cada no na rajada. So a can_task acessa este estado.
+ */
+#define CAN_LATCH_FLAG 0x80U
+#define CAN_LATCH_TIMEOUT_US 10000 // commit perdido: aplica sozinho depois disto
+
+typedef struct {
+    bool valid;
+    float c_deg;
+    float a_deg;
+    int32_t z_steps;
+    bool force;
+    int64_t t_us;
+} can_latched_target_t;
+
+static can_latched_target_t s_latch;
+
+static esp_err_t can_latch_apply(app_context_t *ctx)
+{
+    if (!s_latch.valid) {
+        return ESP_OK;
+    }
+    s_latch.valid = false;
+    return motion_track_set(ctx, s_latch.c_deg, s_latch.a_deg, s_latch.z_steps, s_latch.force);
+}
 
 #define CAN_BUS_OFF_RECOVER_PERIOD_MS 1000
 
@@ -59,7 +90,7 @@ static int32_t can_sync_angle_to_steps(const app_context_t *ctx, size_t axis_ind
                                        int16_t angle_deci_deg);
 static int32_t can_sync_angle_to_steps_centi(const app_context_t *ctx, size_t axis_index,
                                              int32_t angle_centi_deg);
-static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_centi_mm);
+static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_z_units);
 static bool can_speed_is_valid(char axis, float speed);
 static bool can_accel_is_valid(char axis, float accel);
 static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame);
@@ -304,10 +335,25 @@ static void can_task(void *arg)
     TickType_t last_recover = 0;
 
     while (true) {
-        if (xSemaphoreTake(s_rx_ready_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
+        TickType_t wait = s_latch.valid ? pdMS_TO_TICKS(2) : pdMS_TO_TICKS(100);
+        if (xSemaphoreTake(s_rx_ready_sem, wait > 0 ? wait : 1) == pdTRUE) {
             process_can_frame(ctx, &s_rx_pool[s_rx_read_index].frame);
             s_rx_read_index = (s_rx_read_index + 1U) % CAN_RX_POOL_DEPTH;
             xSemaphoreGive(s_rx_free_sem);
+        }
+        if (s_latch.valid && (esp_timer_get_time() - s_latch.t_us) > CAN_LATCH_TIMEOUT_US) {
+            (void)can_latch_apply(ctx); // commit perdido: nao deixa o alvo parado
+        }
+
+        if (s_pending_bitrate != 0U) {
+            // Da tempo ao ACK (e aos ACKs dos outros nos, no broadcast) de sair no bitrate antigo
+            uint32_t bitrate = s_pending_bitrate;
+            s_pending_bitrate = 0U;
+            vTaskDelay(pdMS_TO_TICKS(30));
+            ctx->settings.can_bitrate = bitrate;
+            storage_request_save(&ctx->settings);
+            esp_err_t br_err = can_bus_apply_settings(ctx);
+            ESP_LOGW(APP_TAG, "CAN: bitrate alterado para %" PRIu32 " bps (%s)", bitrate, esp_err_to_name(br_err));
         }
 
         // Bus-off (ex.: cabo solto, terminacao ausente): o TWAI nao se recupera sozinho.
@@ -360,7 +406,7 @@ static esp_err_t can_node_start(app_context_t *ctx)
 
     twai_mask_filter_config_t cmd_filter = {
         .id = ctx->settings.can_command_base_id,
-        .mask = 0x780, // Aceita 0x200 (broadcast) e 0x201..0x27F (node específico)
+        .mask = 0x780, // Aceita 0x200 (broadcast) e 0x201..0x27F (node especÃ­fico)
         .is_ext = false,
     };
 
@@ -533,7 +579,10 @@ static int32_t can_sync_angle_to_steps_centi(const app_context_t *ctx, size_t ax
                            (float)microsteps / 360.0f);
 }
 
-static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_centi_mm)
+/* Z nos frames 0x23/0x25: int16 em unidades de 0,02 mm (+-655,34 mm; cobre o curso de 480 mm) */
+#define CAN_Z_MM_PER_UNIT 0.02f
+
+static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_z_units)
 {
     uint16_t steps_per_rev = ctx->settings.steps_per_rev[AXIS_Z_ID];
     uint16_t microsteps = ctx->settings.tmc_microsteps[AXIS_Z_ID];
@@ -548,7 +597,7 @@ static int32_t can_sync_z_to_steps(const app_context_t *ctx, int16_t distance_ce
         pulley_teeth = DEFAULT_Z_PULLEY_TEETH;
     }
 
-    float distance_mm = (float)distance_centi_mm / 100.0f;
+    float distance_mm = (float)distance_z_units * CAN_Z_MM_PER_UNIT;
     float mm_per_rev = (float)pulley_teeth * Z_BELT_PITCH_MM;
     return (int32_t)lroundf(distance_mm * (float)steps_per_rev *
                            (float)microsteps / mm_per_rev);
@@ -609,6 +658,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
     // STOP e aceito em qualquer estado (inclusive OTA) e tem prioridade sobre os demais comandos
     if (buf[0] == CAN_OP_STOP) {
         bool lasers_off = (len >= 2U) && ((buf[1] & 0x01U) != 0U);
+        s_latch.valid = false; // um U travado nao pode reativar o movimento depois do STOP
         xSemaphoreGive(ctx->state_mutex);
         (void)motion_request_stop(ctx);
         if (lasers_off) {
@@ -758,6 +808,31 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
         }
         break;
 
+    case CAN_OP_SYNC_COMMIT:
+        xSemaphoreGive(ctx->state_mutex);
+        err = can_latch_apply(ctx);
+        if (err != ESP_OK) {
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_MOVE_UNIFIED, (uint8_t)err);
+        }
+        break;
+
+    case CAN_OP_SET_BITRATE:
+        if (len >= 5U) {
+            uint32_t bitrate = (uint32_t)buf[1] | ((uint32_t)buf[2] << 8) |
+                               ((uint32_t)buf[3] << 16) | ((uint32_t)buf[4] << 24);
+            bool valid = bitrate == 125000U || bitrate == 250000U || bitrate == 500000U || bitrate == 1000000U;
+            xSemaphoreGive(ctx->state_mutex);
+            if (valid && bitrate != ctx->settings.can_bitrate) {
+                s_pending_bitrate = bitrate;
+            }
+            (void)can_send_event(ctx, valid ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_SET_BITRATE,
+                                 valid ? 0U : (uint8_t)ESP_ERR_INVALID_ARG);
+        } else {
+            xSemaphoreGive(ctx->state_mutex);
+            (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_SET_BITRATE, (uint8_t)ESP_ERR_INVALID_SIZE);
+        }
+        break;
+
     case CAN_OP_MOVE:
         if (len >= 6U) {
             int32_t steps = (int32_t)((uint32_t)buf[2] |
@@ -818,7 +893,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             int32_t angle_a_centi = 0;
             int16_t angle_c_deci = 0;
             int16_t angle_a_deci = 0;
-            int16_t distance_z_centi_mm = can_decode_i16_le(&buf[5]);
+            int16_t distance_z_units = can_decode_i16_le(&buf[5]);
             float speed_c = -1.0f;
             float speed_a = -1.0f;
             float speed_z = -1.0f;
@@ -826,10 +901,8 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
 
             if (buf[0] == CAN_OP_MOVE_UNIFIED) {
                 // Decodifica angulos de 19 bits assinados em centesimos de grau (+-2621.43 deg)
-                // Byte 7: bit0=force_no_encoder, bits 1..3=C bits 16..18, bits 4..6=A bits 16..18, bit 7=reservado (0)
-                if ((flags & 0x80U) != 0U) {
-                    err = ESP_ERR_INVALID_ARG;
-                }
+                // Byte 7: bit0=force_no_encoder, bits 1..3=C bits 16..18, bits 4..6=A bits 16..18,
+                // bit 7=aguardar CAN_OP_SYNC_COMMIT
                 uint32_t c_u32 = (uint32_t)buf[1] | ((uint32_t)buf[2] << 8) | (((uint32_t)(flags >> 1) & 0x07U) << 16);
                 if ((c_u32 & (1U << 18)) != 0U) {
                     c_u32 |= ~0x7FFFFU;
@@ -875,10 +948,25 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
                 steps_c = can_sync_angle_to_steps(ctx, AXIS_C_ID, angle_c_deci);
                 steps_a = can_sync_angle_to_steps(ctx, AXIS_A_ID, angle_a_deci);
             }
-            int32_t steps_z = can_sync_z_to_steps(ctx, distance_z_centi_mm);
+            int32_t steps_z = can_sync_z_to_steps(ctx, distance_z_units);
             xSemaphoreGive(ctx->state_mutex);
 
-            if (err == ESP_OK) {
+            if (err == ESP_OK && buf[0] == CAN_OP_MOVE_UNIFIED && (flags & CAN_LATCH_FLAG) != 0U) {
+                // Commit sincronizado: guarda o alvo (o mais recente substitui um anterior
+                // cujo commit se perdeu) e aplica no CAN_OP_SYNC_COMMIT
+                s_latch = (can_latched_target_t){
+                    .valid = true,
+                    .c_deg = (float)angle_c_centi / 100.0f,
+                    .a_deg = (float)angle_a_centi / 100.0f,
+                    .z_steps = steps_z,
+                    .force = (flags & 0x01U) != 0U,
+                    .t_us = esp_timer_get_time(),
+                };
+            } else if (err == ESP_OK && buf[0] == CAN_OP_MOVE_UNIFIED) {
+                // Streaming: so atualiza o alvo do seguidor (sem fila, sem parada entre frames)
+                err = motion_track_set(ctx, (float)angle_c_centi / 100.0f, (float)angle_a_centi / 100.0f,
+                                       steps_z, (flags & 0x01U) != 0U);
+            } else if (err == ESP_OK) {
                 err = motion_post_move_sync(ctx, steps_c, steps_a, steps_z,
                                             speed_c, speed_a, speed_z, accel,
                                             (flags & 0x01U) != 0U,
@@ -923,7 +1011,7 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             } else {
                 lvl = (uint16_t)buf[2];
             }
-            ESP_LOGI(APP_TAG, "CAN comando LASER %u -> level=%u (12-bit)", (unsigned)buf[1], (unsigned)lvl);
+            ESP_LOGD(APP_TAG, "CAN comando LASER %u -> level=%u (12-bit)", (unsigned)buf[1], (unsigned)lvl);
             err = hardware_set_laser_level(ctx, (size_t)(buf[1] - 1U), lvl);
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER, (uint8_t)err);
@@ -938,13 +1026,17 @@ static void process_can_frame(app_context_t *ctx, const twai_frame_t *frame)
             uint16_t lvl2 = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
             if (lvl1 > 4095U) lvl1 = 4095U;
             if (lvl2 > 4095U) lvl2 = 4095U;
-            ESP_LOGI(APP_TAG, "CAN comando LASER_DUAL -> L1=%u L2=%u (12-bit)", (unsigned)lvl1, (unsigned)lvl2);
+            // LOGD: um LOGI aqui bloqueava a can_task ~5 ms na UART a cada frame do streaming U
+            ESP_LOGD(APP_TAG, "CAN comando LASER_DUAL -> L1=%u L2=%u (12-bit)", (unsigned)lvl1, (unsigned)lvl2);
             err = hardware_set_laser_level(ctx, 0, lvl1);
             if (err == ESP_OK) {
                 err = hardware_set_laser_level(ctx, 1, lvl2);
             }
             xSemaphoreGive(ctx->state_mutex);
-            (void)can_send_event(ctx, (err == ESP_OK) ? CAN_EVT_ACK : CAN_EVT_ERROR, CAN_OP_LASER_DUAL, (uint8_t)err);
+            // Frame de streaming (par do MOVE_UNIFIED): so falhas geram evento, como no 0x25
+            if (err != ESP_OK) {
+                (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_LASER_DUAL, (uint8_t)err);
+            }
         } else {
             xSemaphoreGive(ctx->state_mutex);
             (void)can_send_event(ctx, CAN_EVT_ERROR, CAN_OP_LASER_DUAL, (uint8_t)ESP_ERR_INVALID_SIZE);

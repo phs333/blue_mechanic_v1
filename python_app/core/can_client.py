@@ -18,7 +18,7 @@ from .protocol_defs import (
     STATUS_FLAG_DRIVERS_ENABLED, STATUS_FLAG_Z_BLOQUEADO,
     STATUS_FLAG_ALARME_Z_ATIVO, STATUS_FLAG_TEMP_VALID,
     STATUS_FLAG_TMC_UART_READY, STATUS_FLAG_CAN_ONLINE, STATUS_FLAG_POS_V2, STOP_FLAG_LASERS_OFF,
-    calc_ca_degrees_per_step, calc_z_mm_per_step,
+    calc_ca_degrees_per_step, calc_z_mm_per_step, CAN_Z_UNITS_PER_MM,
 )
 
 class CanClient(BaseClient):
@@ -32,7 +32,7 @@ class CanClient(BaseClient):
         
         self.interface = "pcan"
         self.channel = "PCAN_USBBUS1"
-        self.bitrate = 500000
+        self.bitrate = 1000000
         self.node_id = 1
         self.cmd_base_id = 0x200
         self.status_base_id = 0x280
@@ -47,7 +47,7 @@ class CanClient(BaseClient):
         channels = ["PCAN_USBBUS1", "PCAN_USBBUS2", "PCAN_USBBUS3", "PCAN_USBBUS4", "PCAN_PCIBUS1"]
         return channels
 
-    def connect(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
+    def connect(self, channel: str = "PCAN_USBBUS1", bitrate: int = 1000000, 
                 node_id: int = 1, cmd_base: int = 0x200, status_base: int = 0x280, 
                 pos_base: Optional[int] = None, event_base: int = 0x300, interface: str = "pcan", **kwargs) -> bool:
         self.disconnect()
@@ -473,12 +473,12 @@ class CanClient(BaseClient):
 
         angle_c_deci = round(angle_c_deg * 10.0)
         angle_a_deci = round(angle_a_deg * 10.0)
-        distance_z_centi = round(distance_z_mm * 100.0)
-        fixed_values = (angle_c_deci, angle_a_deci, distance_z_centi)
+        distance_z_units = round(distance_z_mm * CAN_Z_UNITS_PER_MM)
+        fixed_values = (angle_c_deci, angle_a_deci, distance_z_units)
         if any(value < -32768 or value > 32767 for value in fixed_values):
             self.state.error_occurred.emit(
                 "MOVE_SYNC fora da faixa CAN: C/A devem caber em int16 de 0,1° "
-                "e Z em int16 de 0,01 mm."
+                "e Z em int16 de 0,02 mm."
             )
             return False
 
@@ -503,13 +503,13 @@ class CanClient(BaseClient):
             CanOpcode.MOVE_SYNC,
             angle_c_deci,
             angle_a_deci,
-            distance_z_centi,
+            distance_z_units,
             flags,
         )
         desc = (
             f"MOVE_SYNC C={angle_c_deci / 10.0:.1f}° "
             f"A={angle_a_deci / 10.0:.1f}° "
-            f"Z={distance_z_centi / 100.0:.2f}mm force={bool(flags)}"
+            f"Z={distance_z_units / CAN_Z_UNITS_PER_MM:.2f}mm force={bool(flags)}"
         )
         return self.send_frame(target_id, payload, desc)
 

@@ -16,6 +16,7 @@ import serial.tools.list_ports
 from .base_client import BaseClient
 from .main_thread import MainThreadRelay
 from .protocol_defs import (
+    CAN_Z_UNITS_PER_MM,
     CanOpcode,
     ESP_ERRORS,
     FanMode,
@@ -584,10 +585,10 @@ class TeensySerialClient(BaseClient):
 
         angle_c_deci = round(angle_c_deg * 10.0)
         angle_a_deci = round(angle_a_deg * 10.0)
-        distance_z_centi = round(distance_z_mm * 100.0)
+        distance_z_units = round(distance_z_mm * CAN_Z_UNITS_PER_MM)
         if any(
             value < -32768 or value > 32767
-            for value in (angle_c_deci, angle_a_deci, distance_z_centi)
+            for value in (angle_c_deci, angle_a_deci, distance_z_units)
         ):
             self.state.error_occurred.emit(
                 "MOVE_SYNC fora da faixa do protocolo Teensy/CAN."
@@ -597,7 +598,7 @@ class TeensySerialClient(BaseClient):
         command = "MSF" if force_no_encoder else "MS"
         return self.send_raw(
             f"{command} {self.target_node} {angle_c_deci / 10.0:.1f} "
-            f"{angle_a_deci / 10.0:.1f} {distance_z_centi / 100.0:.2f}"
+            f"{angle_a_deci / 10.0:.1f} {distance_z_units / CAN_Z_UNITS_PER_MM:.2f}"
         )
 
     def move_sync_deg(
@@ -630,7 +631,7 @@ class TeensySerialClient(BaseClient):
 
         :param c_deg: Coordenada angular absoluta do eixo C em graus (-2621.4 a +2621.4).
         :param a_deg: Coordenada angular absoluta do eixo A em graus (-2621.4 a +2621.4).
-        :param z_mm: Coordenada linear absoluta do eixo Z em mm (0.00 a 327.67).
+        :param z_mm: Coordenada linear absoluta do eixo Z em mm (resolucao 0,02 mm; ate 655.34, cobre os 480 mm).
         :param laser1: Nível PWM 12-bit do Laser 1 (0 a 4095).
         :param laser2: Nível PWM 12-bit do Laser 2 (0 a 4095).
         :param force_no_encoder: Se True, comanda em malha aberta (UF).

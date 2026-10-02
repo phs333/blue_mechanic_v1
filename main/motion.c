@@ -1804,13 +1804,14 @@ static esp_err_t motion_stream_chain(app_context_t *ctx, const motion_cmd_t *fir
 }
 
 /* ==================================================================================== */
-/* Jog continuo (controle por mouse): o host so manda incrementos do alvo; aqui um       */
-/* seguidor de posicao por eixo (velocidade/aceleracao da NVS, curva de frenagem) gera   */
-/* segmentos de velocidade constante de JOG_DT_S no stream RMT, no maximo 2 em voo.      */
-/* Sem fila entre host e motor: latencia de ~2 segmentos e o alvo e sempre alcancado.    */
+/* Seguidor em tempo real: jog do mouse (incrementos) e streaming U (alvo absoluto do    */
+/* TouchDesigner). Por eixo, mp_track_step (aceleracao limitada + curva S por media      */
+/* movel) gera segmentos de velocidade constante de JOG_DT_S no stream RMT, no maximo 2  */
+/* em voo. No U, o feedforward (velocidade estimada entre frames) e a extrapolacao do    */
+/* alvo compensam o pipeline: o eixo acompanha a trajetoria praticamente sem atraso.     */
 /* ==================================================================================== */
 
-#define JOG_DT_S 0.010f           /* periodo do seguidor = duracao minima de um segmento */
+#define JOG_DT_S 0.005f           /* periodo do seguidor = duracao minima de um segmento */
 #define JOG_MAX_SUBPERIODS 8U     /* baixa velocidade: um segmento junta ate 8 periodos */
 #define JOG_IDLE_EXIT_US 500000   /* ocioso e sem incrementos por 0,5 s: encerra o jog */
 #define JOG_MAX_LAG_S 0.75f       /* alvo a frente da maquina limitado a 0,75 s de vmax */
@@ -1820,6 +1821,9 @@ static float s_jog_accum[AXIS_COUNT];     /* incrementos (graus/mm) ainda nao ab
 static int64_t s_jog_last_update_us;
 static bool s_jog_running;                /* motion_task dentro do laco de jog */
 static bool s_jog_queued;                 /* MOTION_CMD_JOG ja na fila */
+static mp_track_feed_t s_track_feed[AXIS_COUNT]; /* alvo absoluto U: graus (C/A) e passos (Z) */
+static bool s_track_active;               /* streaming U em curso nesta sessao do seguidor */
+static bool s_track_force;                /* alvo em malha aberta (UF): sem encoder/limites C/A */
 
 static esp_err_t enqueue_motion_cmd(app_context_t *ctx, motion_cmd_t *cmd);
 
@@ -1855,10 +1859,60 @@ esp_err_t motion_jog_add(app_context_t *ctx, float d_c, float d_a, float d_z)
     return ESP_OK;
 }
 
+/*
+ * Alvo absoluto em streaming (CAN_OP_MOVE_UNIFIED / TouchDesigner): usa o mesmo seguidor
+ * do jog. Cada frame so substitui o alvo; o motor persegue o mais recente sem parar entre
+ * frames. Antes cada U virava um movimento S-curve com saida em velocidade zero (a cadeia
+ * do motor stream so emenda o que ja esta na fila), gerando "anda-para" a cada frame.
+ */
+esp_err_t motion_track_set(app_context_t *ctx, float c_deg, float a_deg, int32_t z_steps, bool force_no_encoder)
+{
+    ESP_RETURN_ON_FALSE(ctx != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "ctx nulo");
+    ESP_RETURN_ON_FALSE(isfinite(c_deg) && isfinite(a_deg), ESP_ERR_INVALID_ARG, APP_TAG, "alvo invalido");
+    if (ctx->state.ota_in_progress) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool need_cmd = false;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_jog_mux);
+    if (!s_track_active) {
+        // Sessao nova: nao estimar velocidade contra uma amostra de uma sessao anterior
+        for (size_t i = 0; i < AXIS_COUNT; ++i) {
+            mp_track_feed_reset(&s_track_feed[i]);
+        }
+    }
+    mp_track_feed_update(&s_track_feed[AXIS_C_ID], c_deg, now);
+    mp_track_feed_update(&s_track_feed[AXIS_A_ID], a_deg, now);
+    mp_track_feed_update(&s_track_feed[AXIS_Z_ID], (float)z_steps, now);
+    s_track_force = force_no_encoder;
+    s_track_active = true;
+    s_jog_last_update_us = now;
+    if (!s_jog_running && !s_jog_queued) {
+        s_jog_queued = true;
+        need_cmd = true;
+    }
+    portEXIT_CRITICAL(&s_jog_mux);
+
+    if (need_cmd) {
+        motion_cmd_t cmd = {.type = MOTION_CMD_JOG, .axis = 'C', .speed_override = -1.0f,
+                            .accel_override = -1.0f, .speed_c = -1.0f, .speed_a = -1.0f, .speed_z = -1.0f};
+        esp_err_t err = enqueue_motion_cmd(ctx, &cmd);
+        if (err != ESP_OK) {
+            portENTER_CRITICAL(&s_jog_mux);
+            s_jog_queued = false;
+            s_track_active = false;
+            portEXIT_CRITICAL(&s_jog_mux);
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 static void jog_cmd_discarded(void)
 {
     portENTER_CRITICAL(&s_jog_mux);
     s_jog_queued = false;
+    s_track_active = false;
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
         s_jog_accum[i] = 0.0f;
     }
@@ -1868,6 +1922,7 @@ static void jog_cmd_discarded(void)
 static void jog_clear_accum(void)
 {
     portENTER_CRITICAL(&s_jog_mux);
+    s_track_active = false;
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
         s_jog_accum[i] = 0.0f;
     }
@@ -1875,42 +1930,40 @@ static void jog_clear_accum(void)
 }
 
 typedef struct {
-    float step_size;   /* graus ou mm por passo */
-    float vmax;        /* passos/s */
-    float accel;       /* passos/s^2 */
-    float lo, hi;      /* alvo permitido, em passos relativos ao inicio do jog */
-    float target;      /* alvo (passos, relativo) */
-    float pos;         /* posicao comandada com fracao (passos) */
-    int32_t pos_int;   /* passos inteiros ja emitidos */
-    float vel;         /* velocidade do seguidor (passos/s) */
+    float step_size;          /* graus ou mm por passo */
+    float vmax_jog;           /* passos/s: velocidade em uso (jog do mouse) */
+    float vmax_track;         /* passos/s: maximo do eixo (streaming U, a trajetoria e do TD) */
+    mp_track_limits_t lim;
+    mp_track_state_t trk;     /* posicao comandada com fracao, velocidade, aceleracao */
+    float lead_s;             /* atraso do pipeline + media movel, compensado no alvo do U */
+    float lo, hi;             /* alvo permitido, em passos relativos ao inicio */
+    float target;             /* alvo (passos, relativo) */
+    int32_t pos_int;          /* passos inteiros ja emitidos */
     bool blocked;
     bool warned;
 } jog_axis_t;
 
-/* Um periodo do seguidor: velocidade em direcao ao alvo com aceleracao limitada e
- * frenagem v <= sqrt(2 a |erro|), pousando no alvo sem ultrapassar. Retorna passos inteiros. */
-static int32_t jog_follow(jog_axis_t *ax, float dt)
+/* Um periodo do seguidor (curva S, sem ultrapassar o alvo). Retorna passos inteiros. */
+static int32_t jog_follow(jog_axis_t *ax, float target_vel, float dt)
 {
-    float e = ax->target - ax->pos;
-    float dist = fabsf(e);
-    float dv = ax->accel * dt;
-    float v_des = fminf(ax->vmax, sqrtf(2.0f * ax->accel * dist));
-    v_des = (e < 0.0f) ? -v_des : v_des;
-    float v = ax->vel + fmaxf(-dv, fminf(dv, v_des - ax->vel));
-    float d = v * dt;
-    if (d * e > 0.0f && fabsf(d) > dist) {
-        d = e;             /* chegaria alem do alvo: pousa nele */
-        v = d / dt;
-    }
-    if (dist < 1e-4f && fabsf(v) <= dv) {
-        v = 0.0f;
-        d = 0.0f;
-    }
-    ax->vel = v;
-    ax->pos += d;
-    int32_t n = (int32_t)lroundf(ax->pos) - ax->pos_int;
+    mp_track_step(&ax->trk, &ax->lim, ax->target, target_vel, dt);
+    int32_t n = (int32_t)lroundf(ax->trk.pos) - ax->pos_int;
     ax->pos_int += n;
     return n;
+}
+
+/* Segmentos concluidos no hardware: atualiza Z e a posicao estimada de C/A (usada pelo
+ * UF e pela escolha de volta do encoder quando ele volta de offline). */
+static void jog_report_completed(app_context_t *ctx, int32_t ring[4][AXIS_COUNT], uint32_t *reported)
+{
+    uint32_t completed = hardware_stream_completed();
+    while (*reported < completed) {
+        const int32_t *seg = ring[*reported % 4U];
+        ctx->state.atual_z += seg[AXIS_Z_ID];
+        ctx->state.pos_c_deg += (float)seg[AXIS_C_ID] * get_deg_per_step(ctx, 'C');
+        ctx->state.pos_a_deg += (float)seg[AXIS_A_ID] * get_deg_per_step(ctx, 'A');
+        (*reported)++;
+    }
 }
 
 static esp_err_t motion_jog_run(app_context_t *ctx)
@@ -1925,24 +1978,47 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         char name = axis_char_from_index(i);
         ax[i].step_size = get_step_size(ctx, name);
         float speed = axis_nominal_speed(ctx, i, -1.0f);
+        float speed_max = ctx->settings.speed_max[i];
         float accel = axis_accel(ctx, i, -1.0f);
+        if (!(speed_max > 0.0f) || !isfinite(speed_max)) {
+            speed_max = speed;
+        }
         if (i == AXIS_Z_ID) {
             speed = fminf(speed, 400.0f);
+            speed_max = fminf(speed_max, 400.0f);
             accel = fmaxf(50.0f, fminf(accel, 5000.0f));
         }
-        ax[i].vmax = fminf(speed / ax[i].step_size, (float)RMT_MAX_STEP_FREQ_HZ);
-        ax[i].accel = accel / ax[i].step_size;
+        speed_max = fmaxf(speed_max, speed);
+        ax[i].vmax_jog = fminf(speed / ax[i].step_size, (float)RMT_MAX_STEP_FREQ_HZ);
+        ax[i].vmax_track = fminf(speed_max / ax[i].step_size, (float)RMT_MAX_STEP_FREQ_HZ);
+        ax[i].lim.vmax = ax[i].vmax_jog;
+        ax[i].lim.accel = accel / ax[i].step_size;
+        ax[i].lim.smooth_n = mp_track_smooth_periods(accel, ctx->ext.track_jerk[i], JOG_DT_S);
+        // O segmento planejado agora roda depois do que esta em voo; a media movel atrasa (N-1)/2
+        ax[i].lead_s = JOG_DT_S + 0.5f * (float)(ax[i].lim.smooth_n - 1U) * JOG_DT_S;
+        mp_track_reset(&ax[i].trk, 0.0f);
     }
     // Limites de C/A sobre a posicao do encoder no inicio; sem encoder o eixo fica travado
+    // (exceto para alvo absoluto em malha aberta, UF, que parte da posicao estimada)
+    float start_pos[AXIS_COUNT] = {ctx->state.pos_c_deg, ctx->state.pos_a_deg, (float)ctx->state.atual_z};
     for (size_t i = AXIS_C_ID; i <= AXIS_A_ID; ++i) {
         float deg = 0.0f;
-        if (hardware_read_axis_encoder(axis_char_from_index(i), &deg) == ESP_OK) {
+        if (hardware_read_axis_encoder(axis_char_from_index(i), &deg) == ESP_OK && isfinite(deg)) {
             float min_deg = (i == AXIS_C_ID) ? ctx->settings.limit_min_c_deg : ctx->settings.limit_min_a_deg;
             float max_deg = (i == AXIS_C_ID) ? ctx->settings.limit_max_c_deg : ctx->settings.limit_max_a_deg;
             ax[i].lo = fminf(0.0f, (min_deg - deg) / ax[i].step_size);
             ax[i].hi = fmaxf(0.0f, (max_deg - deg) / ax[i].step_size);
+            start_pos[i] = deg;
+            if (i == AXIS_C_ID) {
+                ctx->state.pos_c_deg = deg;
+            } else {
+                ctx->state.pos_a_deg = deg;
+            }
         } else {
             ax[i].blocked = true;
+            if (!isfinite(start_pos[i])) {
+                start_pos[i] = 0.0f;
+            }
         }
     }
     ax[AXIS_Z_ID].blocked = ctx->state.z_bloqueado;
@@ -1964,7 +2040,7 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         return err;
     }
 
-    int32_t z_ring[4] = {0};
+    int32_t seg_ring[4][AXIS_COUNT] = {{0}};
     uint32_t committed = 0, reported = 0, pool_idx = 0;
     int32_t seg_steps[AXIS_COUNT] = {0, 0, 0};
     uint32_t seg_periods = 0;
@@ -1981,16 +2057,15 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
                 break;
             }
         }
-        uint32_t completed = hardware_stream_completed();
-        while (reported < completed) {
-            ctx->state.atual_z += z_ring[reported % 4U];
-            reported++;
-        }
+        jog_report_completed(ctx, seg_ring, &reported);
 
         // Absorve os incrementos do host no alvo (limites e atraso maximo aplicados aqui:
         // o que passa do limite e descartado, nao "guardado" para depois)
         bool other_cmd = uxQueueMessagesWaiting(ctx->motion_queue) > 0U;
         float inc[AXIS_COUNT] = {0.0f, 0.0f, 0.0f};
+        mp_track_feed_t feed[AXIS_COUNT];
+        bool track_active = false;
+        bool track_force = false;
         int64_t last_update;
         portENTER_CRITICAL(&s_jog_mux);
         if (!other_cmd) {
@@ -1998,9 +2073,49 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
                 inc[i] = s_jog_accum[i];
                 s_jog_accum[i] = 0.0f;
             }
+            track_active = s_track_active;
+            if (track_active) {
+                memcpy(feed, s_track_feed, sizeof(feed));
+                track_force = s_track_force;
+            }
         }
         last_update = s_jog_last_update_us;
         portEXIT_CRITICAL(&s_jog_mux);
+
+        // Alvo absoluto (U): extrapolado com a velocidade estimada entre frames e avancado
+        // pelo atraso do pipeline; a velocidade vai ao seguidor como feedforward
+        float target_vel[AXIS_COUNT] = {0.0f, 0.0f, 0.0f};
+        int64_t now_us = esp_timer_get_time();
+        for (size_t i = 0; i < AXIS_COUNT; ++i) {
+            ax[i].lim.vmax = track_active ? ax[i].vmax_track : ax[i].vmax_jog;
+        }
+        for (size_t i = 0; track_active && i < AXIS_COUNT; ++i) {
+            bool open_loop = track_force && i != AXIS_Z_ID;
+            if (ax[i].blocked && !open_loop) {
+                if (!ax[i].warned) {
+                    ax[i].warned = true;
+                    printf("AVISO: alvo U %c ignorado: %s.\n", axis_char_from_index(i),
+                           (i == AXIS_Z_ID) ? "eixo Z bloqueado (ALARM OFF ou HOME Z)"
+                                            : "encoder indisponivel (use UF ou DIAG)");
+                }
+                continue;
+            }
+            float abs_target = 0.0f, abs_vel = 0.0f;
+            mp_track_feed_eval(&feed[i], now_us, ax[i].lead_s, &abs_target, &abs_vel);
+            float scale = (i == AXIS_Z_ID) ? 1.0f : 1.0f / ax[i].step_size;
+            float t = (abs_target - start_pos[i]) * scale;
+            float v = abs_vel * scale;
+            if (!open_loop) {
+                float clamped = fmaxf(ax[i].lo, fminf(ax[i].hi, t));
+                if (clamped != t) {
+                    v = 0.0f; // no limite o alvo para: sem feedforward empurrando contra ele
+                }
+                t = clamped;
+            }
+            ax[i].target = t;
+            target_vel[i] = v;
+        }
+
         for (size_t i = 0; i < AXIS_COUNT; ++i) {
             if (inc[i] == 0.0f) {
                 continue;
@@ -2014,17 +2129,17 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
                 }
                 continue;
             }
-            float lag = ax[i].vmax * JOG_MAX_LAG_S;
+            float lag = ax[i].vmax_jog * JOG_MAX_LAG_S;
             float t = ax[i].target + inc[i] / ax[i].step_size;
-            t = fmaxf(ax[i].pos - lag, fminf(ax[i].pos + lag, t));
+            t = fmaxf(ax[i].trk.pos - lag, fminf(ax[i].trk.pos + lag, t));
             ax[i].target = fmaxf(ax[i].lo, fminf(ax[i].hi, t));
         }
 
         // Um periodo do seguidor
         bool moving = false;
         for (size_t i = 0; i < AXIS_COUNT; ++i) {
-            seg_steps[i] += jog_follow(&ax[i], JOG_DT_S);
-            moving = moving || ax[i].vel != 0.0f || fabsf(ax[i].target - ax[i].pos) > 0.5f;
+            seg_steps[i] += jog_follow(&ax[i], target_vel[i], JOG_DT_S);
+            moving = moving || !mp_track_idle(&ax[i].trk) || fabsf(ax[i].target - ax[i].trk.pos) > 0.5f;
         }
         seg_periods++;
 
@@ -2053,7 +2168,9 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
             if (err != ESP_OK) {
                 break;
             }
-            z_ring[committed % 4U] = seg_steps[AXIS_Z_ID];
+            for (size_t i = 0; i < AXIS_COUNT; ++i) {
+                seg_ring[committed % 4U][i] = seg_steps[i];
+            }
             committed++;
             pool_idx ^= 1U;
             seg_steps[0] = seg_steps[1] = seg_steps[2] = 0;
@@ -2068,7 +2185,6 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         uint32_t idle_ms = (uint32_t)lroundf((float)seg_periods * JOG_DT_S * 1000.0f);
         seg_periods = 0;
         if (!moving) {
-            ax[0].vel = ax[1].vel = ax[2].vel = 0.0f;
             bool in_flight = hardware_stream_completed() < committed;
             bool timed_out = (esp_timer_get_time() - last_update) > JOG_IDLE_EXIT_US;
             if (!in_flight && (other_cmd || timed_out)) {
@@ -2076,6 +2192,7 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
                 portENTER_CRITICAL(&s_jog_mux);
                 if (other_cmd || (s_jog_accum[0] == 0.0f && s_jog_accum[1] == 0.0f && s_jog_accum[2] == 0.0f)) {
                     s_jog_running = false; // um JOG novo a partir daqui enfileira outro comando
+                    s_track_active = false;
                     exit_now = true;
                 }
                 portEXIT_CRITICAL(&s_jog_mux);
@@ -2098,14 +2215,10 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
     if (err == ESP_OK) {
         err = hardware_stream_wait(committed);
     }
-    uint32_t completed = hardware_stream_completed();
-    while (reported < completed) {
-        ctx->state.atual_z += z_ring[reported % 4U];
-        reported++;
-    }
+    jog_report_completed(ctx, seg_ring, &reported);
     if (err != ESP_OK) {
         for (uint32_t k = reported; k < committed; ++k) {
-            if (z_ring[k % 4U] != 0) {
+            if (seg_ring[k % 4U][AXIS_Z_ID] != 0) {
                 ctx->state.homed[AXIS_Z_ID] = false;
                 ESP_LOGW(APP_TAG, "Jog com Z interrompido: posicao Z incerta, execute HOME Z.");
                 break;
@@ -2114,6 +2227,14 @@ static esp_err_t motion_jog_run(app_context_t *ctx)
         jog_clear_accum();
     }
     hardware_stream_end();
+    // Motores parados: ressincroniza a posicao estimada com o encoder, como o motor stream
+    float enc = 0.0f;
+    if (hardware_read_axis_encoder('C', &enc) == ESP_OK && isfinite(enc)) {
+        ctx->state.pos_c_deg = enc;
+    }
+    if (hardware_read_axis_encoder('A', &enc) == ESP_OK && isfinite(enc)) {
+        ctx->state.pos_a_deg = enc;
+    }
     xSemaphoreGive(ctx->motion_mutex);
     portENTER_CRITICAL(&s_jog_mux);
     s_jog_running = false;

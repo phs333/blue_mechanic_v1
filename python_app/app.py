@@ -41,7 +41,7 @@ def main():
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 10))
     app.setApplicationName("Blue Mechanic V2")
-    app.setApplicationVersion("2.0")
+    app.setApplicationVersion("2.1")
     app.setOrganizationName("Blue Mechanic")
 
     # Suppress unintended mouse wheel changes on unfocused spinboxes and combos

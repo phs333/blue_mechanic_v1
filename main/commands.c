@@ -67,6 +67,7 @@ void commands_print_help(void)
     puts("MOTION ENGINE STREAM|LEGACY (motor de movimento; STREAM = S-curve no ISR + encadeamento)");
     puts("MOTION LOOKAHEAD ON|OFF (encadeia movimentos consecutivos da fila sem parar)");
     puts("MOTION JERK C|A <deg/s> | Z <mm/s> (salto maximo de velocidade numa juncao)");
+    puts("MOTION TJERK C|A <deg/s^3> | Z <mm/s^3> (curva S do seguidor U/jog; 0 = sem curva S)");
     puts("VELOCIDADE <1..5> (nivel de velocidade de C/A em uso, nao salvo na NVS)");
     puts("ACCEL C|A <deg/s^2> | Z <mm/s^2>");
     puts("SPEED_MAX C|A|Z <value> | ACCEL_MAX C|A|Z <value>");
@@ -222,6 +223,8 @@ void commands_print_config(const app_context_t *ctx)
     printf("CONFIG MOTION ENGINE=%s LOOKAHEAD=%u JERK C=%.2f A=%.2f Z=%.2f\n",
            ctx->ext.motion_engine == MOTION_ENGINE_STREAM ? "STREAM" : "LEGACY",
            (unsigned)ctx->ext.lookahead, ctx->ext.jerk[0], ctx->ext.jerk[1], ctx->ext.jerk[2]);
+    printf("CONFIG TRACK_JERK C=%.0f A=%.0f Z=%.0f\n",
+           ctx->ext.track_jerk[0], ctx->ext.track_jerk[1], ctx->ext.track_jerk[2]);
     printf("CONFIG STEALTH_MAX C=%.2f A=%.2f Z=%.2f\n",
            ctx->ext.stealth_max_speed[0], ctx->ext.stealth_max_speed[1], ctx->ext.stealth_max_speed[2]);
     printf("CONFIG CAN enabled=%u node=%u bitrate=%lu cmd=0x%03lX status=0x%03lX event=0x%03lX\n",
@@ -944,6 +947,19 @@ void commands_handle_line(app_context_t *ctx, const char *line)
     }
     char jerk_axis = '\0';
     float jerk_val = 0.0f;
+    if (sscanf(cmd, "MOTION TJERK %c %f", &jerk_axis, &jerk_val) == 2) {
+        size_t axis_index = 0;
+        char axis = '\0';
+        if (!parse_axis_token(jerk_axis, &axis_index, &axis) || !(jerk_val >= 0.0f) || jerk_val > 10000000.0f) {
+            puts("Uso: MOTION TJERK C|A|Z <0..10000000>");
+            return;
+        }
+        ctx->ext.track_jerk[axis_index] = jerk_val;
+        storage_request_save_ext(&ctx->ext);
+        printf("Jerk do seguidor %c = %.0f %s (salvo na NVS; vale a partir do proximo U/jog).\n", axis, jerk_val,
+               axis == 'Z' ? "mm/s^3" : "deg/s^3");
+        return;
+    }
     if (sscanf(cmd, "MOTION JERK %c %f", &jerk_axis, &jerk_val) == 2) {
         size_t axis_index = 0;
         char axis = '\0';
@@ -1542,30 +1558,30 @@ void commands_handle_line(app_context_t *ctx, const char *line)
         float c_deg = 0.0f, a_deg = 0.0f, z_mm = 0.0f;
         unsigned laser1 = 0, laser2 = 0;
         unsigned node_dummy = 0;
-        int parsed = sscanf(p, "%u %f %f %f %u %u", &node_dummy, &c_deg, &a_deg, &z_mm, &laser1, &laser2);
-        if (parsed != 6) {
+        // Conta os campos antes de escolher o formato: com "%u %f ..." primeiro, a linha de 5
+        // campos "45.5 -10 50 0 0" era aceita como node=45, C=0.5, A=-10, Z=50.
+        int fields = 0;
+        for (const char *q = p; *q != '\0';) {
+            while (*q == ' ' || *q == '\t') q++;
+            if (*q == '\0') break;
+            fields++;
+            while (*q != '\0' && *q != ' ' && *q != '\t') q++;
+        }
+        int parsed = 0;
+        if (fields == 6) {
+            parsed = sscanf(p, "%u %f %f %f %u %u", &node_dummy, &c_deg, &a_deg, &z_mm, &laser1, &laser2) - 1;
+        } else if (fields == 5) {
             parsed = sscanf(p, "%f %f %f %u %u", &c_deg, &a_deg, &z_mm, &laser1, &laser2);
         }
-        if (parsed == 6 || parsed == 5) {
-            uint16_t msteps_c = ctx->settings.tmc_microsteps[AXIS_C_ID] ? ctx->settings.tmc_microsteps[AXIS_C_ID] : 16;
-            float spr_c = ctx->settings.steps_per_rev[AXIS_C_ID] ? (float)ctx->settings.steps_per_rev[AXIS_C_ID] : 200.0f;
-            float deg_per_step_c = 360.0f / (spr_c * (float)msteps_c);
-
-            uint16_t msteps_a = ctx->settings.tmc_microsteps[AXIS_A_ID] ? ctx->settings.tmc_microsteps[AXIS_A_ID] : 16;
-            float spr_a = ctx->settings.steps_per_rev[AXIS_A_ID] ? (float)ctx->settings.steps_per_rev[AXIS_A_ID] : 200.0f;
-            float deg_per_step_a = 360.0f / (spr_a * (float)msteps_a);
-
+        if (parsed == 5) {
             uint16_t z_teeth = ctx->settings.z_pulley_teeth ? ctx->settings.z_pulley_teeth : DEFAULT_Z_PULLEY_TEETH;
             uint16_t msteps_z = ctx->settings.tmc_microsteps[AXIS_Z_ID] ? ctx->settings.tmc_microsteps[AXIS_Z_ID] : 16;
             float spr_z = ctx->settings.steps_per_rev[AXIS_Z_ID] ? (float)ctx->settings.steps_per_rev[AXIS_Z_ID] : 200.0f;
             float mm_per_step_z = (float)(z_teeth * Z_BELT_PITCH_MM) / (spr_z * (float)msteps_z);
 
-            int32_t steps_c = (int32_t)lroundf(c_deg / deg_per_step_c);
-            int32_t steps_a = (int32_t)lroundf(a_deg / deg_per_step_a);
             int32_t steps_z = (int32_t)lroundf(z_mm / mm_per_step_z);
 
-            esp_err_t err = motion_post_move_sync(ctx, steps_c, steps_a, steps_z,
-                                                  -1.0f, -1.0f, -1.0f, -1.0f, false, 0, 0);
+            esp_err_t err = motion_track_set(ctx, c_deg, a_deg, steps_z, false);
             if (err == ESP_OK) {
                 if (laser1 > 4095U) laser1 = 4095U;
                 if (laser2 > 4095U) laser2 = 4095U;

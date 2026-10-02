@@ -133,14 +133,21 @@ class CanProtocolTests(unittest.TestCase):
         self.assertEqual(len(self.client.frames), 1)
 
         _, payload, _ = self.client.frames[0]
-        opcode, angle_c_deci, angle_a_deci, distance_z_centi, flags = struct.unpack(
+        opcode, angle_c_deci, angle_a_deci, distance_z_units, flags = struct.unpack(
             "<BhhhB", payload
         )
         self.assertEqual(opcode, CanOpcode.MOVE_SYNC)
         self.assertEqual(angle_c_deci, 900)
         self.assertEqual(angle_a_deci, -450)
-        self.assertEqual(distance_z_centi, 1250)
+        self.assertEqual(distance_z_units, 625)  # 1000 passos = 12,5 mm, em unidades de 0,02 mm
         self.assertEqual(flags, 0x01)
+
+    def test_move_sync_reaches_full_z_travel(self):
+        # 38400 passos = 480 mm: nao cabia no int16 de 0,01 mm (max 327,67 mm)
+        self.assertTrue(self.client.move_sync(0, 0, 38400))
+        _, payload, _ = self.client.frames[-1]
+        _, _, _, distance_z_units, _ = struct.unpack("<BhhhB", payload)
+        self.assertEqual(distance_z_units, 24000)
 
     def test_move_sync_sends_axis_profiles_before_trigger_when_requested(self):
         self.assertTrue(
@@ -228,6 +235,10 @@ class TeensySerialProtocolTests(unittest.TestCase):
             )
         )
         self.assertEqual(self.client.commands, ["MSF 3 90.0 -45.0 12.50"])
+
+    def test_move_sync_full_z_travel_via_teensy(self):
+        self.assertTrue(self.client.move_sync(0, 0, 38400))
+        self.assertEqual(self.client.commands[-1], "MS 3 0.0 0.0 480.00")
 
     def test_status_and_position_lines_update_selected_node(self):
         self.client._parse_response_line("STATUS 3 61 4095 2048 1 2 4")

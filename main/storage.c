@@ -1,5 +1,7 @@
 #include "storage.h"
 
+#include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -112,6 +114,12 @@ esp_err_t storage_load_ext(ext_settings_t *ext)
         // Blob de firmware antigo (menor): copia so os campos existentes; o resto fica no padrao
         memcpy(ext, raw, len < sizeof(*ext) ? len : sizeof(*ext));
         ext->size = sizeof(*ext);
+        // Blob anterior ao seguidor com curva S: o jerk de juncao ainda no padrao antigo de
+        // fabrica sobe para o novo (valores ajustados pelo usuario ficam como estao)
+        if (len < offsetof(ext_settings_t, track_jerk) + sizeof(ext->track_jerk) &&
+            ext->jerk[0] == 15.0f && ext->jerk[1] == 15.0f && ext->jerk[2] == 10.0f) {
+            memcpy(ext->jerk, defaults.jerk, sizeof(ext->jerk));
+        }
     }
     for (size_t i = 0; i < AXIS_COUNT; ++i) {
         if (!(ext->stealth_max_speed[i] >= 0.0f) || ext->stealth_max_speed[i] > 10000.0f) {
@@ -119,6 +127,9 @@ esp_err_t storage_load_ext(ext_settings_t *ext)
         }
         if (!(ext->jerk[i] >= 0.0f) || ext->jerk[i] > 1000.0f) {
             ext->jerk[i] = defaults.jerk[i];
+        }
+        if (!(ext->track_jerk[i] >= 0.0f) || ext->track_jerk[i] > 10000000.0f) {
+            ext->track_jerk[i] = defaults.track_jerk[i];
         }
     }
     if (ext->motion_engine > MOTION_ENGINE_STREAM) {
@@ -204,6 +215,84 @@ static esp_err_t save_node_identity(nvs_handle_t handle, const persisted_setting
     return err;
 }
 
+/*
+ * Migracao unica dos parametros de movimento: campos ainda no padrao ANTIGO de fabrica
+ * passam ao padrao novo (limites +-360, velocidade/aceleracao do seguidor em tempo real).
+ * Valores ajustados pelo usuario nao sao tocados. O bitrate CAN fica de fora de proposito:
+ * trocar so um no derrubaria o barramento; use CAN_OP_SET_BITRATE (CANBR no Teensy).
+ */
+#define MIGRATION_KEY "mig_motion2"
+
+static bool float_eq(float a, float b)
+{
+    return fabsf(a - b) < 1e-3f;
+}
+
+static void mark_migration_done(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        (void)nvs_set_u8(handle, MIGRATION_KEY, 1U);
+        (void)nvs_commit(handle);
+        nvs_close(handle);
+    }
+}
+
+/* Retorna true se algum campo mudou (o chamador grava e so entao marca como feita). */
+static bool migrate_motion_defaults(persisted_settings_t *settings)
+{
+    nvs_handle_t handle;
+    if (nvs_open(SETTINGS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+    uint8_t done = 0;
+    bool already = (nvs_get_u8(handle, MIGRATION_KEY, &done) == ESP_OK && done != 0U);
+    nvs_close(handle);
+    if (already) {
+        return false;
+    }
+    bool changed = false;
+    if (float_eq(settings->limit_min_c_deg, -540.0f) && float_eq(settings->limit_max_c_deg, 540.0f)) {
+        settings->limit_min_c_deg = DEFAULT_LIMIT_MIN_C_DEG;
+        settings->limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG;
+        changed = true;
+    }
+    if (float_eq(settings->limit_min_a_deg, -540.0f) && float_eq(settings->limit_max_a_deg, 540.0f)) {
+        settings->limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG;
+        settings->limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG;
+        changed = true;
+    }
+    const float old_accel[AXIS_COUNT] = {1800.0f, 1800.0f, 1000.0f};
+    const float new_accel[AXIS_COUNT] = {DEFAULT_ACCEL_DEG_S2_CA, DEFAULT_ACCEL_DEG_S2_CA, DEFAULT_ACCEL_MM_S2_Z};
+    const float old_accel_max[AXIS_COUNT] = {3600.0f, 3600.0f, 2000.0f};
+    const float new_accel_max[AXIS_COUNT] = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA,
+                                             DEFAULT_ACCEL_MAX_MM_S2_Z};
+    const float old_speed[AXIS_COUNT] = {140.0f, 140.0f, 250.0f};
+    const float new_speed[AXIS_COUNT] = {DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_MM_S_Z};
+    for (size_t i = 0; i < AXIS_COUNT; ++i) {
+        if (float_eq(settings->accel_max[i], old_accel_max[i])) {
+            settings->accel_max[i] = new_accel_max[i];
+            changed = true;
+        }
+        if (float_eq(settings->accel[i], old_accel[i])) {
+            settings->accel[i] = new_accel[i];
+            changed = true;
+        }
+        if (float_eq(settings->speed[i], old_speed[i])) {
+            settings->speed[i] = new_speed[i];
+            changed = true;
+        }
+    }
+    if (changed) {
+        ESP_LOGW(APP_TAG, "Parametros de movimento migrados para os novos padroes (limites C/A +-360 deg, "
+                          "accel %.0f deg/s2, vel %.0f deg/s).",
+                 (double)settings->accel[0], (double)settings->speed[0]);
+    } else {
+        mark_migration_done();
+    }
+    return changed;
+}
+
 esp_err_t storage_load_settings(persisted_settings_t *settings)
 {
     ESP_RETURN_ON_FALSE(settings != NULL, ESP_ERR_INVALID_ARG, APP_TAG, "settings nulo");
@@ -226,6 +315,7 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
                  (unsigned)SETTINGS_VERSION);
         *settings = (persisted_settings_t)APP_SETTINGS_DEFAULT_INIT;
         restore_node_identity(settings);
+        mark_migration_done();
         return storage_save_settings(settings);
     }
 
@@ -267,9 +357,11 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         settings->home_a_deg = 0.0f;
     }
 
-    if (settings->speed[0] <= 0.0f) settings->speed[0] = 140.0f;
-    if (settings->speed[1] <= 0.0f) settings->speed[1] = 140.0f;
+    if (settings->speed[0] <= 0.0f) settings->speed[0] = DEFAULT_SPEED_DEG_S_CA;
+    if (settings->speed[1] <= 0.0f) settings->speed[1] = DEFAULT_SPEED_DEG_S_CA;
     if (settings->speed[2] <= 0.0f) settings->speed[2] = 12.5f;
+
+    bool migrated = migrate_motion_defaults(settings);
 
     // Nos ja em campo (gravados por firmwares anteriores) ainda nao tem as chaves de
     // identidade: grava-as agora para que sobrevivam a um futuro OTA com nova versao.
@@ -282,6 +374,13 @@ esp_err_t storage_load_settings(persisted_settings_t *settings)
         nvs_close(handle);
     }
 
+    if (migrated) {
+        esp_err_t save_err = storage_save_settings(settings);
+        if (save_err == ESP_OK) {
+            mark_migration_done();
+        }
+        return save_err;
+    }
     memcpy(&s_last_saved, settings, sizeof(s_last_saved));
     s_last_saved_valid = true;
     return ESP_OK;

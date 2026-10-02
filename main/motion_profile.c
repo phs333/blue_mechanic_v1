@@ -378,3 +378,152 @@ bool mp_junction(const mp_request_t *a, const mp_request_t *b, const float jerk[
     *rate_entry_b = y;
     return true;
 }
+
+/* ------------------------------------------------------------------------------------ */
+/* Seguidor de alvo em tempo real                                                        */
+/* ------------------------------------------------------------------------------------ */
+
+static float mp_clampf(float v, float lo, float hi)
+{
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+
+float mp_track_brake_speed(float dist, float accel)
+{
+    if (!(dist > 0.0f) || !(accel > 0.0f)) {
+        return 0.0f;
+    }
+    return sqrtf(2.0f * accel * dist);
+}
+
+uint8_t mp_track_smooth_periods(float accel, float jerk, float dt)
+{
+    if (!(jerk > 0.0f) || !(accel > 0.0f) || !(dt > 0.0f)) {
+        return 1U;
+    }
+    /* A aceleracao interna pode inverter de +A para -A num periodo: a media de N periodos
+     * limita entao o jerk a 2A/(N dt). */
+    float n = 2.0f * accel / (jerk * dt);
+    if (!(n >= 1.0f)) {
+        return 1U;
+    }
+    return (n >= (float)MP_TRACK_MAX_SMOOTH) ? (uint8_t)MP_TRACK_MAX_SMOOTH : (uint8_t)lroundf(n);
+}
+
+void mp_track_reset(mp_track_state_t *s, float pos)
+{
+    memset(s, 0, sizeof(*s));
+    s->pos_in = pos;
+    s->pos = pos;
+}
+
+void mp_track_step(mp_track_state_t *s, const mp_track_limits_t *lim, float target, float target_vel, float dt)
+{
+    const float vmax = lim->vmax;
+    const float amax = lim->accel;
+    if (!(dt > 0.0f) || !(vmax > 0.0f) || !(amax > 0.0f)) {
+        return;
+    }
+
+    /* 1) Seguidor interno com aceleracao limitada. Frenagem sobre o erro previsto para o
+     *    fim do periodo; sem a velocidade do alvo (feedforward) haveria atraso de v/2a. */
+    float vt = mp_clampf(target_vel, -vmax, vmax);
+    float e = target - s->pos_in;
+    float u = s->vel_in - vt;
+    float e_pred = e - u * dt;
+    if (e_pred * e < 0.0f) {
+        e_pred = 0.0f;
+    }
+    float corr = mp_track_brake_speed(fabsf(e_pred), amax);
+    float v_des = mp_clampf(vt + ((e < 0.0f) ? -corr : corr), -vmax, vmax);
+    float dv_max = amax * dt;
+    float v0 = s->vel_in;
+    float v1 = v0 + mp_clampf(v_des - v0, -dv_max, dv_max);
+    float d = 0.5f * (v0 + v1) * dt;
+    float e_next = e + vt * dt; /* onde o alvo estara, relativo a posicao atual */
+    if ((e >= 0.0f && e_next >= 0.0f && d > e_next) || (e <= 0.0f && e_next <= 0.0f && d < e_next)) {
+        d = e_next;             /* chegaria alem do alvo: pousa nele com a velocidade dele */
+        v1 = vt;
+    }
+    s->pos_in += d;
+    s->vel_in = v1;
+
+    /* 2) Media movel dos deslocamentos: a rampa de aceleracao do seguidor interno vira
+     *    uma rampa de N periodos (jerk = A / (N*dt)). A soma dos deslocamentos e
+     *    preservada, entao a posicao final e exata e nunca passa do alvo. */
+    uint8_t n = lim->smooth_n;
+    if (n < 1U) n = 1U;
+    if (n > MP_TRACK_MAX_SMOOTH) n = MP_TRACK_MAX_SMOOTH;
+    s->hist[s->idx] = d;
+    s->idx = (uint8_t)((s->idx + 1U) % n);
+    float sum = 0.0f;
+    for (uint8_t i = 0; i < n; ++i) {
+        sum += s->hist[i];
+    }
+    float d_out = sum / (float)n;
+    float v_out = d_out / dt;
+    s->acc = (v_out - s->vel) / dt;
+    s->vel = v_out;
+    s->pos += d_out;
+    /* Em repouso, elimina o residuo de arredondamento da media */
+    if (sum == 0.0f && s->vel_in == 0.0f) {
+        s->pos = s->pos_in;
+    }
+}
+
+bool mp_track_idle(const mp_track_state_t *s)
+{
+    return s->vel_in == 0.0f && s->vel == 0.0f && s->pos == s->pos_in;
+}
+
+#define MP_FEED_MAX_GAP_S 0.25f
+#define MP_FEED_HORIZON 1.25f
+
+void mp_track_feed_reset(mp_track_feed_t *f)
+{
+    memset(f, 0, sizeof(*f));
+}
+
+void mp_track_feed_update(mp_track_feed_t *f, float target, int64_t t_us)
+{
+    if (f->valid) {
+        float dt = (float)(t_us - f->t_us) * 1e-6f;
+        if (dt > 0.001f && dt < MP_FEED_MAX_GAP_S) {
+            /* Com taxa estavel o intervalo medio filtra o jitter de chegada (USB/CAN), que
+             * sobre ~16 ms viraria ruido de velocidade; um frame perdido (2x) usa o real. */
+            float span = dt;
+            if (f->interval_s > 0.0f && dt > 0.5f * f->interval_s && dt < 1.5f * f->interval_s) {
+                span = f->interval_s;
+            }
+            f->vel = (target - f->target) / span;
+            f->interval_s = (f->interval_s > 0.0f) ? f->interval_s + 0.25f * (dt - f->interval_s) : dt;
+        } else if (dt >= MP_FEED_MAX_GAP_S) {
+            f->vel = 0.0f;
+            f->interval_s = 0.0f;
+        }
+        /* dt <= 1 ms: amostras coladas (rajada); mantem a velocidade e so troca o alvo */
+    }
+    f->target = target;
+    f->t_us = t_us;
+    f->valid = true;
+}
+
+void mp_track_feed_eval(const mp_track_feed_t *f, int64_t t_us, float lead_s, float *target, float *vel)
+{
+    float age = (float)(t_us - f->t_us) * 1e-6f;
+    float horizon = MP_FEED_HORIZON * f->interval_s;
+    if (!f->valid || f->vel == 0.0f || !(horizon > 0.0f)) {
+        *target = f->target;
+        *vel = 0.0f;
+        return;
+    }
+    if (age < 0.0f) {
+        age = 0.0f;
+    }
+    if (!(lead_s > 0.0f)) {
+        lead_s = 0.0f;
+    }
+    /* Sem amostra nova alem do horizonte o alvo para onde estava (continuo, sem recuar) */
+    *target = f->target + f->vel * (fminf(age, horizon) + lead_s);
+    *vel = (age < horizon) ? f->vel : 0.0f;
+}

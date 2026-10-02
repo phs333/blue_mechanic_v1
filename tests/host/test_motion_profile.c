@@ -289,8 +289,201 @@ static void test_jog_constant_velocity_segment(void)
     }
 }
 
+/* ---------------------------------------------------------------------------------- */
+/* Seguidor em tempo real (jog / streaming U)                                          */
+/* ---------------------------------------------------------------------------------- */
+
+/* Eixo C padrao: 200 passos x 16 micro = 8,889 passos/grau; defaults novos do firmware */
+#define TRK_SPD 8.8889f
+#define TRK_DT 0.005f
+#define TRK_ACC (3600.0f * TRK_SPD)
+#define TRK_JERK (180000.0f * TRK_SPD)
+
+static mp_track_limits_t trk_limits(void)
+{
+    mp_track_limits_t l = {.vmax = 720.0f * TRK_SPD, .accel = TRK_ACC,
+                           .smooth_n = mp_track_smooth_periods(TRK_ACC, TRK_JERK, TRK_DT)};
+    return l;
+}
+
+/* Atraso da media movel, compensado pelo firmware avaliando o alvo a frente */
+static float trk_delay(const mp_track_limits_t *l)
+{
+    return 0.5f * (float)(l->smooth_n - 1U) * TRK_DT;
+}
+
+typedef struct {
+    double max_overshoot;
+    double max_acc;
+    double max_jerk;
+    double max_vel;
+    double final_err;
+    int settle_k;
+} trk_stats_t;
+
+static trk_stats_t trk_run_step(float target, float seconds)
+{
+    mp_track_limits_t lim = trk_limits();
+    mp_track_state_t s;
+    mp_track_reset(&s, 0.0f);
+    trk_stats_t st = {0};
+    st.settle_k = -1;
+    float prev_acc = 0.0f;
+    int n = (int)(seconds / TRK_DT);
+    for (int k = 0; k < n; ++k) {
+        mp_track_step(&s, &lim, target, 0.0f, TRK_DT);
+        double over = (target >= 0.0f) ? s.pos - target : target - s.pos;
+        if (over > st.max_overshoot) st.max_overshoot = over;
+        if (fabs(s.acc) > st.max_acc) st.max_acc = fabs(s.acc);
+        if (fabs(s.vel) > st.max_vel) st.max_vel = fabs(s.vel);
+        double jerk = fabs(s.acc - prev_acc) / TRK_DT;
+        if (jerk > st.max_jerk) st.max_jerk = jerk;
+        prev_acc = s.acc;
+        if (st.settle_k < 0 && mp_track_idle(&s)) st.settle_k = k + 1;
+    }
+    st.final_err = fabs(s.pos - target);
+    return st;
+}
+
+static void test_track_step_no_overshoot(void)
+{
+    mp_track_limits_t lim = trk_limits();
+    double jerk_lim = TRK_JERK;
+    const float targets[] = {1.0f, 5.0f, 80.0f, 800.0f, -3200.0f, 9000.0f};
+    for (size_t k = 0; k < sizeof(targets) / sizeof(targets[0]); ++k) {
+        trk_stats_t st = trk_run_step(targets[k], 4.0f);
+        printf("[track_step %g passos N=%u] overshoot %.4f  v %.0f  a %.0f/%.0f  jerk %.0f/%.0f  parado em %d ms\n",
+               targets[k], lim.smooth_n, st.max_overshoot, st.max_vel, st.max_acc, lim.accel, st.max_jerk,
+               jerk_lim, st.settle_k * 5);
+        CHECK(st.final_err < 1e-3, "degrau %g nao chegou (erro %g)", targets[k], st.final_err);
+        CHECK(st.settle_k > 0, "degrau %g nao ficou ocioso", targets[k]);
+        CHECK(st.max_overshoot < 0.01, "degrau %g ultrapassou %g passos", targets[k], st.max_overshoot);
+        CHECK(st.max_vel <= lim.vmax * 1.001, "degrau %g excedeu vmax", targets[k]);
+        /* o pouso do seguidor interno pode somar uma fracao de periodo de aceleracao */
+        CHECK(st.max_acc <= lim.accel * 1.05, "degrau %g excedeu accel (%g)", targets[k], st.max_acc);
+        CHECK(st.max_jerk <= jerk_lim * 1.01, "degrau %g excedeu jerk (%g)", targets[k], st.max_jerk);
+    }
+}
+
+/* Alvo continuo com velocidade exata: rampa e senoide, com e sem feedforward */
+static void test_track_feedforward_continuous(void)
+{
+    mp_track_limits_t lim = trk_limits();
+    float lead = trk_delay(&lim);
+    {
+        mp_track_state_t s;
+        mp_track_reset(&s, 0.0f);
+        float v = 200.0f * TRK_SPD;
+        double max_err = 0.0;
+        for (int k = 1; k <= 400; ++k) {
+            float t = k * TRK_DT; /* fim do periodo; o alvo passado e o do inicio (+ lead) */
+            mp_track_step(&s, &lim, v * (t - TRK_DT + lead), v, TRK_DT);
+            if (t > 0.3f && fabs(s.pos - v * t) > max_err) max_err = fabs(s.pos - v * t);
+        }
+        printf("[track_ramp 200 deg/s] erro apos 0,3 s: %.3f passos\n", max_err);
+        CHECK(max_err < 1.0, "rampa com feedforward atrasada %.2f passos", max_err);
+    }
+    for (int ff = 0; ff <= 1; ++ff) {
+        mp_track_state_t s;
+        mp_track_reset(&s, 0.0f);
+        float amp = 45.0f * TRK_SPD;
+        float w = 2.0f * 3.14159265f;
+        double max_err = 0.0;
+        for (int k = 1; k <= 800; ++k) {
+            float t = k * TRK_DT;
+            float t0 = t - TRK_DT + (ff ? lead : 0.0f);
+            mp_track_step(&s, &lim, amp * sinf(w * t0), ff ? amp * w * cosf(w * t0) : 0.0f, TRK_DT);
+            float x = amp * sinf(w * t);
+            if (t > 1.0f && fabs(s.pos - x) > max_err) max_err = fabs(s.pos - x);
+        }
+        printf("[track_sine 45 deg 1 Hz %s feedforward] erro max %.2f passos (%.2f deg)\n",
+               ff ? "com" : "sem", max_err, max_err / TRK_SPD);
+        if (ff) {
+            CHECK(max_err < 2.0 * TRK_SPD, "senoide com feedforward: erro %.2f passos", max_err);
+        }
+    }
+}
+
+/* Alvo amostrado como o TouchDesigner manda: frames a taxa fixa, chegada com jitter */
+static void test_track_sampled_stream(void)
+{
+    mp_track_limits_t lim = trk_limits();
+    float lead = TRK_DT + trk_delay(&lim); /* firmware: segmento em voo + media movel */
+    const float rates[] = {30.0f, 60.0f, 120.0f};
+    for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); ++r) {
+        for (int ff = 0; ff <= 1; ++ff) {
+            mp_track_state_t s;
+            mp_track_reset(&s, 0.0f);
+            mp_track_feed_t feed;
+            mp_track_feed_reset(&feed);
+            float amp = 90.0f * TRK_SPD;
+            float w = 2.0f * 3.14159265f * 0.5f;
+            int64_t frame_us = (int64_t)(1e6f / rates[r]);
+            int64_t next_frame = 0;
+            unsigned seed = 12345U;
+            double max_err = 0.0, max_jerk = 0.0;
+            float prev_acc = 0.0f;
+            for (int k = 1; k <= 1600; ++k) {
+                int64_t now = (int64_t)k * 5000;
+                while (next_frame <= now) {
+                    seed = seed * 1103515245U + 12345U;
+                    int64_t jitter = (int64_t)((seed >> 16) % 2000U); /* 0..2 ms USB + CAN */
+                    float x = amp * sinf(w * (float)next_frame * 1e-6f);
+                    mp_track_feed_update(&feed, x, next_frame + jitter);
+                    next_frame += frame_us;
+                }
+                float tgt, vel;
+                mp_track_feed_eval(&feed, now, ff ? lead : 0.0f, &tgt, &vel);
+                mp_track_step(&s, &lim, ff ? tgt : feed.target, ff ? vel : 0.0f, TRK_DT);
+                /* o segmento planejado agora roda depois do que ja esta em voo: termina em now + 2 dt */
+                float truth = amp * sinf(w * (float)(now + 2 * 5000) * 1e-6f);
+                if (k > 400) {
+                    if (fabs(s.pos - truth) > max_err) max_err = fabs(s.pos - truth);
+                    double j = fabs(s.acc - prev_acc) / TRK_DT;
+                    if (j > max_jerk) max_jerk = j;
+                }
+                prev_acc = s.acc;
+            }
+            printf("[track_stream %.0f Hz %s feedforward] erro max %.2f deg  jerk max %.0f deg/s3\n",
+                   rates[r], ff ? "com" : "sem", max_err / TRK_SPD, max_jerk / TRK_SPD);
+            if (ff) {
+                /* extrapolacao linear: o erro cresce com o intervalo entre frames */
+                double lim_deg = (rates[r] < 45.0f) ? 3.0 : 1.5;
+                CHECK(max_err / TRK_SPD < lim_deg, "stream %.0f Hz: erro %.2f deg", rates[r], max_err / TRK_SPD);
+            }
+        }
+    }
+}
+
+static void test_track_feed_gaps(void)
+{
+    mp_track_feed_t f;
+    mp_track_feed_reset(&f);
+    float tgt, vel;
+    mp_track_feed_update(&f, 0.0f, 0);
+    mp_track_feed_update(&f, 10.0f, 16667);
+    mp_track_feed_eval(&f, 16667 + 8000, 0.0f, &tgt, &vel);
+    CHECK(fabsf(vel - 600.0f) < 1.0f && fabsf(tgt - 14.8f) < 0.2f, "extrapolacao: alvo %g vel %g", tgt, vel);
+    /* Sem frame novo alem do horizonte: alvo para, velocidade zero */
+    mp_track_feed_eval(&f, 16667 + 100000, 0.0f, &tgt, &vel);
+    CHECK(vel == 0.0f && tgt < 10.0f + 600.0f * 0.0209f + 0.1f, "horizonte: alvo %g vel %g", tgt, vel);
+    /* Lacuna longa (TD pausado): nao gera velocidade gigante */
+    mp_track_feed_update(&f, 500.0f, 16667 + 900000);
+    mp_track_feed_eval(&f, 16667 + 905000, 0.02f, &tgt, &vel);
+    CHECK(vel == 0.0f && tgt == 500.0f, "lacuna: alvo %g vel %g", tgt, vel);
+    /* Alvo parado (TD continua mandando o mesmo ponto): velocidade zero no frame seguinte */
+    mp_track_feed_update(&f, 500.0f, 16667 + 921667);
+    mp_track_feed_update(&f, 500.0f, 16667 + 938334);
+    mp_track_feed_eval(&f, 16667 + 945000, 0.02f, &tgt, &vel);
+    CHECK(vel == 0.0f && tgt == 500.0f, "parado: alvo %g vel %g", tgt, vel);
+}
+
 int main(void)
 {
+    test_track_step_no_overshoot();
+    test_track_feedforward_continuous();
+    test_track_sampled_stream();
+    test_track_feed_gaps();
     test_jog_constant_velocity_segment();
     test_single_axis_long_move();
     test_short_triangular_move();

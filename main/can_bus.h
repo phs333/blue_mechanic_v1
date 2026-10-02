@@ -19,12 +19,14 @@ typedef enum {
     CAN_OP_AXIS_SPEED = 0x12,
     CAN_OP_AXIS_ACCEL = 0x13,
     CAN_OP_MOVE_PROFILE = 0x14,
+    CAN_OP_SET_BITRATE = 0x15, // [0x15, b0..b3] bitrate LE; ACK no bitrate atual, depois troca e grava na NVS
     CAN_OP_MOVE = 0x20,
     CAN_OP_HOME = 0x21,
     CAN_OP_MOVE_FORCE = 0x22,
     CAN_OP_MOVE_SYNC = 0x23,
     CAN_OP_STOP = 0x24,      // Parada imediata (payload: [0x24, flags]; bit0 = apagar lasers / E-STOP)
-    CAN_OP_MOVE_UNIFIED = 0x25, // Movimento unificado 3 eixos absolutos
+    CAN_OP_MOVE_UNIFIED = 0x25, // Movimento unificado 3 eixos absolutos (byte 7 bit 7 = aguardar COMMIT)
+    CAN_OP_SYNC_COMMIT = 0x26,  // Broadcast: aplica juntos os U marcados recebidos desde o ultimo commit
     CAN_OP_LASER = 0x30,
     CAN_OP_FAN = 0x31,
     CAN_OP_LASER_DUAL = 0x32, // Controle simultâneo dos 2 lasers: [0x32, L1_lo, L1_hi, L2_lo, L2_hi]

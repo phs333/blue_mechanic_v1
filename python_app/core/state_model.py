@@ -99,10 +99,10 @@ class HardwareParameters:
     # Home & Limits
     home_c_deg: float = 0.0  # Base Rotativa
     home_a_deg: float = 0.0  # Pivot dos Lasers
-    limit_min_deg_c: float = -540.0  # Limite angular mínimo Eixo C
-    limit_max_deg_c: float = 540.0   # Limite angular máximo Eixo C
-    limit_min_deg_a: float = -540.0  # Limite angular mínimo Eixo A
-    limit_max_deg_a: float = 540.0   # Limite angular máximo Eixo A
+    limit_min_deg_c: float = -360.0  # Limite angular mínimo Eixo C
+    limit_max_deg_c: float = 360.0   # Limite angular máximo Eixo C
+    limit_min_deg_a: float = -360.0  # Limite angular mínimo Eixo A
+    limit_max_deg_a: float = 360.0   # Limite angular máximo Eixo A
     max_passos_z: int = 38400        # 480 mm @ 80 passos/mm (20T GT2)
     z_pulley_teeth: int = 20         # Dentes da polia GT2 motor Z (20T padrão)
     c_start_speed_deg: float = 10.0  # Velocidade inicial da rampa S-Curve C (deg/s)
@@ -131,10 +131,10 @@ class HardwareParameters:
     
     # Speeds & Accelerations
     # Keep startup values aligned with APP_SETTINGS_DEFAULT_INIT in firmware.
-    speed: List[float] = field(default_factory=lambda: [140.0, 140.0, 250.0])
+    speed: List[float] = field(default_factory=lambda: [360.0, 360.0, 250.0])
     speed_max: List[float] = field(default_factory=lambda: [720.0, 720.0, 500.0])
-    accel_max: List[float] = field(default_factory=lambda: [3600.0, 3600.0, 2000.0])
-    accel: List[float] = field(default_factory=lambda: [1800.0, 1800.0, 1000.0])
+    accel_max: List[float] = field(default_factory=lambda: [7200.0, 7200.0, 4000.0])
+    accel: List[float] = field(default_factory=lambda: [3600.0, 3600.0, 2000.0])
     inverter: List[bool] = field(default_factory=lambda: [True, True, False])
     
     # TMC2209 Settings
@@ -151,12 +151,12 @@ class HardwareParameters:
     # Motor de movimento (firmware): STREAM = S-curve no ISR + encadeamento; LEGACY = anterior
     motion_engine: str = "STREAM"
     lookahead: bool = True
-    jerk: List[float] = field(default_factory=lambda: [15.0, 15.0, 10.0])
+    jerk: List[float] = field(default_factory=lambda: [30.0, 30.0, 15.0])
     
     # CAN Settings
     node_id: int = 1
-    can_enabled: bool = False
-    can_bitrate: int = 500000
+    can_enabled: bool = True
+    can_bitrate: int = 1000000
     can_command_base_id: int = 0x200
     can_status_base_id: int = 0x280
     can_event_base_id: int = 0x300

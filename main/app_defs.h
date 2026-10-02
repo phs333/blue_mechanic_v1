@@ -102,19 +102,21 @@
 #define DEFAULT_HOME_Y_DEG 0.0f
 #define DEFAULT_HOME_C_DEG 0.0f
 #define DEFAULT_HOME_A_DEG 0.0f
-#define DEFAULT_LIMIT_MIN_C_DEG -540.0f
-#define DEFAULT_LIMIT_MAX_C_DEG 540.0f
-#define DEFAULT_LIMIT_MIN_A_DEG -540.0f
-#define DEFAULT_LIMIT_MAX_A_DEG 540.0f
+#define DEFAULT_LIMIT_MIN_C_DEG -360.0f
+#define DEFAULT_LIMIT_MAX_C_DEG 360.0f
+#define DEFAULT_LIMIT_MIN_A_DEG -360.0f
+#define DEFAULT_LIMIT_MAX_A_DEG 360.0f
 #define DEFAULT_MAX_Z_STEPS 38400
 #define DEFAULT_Z_PULLEY_TEETH 20U // Polia padrão GT2 20 dentes no motor Z
 
 #define DEFAULT_NODE_ID 1
-#define DEFAULT_CAN_ENABLED 0
+#define DEFAULT_CAN_ENABLED 1
 #define DEFAULT_CAN_COMMAND_BASE_ID 0x200
 #define DEFAULT_CAN_STATUS_BASE_ID 0x280
 #define DEFAULT_CAN_EVENT_BASE_ID 0x300
-#define DEFAULT_CAN_BITRATE 500000
+// 1 Mbps: metade do tempo de barramento por frame (streaming U de 10 nos). Nos ja gravados
+// mantem o bitrate da NVS ate receberem CAN_OP_SET_BITRATE (comando CANBR do Teensy).
+#define DEFAULT_CAN_BITRATE 1000000
 
 #define Z_RESCUE_TIMEOUT_STEPS 4000
 #define Z_HOME_SEARCH_LIMIT_STEPS 30000
@@ -132,9 +134,18 @@
 #define DEFAULT_SPEED_MAX_DEG_S_XY DEFAULT_SPEED_MAX_DEG_S_CA
 #define DEFAULT_SPEED_MAX_MM_S_Z   300.0f
 // Aceleração máxima em deg/s² para C/A, mm/s² para Z
-#define DEFAULT_ACCEL_MAX_DEG_S2_CA 3600.0f
+#define DEFAULT_ACCEL_MAX_DEG_S2_CA 7200.0f
 #define DEFAULT_ACCEL_MAX_DEG_S2_XY DEFAULT_ACCEL_MAX_DEG_S2_CA
-#define DEFAULT_ACCEL_MAX_MM_S2_Z    2000.0f
+#define DEFAULT_ACCEL_MAX_MM_S2_Z    4000.0f
+
+// Velocidade/aceleracao em uso por padrao (abaixo dos maximos acima)
+#define DEFAULT_SPEED_DEG_S_CA 360.0f
+#define DEFAULT_SPEED_MM_S_Z   250.0f
+#define DEFAULT_ACCEL_DEG_S2_CA 3600.0f
+#define DEFAULT_ACCEL_MM_S2_Z   2000.0f
+// Jerk do seguidor em tempo real (U/jog): curva S de ~40 ms na aceleracao maxima
+#define DEFAULT_TRACK_JERK_DEG_S3_CA 180000.0f
+#define DEFAULT_TRACK_JERK_MM_S3_Z   100000.0f
 
 // --- Limites mínimos/máximos para validação ---
 #define SPEED_MIN_DEG_S_CA 0.1f
@@ -294,6 +305,7 @@ typedef struct {
     uint8_t motion_engine;               // MOTION_ENGINE_STREAM (padrao) ou MOTION_ENGINE_LEGACY
     uint8_t lookahead;                   // 1 = encadeia movimentos consecutivos sem parar entre eles
     float jerk[AXIS_COUNT];              // salto maximo de velocidade por eixo numa juncao (deg/s, deg/s, mm/s)
+    float track_jerk[AXIS_COUNT];        // jerk do seguidor U/jog (deg/s^3, deg/s^3, mm/s^3); 0 = sem curva S
 } ext_settings_t;
 
 #define MOTION_ENGINE_LEGACY 0U
@@ -305,7 +317,8 @@ typedef struct {
         .stealth_max_speed = {180.0f, 180.0f, 60.0f}, \
         .motion_engine = MOTION_ENGINE_STREAM,        \
         .lookahead = 1U,                              \
-        .jerk = {15.0f, 15.0f, 10.0f},                \
+        .jerk = {30.0f, 30.0f, 15.0f},                \
+        .track_jerk = {DEFAULT_TRACK_JERK_DEG_S3_CA, DEFAULT_TRACK_JERK_DEG_S3_CA, DEFAULT_TRACK_JERK_MM_S3_Z}, \
     }
 
 typedef struct {
@@ -338,7 +351,7 @@ typedef struct {
         .tmc_spreadcycle = {0, 0, 0},        \
         .steps_per_rev = {200, 200, 200},    \
         .speed_delay_us = {400, 400, 400},   \
-        .accel = {1800.0f, 1800.0f, 1000.0f}, \
+        .accel = {DEFAULT_ACCEL_DEG_S2_CA, DEFAULT_ACCEL_DEG_S2_CA, DEFAULT_ACCEL_MM_S2_Z}, \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_DEG_S_CA, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_DEG_S2_CA, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .z_pulley_teeth = DEFAULT_Z_PULLEY_TEETH, \
@@ -350,7 +363,7 @@ typedef struct {
         .limit_max_c_deg = DEFAULT_LIMIT_MAX_C_DEG, \
         .limit_min_a_deg = DEFAULT_LIMIT_MIN_A_DEG, \
         .limit_max_a_deg = DEFAULT_LIMIT_MAX_A_DEG, \
-        .speed = {140.0f, 140.0f, 250.0f}, \
+        .speed = {DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_MM_S_Z}, \
         .home_raw = {0, 0} \
     }
 
@@ -364,7 +377,7 @@ typedef struct {
         .fan_mode = FAN_MODE_MANUAL_OFF,  \
         .laser_level = {0, 0},            \
         .speed_delay_us = {400, 400, 400}, \
-        .speed = {140.0f, 140.0f, 250.0f}, \
+        .speed = {DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_DEG_S_CA, DEFAULT_SPEED_MM_S_Z}, \
         .speed_max = {DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_DEG_S_XY, DEFAULT_SPEED_MAX_MM_S_Z}, \
         .accel_max = {DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_DEG_S2_XY, DEFAULT_ACCEL_MAX_MM_S2_Z}, \
         .atual_z = 0,                     \

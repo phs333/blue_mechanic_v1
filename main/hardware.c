@@ -1268,6 +1268,7 @@ static esp_err_t init_led_pwm(app_context_t *ctx)
 }
 
 static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw);
+static int32_t encoder_counts_in_turn(const encoder_tracker_t *tracker, uint16_t raw);
 
 /*
  * Saude dos encoders: apos falhas seguidas o encoder fica "offline" — um log explicativo
@@ -1306,6 +1307,9 @@ static void encoder_mark_result(size_t idx, esp_err_t err)
     h->consecutive_fails++;
     if (!h->offline && h->consecutive_fails >= ENCODER_OFFLINE_AFTER_FAILS) {
         h->offline = true;
+        // Sem amostras a contagem incremental de voltas perde a referencia: ao voltar,
+        // a volta e escolhida pela posicao prevista do firmware (update_encoder_tracker).
+        s_encoder_trackers[idx].initialized = false;
         ESP_LOGE(APP_TAG, "Encoder %c sem resposta no I2C (%s). %s Nova tentativa a cada %d ms; use DIAG.",
                  name, esp_err_to_name(err),
                  (err == ESP_ERR_TIMEOUT)
@@ -1360,15 +1364,7 @@ static esp_err_t read_encoder_raw(size_t encoder_index, uint16_t *raw_val, int32
                 if (ticks_from_home != NULL) {
                     update_encoder_tracker(encoder_index, raw);
                     const encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
-                    int32_t diff_raw = (int32_t)raw - (int32_t)tracker->home_raw;
-                    int32_t raw_counts_in_turn = diff_raw;
-                    while (raw_counts_in_turn < 0) {
-                        raw_counts_in_turn += 4096;
-                    }
-                    while (raw_counts_in_turn >= 4096) {
-                        raw_counts_in_turn -= 4096;
-                    }
-                    *ticks_from_home = (tracker->turns * 4096) + raw_counts_in_turn;
+                    *ticks_from_home = (tracker->turns * 4096) + encoder_counts_in_turn(tracker, raw);
                 }
             }
             xSemaphoreGive(s_i2c_mutex);
@@ -1428,33 +1424,47 @@ void hardware_print_diag(void)
     }
 }
 
+static int32_t encoder_counts_in_turn(const encoder_tracker_t *tracker, uint16_t raw)
+{
+    int32_t counts = ((int32_t)raw - (int32_t)tracker->home_raw) % 4096;
+    return (counts < 0) ? counts + 4096 : counts;
+}
+
+/*
+ * Contagem de voltas incremental: a safety_task le os encoders a cada 20 ms, entao
+ * entre duas amostras o eixo anda bem menos de meia volta (720 deg/s -> 14 deg) e o
+ * salto 4095<->0 identifica a volta sem ambiguidade, inclusive DURANTE o movimento.
+ *
+ * A posicao prevista pelo firmware (pos_c_deg/pos_a_deg) so e usada para escolher a
+ * volta quando nao ha amostra anterior confiavel (boot ou retorno de encoder offline):
+ * ela so e atualizada ao fim de cada movimento, entao usa-la em toda leitura (como na
+ * versao anterior) errava 360 deg no meio de movimentos > 180 deg e apos o jog.
+ */
 static void update_encoder_tracker(size_t encoder_index, uint16_t curr_raw)
 {
     encoder_tracker_t *tracker = &s_encoder_trackers[encoder_index];
-    int32_t diff_raw = (int32_t)curr_raw - (int32_t)tracker->home_raw;
-    int32_t raw_counts_in_turn = diff_raw;
-    while (raw_counts_in_turn < 0) {
-        raw_counts_in_turn += 4096;
-    }
-    while (raw_counts_in_turn >= 4096) {
-        raw_counts_in_turn -= 4096;
-    }
-    float raw_turn_deg = ((float)raw_counts_in_turn * 360.0f) / 4096.0f;
+    int32_t curr_counts = encoder_counts_in_turn(tracker, curr_raw);
 
-    float expected_deg = 0.0f;
-    if (s_hw_ctx != NULL) {
-        expected_deg = (encoder_index == 0) ? s_hw_ctx->state.pos_c_deg : s_hw_ctx->state.pos_a_deg;
-        if (!isfinite(expected_deg)) {
-            expected_deg = 0.0f;
+    if (tracker->initialized) {
+        int32_t delta = curr_counts - encoder_counts_in_turn(tracker, tracker->last_raw);
+        if (delta < -2048) {
+            tracker->turns++;  // passou de 4095 para 0 no sentido horario (+)
+        } else if (delta > 2048) {
+            tracker->turns--;  // passou de 0 para 4095 no sentido anti-horario (-)
         }
-    } else if (tracker->initialized) {
-        expected_deg = (float)tracker->turns * 360.0f + raw_turn_deg;
+    } else {
+        float expected_deg = 0.0f;
+        if (s_hw_ctx != NULL) {
+            expected_deg = (encoder_index == 0) ? s_hw_ctx->state.pos_c_deg : s_hw_ctx->state.pos_a_deg;
+            if (!isfinite(expected_deg)) {
+                expected_deg = 0.0f;
+            }
+        }
+        float raw_turn_deg = ((float)curr_counts * 360.0f) / 4096.0f;
+        tracker->turns = (int32_t)lroundf((expected_deg - raw_turn_deg) / 360.0f);
+        tracker->initialized = true;
     }
-
-    int32_t turns = (int32_t)lroundf((expected_deg - raw_turn_deg) / 360.0f);
-    tracker->turns = turns;
     tracker->last_raw = curr_raw;
-    tracker->initialized = true;
 }
 
 void hardware_update_encoders(void)

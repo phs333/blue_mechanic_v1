@@ -17,6 +17,9 @@ esp_err_t motion_request_stop(app_context_t *ctx);
  * persegue o alvo com a velocidade/aceleracao da NVS, em segmentos de 10 ms no stream RMT,
  * respeitando limites de C/A (encoder) e o curso/bloqueio do Z. Encerra sozinho quando ocioso. */
 esp_err_t motion_jog_add(app_context_t *ctx, float d_c, float d_a, float d_z);
+/* Alvo absoluto em streaming (U/TouchDesigner): C/A em graus, Z em passos. O motor
+ * persegue sempre o alvo mais recente, sem fila nem parada entre alvos. */
+esp_err_t motion_track_set(app_context_t *ctx, float c_deg, float a_deg, int32_t z_steps, bool force_no_encoder);
 
 /* Nivel de velocidade 1..5 (mesma tabela de CAN_OP_SPEED) aplicado aos eixos C/A em uso. */
 esp_err_t motion_apply_speed_level(app_context_t *ctx, uint8_t level);

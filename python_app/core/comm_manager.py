@@ -78,7 +78,7 @@ class CommManager(QObject):
             self.backend_type = "TEENSY"
         return success
 
-    def connect_can(self, channel: str = "PCAN_USBBUS1", bitrate: int = 500000, 
+    def connect_can(self, channel: str = "PCAN_USBBUS1", bitrate: int = 1000000, 
                     node_id: int = 1, cmd_base: int = 0x200, status_base: int = 0x280, 
                     event_base: int = 0x300, interface: str = "pcan") -> bool:
         self.disconnect_all()
